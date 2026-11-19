@@ -739,24 +739,16 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
         }
     }
 
-    /// 默认封面：程序化画一张深色渐变底 + ♪，不用额外带资源文件。
-    /// 只画一次，后面复用同一张。
+    /// 默认封面：纯白（2026-11-19 倒置+恒蓝修复时改的）。
+    /// 之前是深蓝灰渐变底 + ♪（顶 RGB(36,36,61) → 底 RGB(10,10,23)，B 通道
+    /// 恒大于 R/G）：封面拉不到时锁屏上就是一张蓝图，是“颜色一直是蓝的”
+    /// 的第二条链路。用户偏好是“无封面用白色”，原生版 `defaultCoverImage`
+    /// 也一直是纯白，这里改成纯白、去掉 ♪，两边一致；只画一次，后面复用。
     private static let defaultCover: UIImage = {
         let size = CGSize(width: 1000, height: 1000)
         return UIGraphicsImageRenderer(size: size).image { ctx in
-            let top = UIColor(red: 0.14, green: 0.14, blue: 0.24, alpha: 1).cgColor
-            let bottom = UIColor(red: 0.04, green: 0.04, blue: 0.09, alpha: 1).cgColor
-            let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
-                                  colors: [top, bottom] as CFArray, locations: [0, 1])!
-            ctx.cgContext.drawLinearGradient(grad, start: .zero,
-                                             end: CGPoint(x: 0, y: size.height), options: [])
-            let note = NSAttributedString(string: "♪", attributes: [
-                .font: UIFont.systemFont(ofSize: 420),
-                .foregroundColor: UIColor.white.withAlphaComponent(0.85),
-            ])
-            let nsSize = note.size()
-            note.draw(at: CGPoint(x: (size.width - nsSize.width) / 2,
-                                  y: (size.height - nsSize.height) / 2))
+            UIColor.white.setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
         }
     }()
 

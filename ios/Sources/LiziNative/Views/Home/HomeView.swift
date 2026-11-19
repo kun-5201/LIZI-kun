@@ -7,30 +7,28 @@ import SwiftUI
 ///    右侧搜索（进搜索页）与设置齿轮。
 /// 2. Hero 大卡（HeroCardView）。
 /// 3. 平台条（PlatformStripView）：7 家平台横排，点按切台。
-/// 4. 来源 chips（SourceChipsView）：每日推荐 / 精选 / 我的喜欢 /
+/// 4. 来源 chips（SourceChipsView）：每日推荐 / 精选 / 喜欢（标题按平台取真名） /
 ///    我收藏的歌单 / 电台——P1 用横向 chips，球面滚轮是 P3 打磨项。
+/// 4b. 大厅工具区（P3 r19 集成）：形态长廊入口卡，进 .forms 整页；
+///    球面画廊入口在长廊页内（FormsGalleryView 右下角悬浮按钮），
+///    不在首页重复占位；壳版其余三张卡（我的专辑 / 音乐实验室 / 工具箱）
+///    里我的专辑已有 MyAlbumsEntryView，另两项是 P4 的活，不放死入口。
 /// 5. 内容区：每日推荐 = 跑马带；其余来源 = rail 行（P2：标题 + 横向卡片 +
 ///    点开展开，见 RailRowView；点卡片 / 点展开都进 RailDetailView）。
 /// 6. 本地音乐区占位（P4 的活，只留行，不放假列表）。
 ///
-/// 设置齿轮的决定（P1）：保留齿轮按钮，点按后在本页顶部出现一行空态提示
-/// 「设置页 P3 上线」，再点提示可关掉——不是死按钮，也不提前做设置页。
-/// P0 脚手架的构建信息行（LiziNativeBuildInfo）已从首页撤下，
-/// 构建信息改由 P3 设置页「关于 → 构建」展示。
+/// 设置齿轮的决定（P3-C）：点按进设置页（AppNavigation.settings），
+/// P1 的空态提示横幅已撤掉。
 struct HomeView: View {
     @EnvironmentObject var playback: PlaybackStore
     @EnvironmentObject var nav: AppNavigation
     @StateObject private var viewModel = HomeViewModel()
-    @State private var showSettingsNote = false
 
     var body: some View {
         GeometryReader { outer in
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     topBar
-                    if showSettingsNote {
-                        settingsNoteBanner
-                    }
                     HeroCardView(
                         width: outer.size.width - 32,
                         viewHeight: outer.size.height,
@@ -41,6 +39,8 @@ struct HomeView: View {
                     PlatformStripView(viewModel: viewModel)
 
                     SourceChipsView(viewModel: viewModel)
+
+                    toolsRow
 
                     if viewModel.selectedSource == .daily {
                         DailyMarqueeView(
@@ -57,8 +57,11 @@ struct HomeView: View {
                     } else if let kind = viewModel.selectedSource.railKind {
                         // P2：四条 rails 各一行（标题 + 横向卡片 + 点开展开）。
                         // 点卡片进详情（RailDetailView），不在行里直接播。
+                        // 喜欢 rail 的标题按当前平台取真名（displayTitle），
+                        // 与来源 chip、空态文案、详情页标题同一份事实来源。
                         RailRowView(
                             kind: kind,
+                            platform: viewModel.selectedPlatform,
                             result: viewModel.rails[kind],
                             isLoading: viewModel.railLoading[kind] ?? false,
                             onExpand: { viewModel.openRail(kind) },
@@ -97,12 +100,51 @@ struct HomeView: View {
             }
         }
         .onChange(of: playback.isLiked) { _ in
-            // 星标变了：正在看「我的喜欢」时刷新该 rail（本地星标兜底的平台
+            // 星标变了：正在看喜欢 rail 时刷新该 rail（本地星标兜底的平台
             // 靠这一刷把新点的星标列进来）。
             if viewModel.selectedSource == .liked {
                 Task { await viewModel.loadRail(.liked) }
             }
         }
+    }
+
+    // MARK: - 大厅工具区（P3 r19 集成）
+
+    /// 壳版大厅底部四张入口卡（形态长廊 / 我的专辑 / 音乐实验室 / 工具箱）；
+    /// 原生版 P3 只建成了形态长廊（.forms 整页）与球面画廊（.gallery），
+    /// 我的专辑已有 MyAlbumsEntryView（收藏歌单 rail 区），其余两项是 P4 的活。
+    /// 首页工具区只放形态长廊一张卡，不放死入口；球面画廊入口在长廊页内
+    /// （FormsGalleryView 右下角悬浮按钮）。
+    private var toolsRow: some View {
+        Button(action: { nav.show(.forms) }) {
+            HStack(spacing: 12) {
+                Image(systemName: "square.grid.3x3")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(LiziTokens.accent)
+                    .frame(width: 44, height: 44)
+                    .background(LiziTokens.paper2)
+                    .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("形态长廊")
+                        .font(.liziBody(size: LiziTokens.size16, weight: .semibold))
+                        .foregroundColor(LiziTokens.ink)
+                    Text("\(StageCatalog.menuList(includeClassic: false, releaseOnly: false).count) 种形态 · 点进舞台")
+                        .font(.liziBody(size: LiziTokens.size13))
+                        .foregroundColor(LiziTokens.ink3)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(LiziTokens.ink3)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(LiziTokens.paper2)
+            .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("形态长廊")
+        .padding(.horizontal, 16)
     }
 
     // MARK: - 顶栏
@@ -127,7 +169,7 @@ struct HomeView: View {
                     .clipShape(Circle())
             }
             .accessibilityLabel("搜索")
-            Button(action: { showSettingsNote.toggle() }) {
+            Button(action: { nav.show(.settings) }) {
                 Image(systemName: "gearshape")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(LiziTokens.ink2)
@@ -135,30 +177,8 @@ struct HomeView: View {
                     .background(LiziTokens.paper2)
                     .clipShape(Circle())
             }
-            .accessibilityLabel("设置（P3 上线）")
+            .accessibilityLabel("设置")
         }
-        .padding(.horizontal, 16)
-    }
-
-    private var settingsNoteBanner: some View {
-        Button(action: { showSettingsNote = false }) {
-            HStack(spacing: 8) {
-                Image(systemName: "gearshape")
-                    .foregroundColor(LiziTokens.ink3)
-                Text("设置页 P3 上线，这里先是空态。点一下关掉。")
-                    .font(.liziBody(size: LiziTokens.size13))
-                    .foregroundColor(LiziTokens.ink2)
-                Spacer()
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(LiziTokens.ink3)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(LiziTokens.paper2)
-            .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
-        }
-        .buttonStyle(.plain)
         .padding(.horizontal, 16)
     }
 }
@@ -175,10 +195,16 @@ struct HomeView: View {
 ///   magnification 手势）。
 private struct RailRowView: View {
     let kind: RailKind
+    /// 当前平台：喜欢 rail 的标题按平台取真名（`displayTitle`），
+    /// 不能只凭 kind 定。
+    let platform: String
     let result: RailResult?
     let isLoading: Bool
     let onExpand: () -> Void
     let onRetry: () -> Void
+
+    /// 行标题（喜欢 rail 按平台取真名，其余 rail 固定名）。
+    private var displayTitle: String { kind.displayTitle(platform: platform) }
 
     /// 行里只放可点的卡片，分组说明卡跳过（只在详情页出现）。
     private var cards: [RailEntry] {
@@ -191,7 +217,7 @@ private struct RailRowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center) {
-                Text(kind.title)
+                Text(displayTitle)
                     .font(.liziDisplay(size: LiziTokens.size20))
                     .foregroundColor(LiziTokens.ink)
                 Spacer()
@@ -205,14 +231,14 @@ private struct RailRowView: View {
                         }
                         .foregroundColor(LiziTokens.ink2)
                     }
-                    .accessibilityLabel("展开\(kind.title)")
+                    .accessibilityLabel("展开\(displayTitle)")
                 }
             }
             Group {
                 if isLoading {
                     HStack(spacing: 8) {
                         ProgressView()
-                        Text("正在拉取\(kind.title)…")
+                        Text("正在拉取\(displayTitle)…")
                             .font(.liziBody(size: LiziTokens.size13))
                             .foregroundColor(LiziTokens.ink3)
                     }
@@ -308,10 +334,10 @@ private struct RailRowView: View {
 
     private func railCardLabel(_ entry: RailEntry) -> String {
         switch entry {
-        case .track(let track): return "打开\(kind.title)：\(track.title)"
-        case .playlist(let playlist): return "打开\(kind.title)：\(playlist.title)"
-        case .station(let station): return "打开\(kind.title)：\(station.name)"
-        case .groupHeader: return kind.title
+        case .track(let track): return "打开\(displayTitle)：\(track.title)"
+        case .playlist(let playlist): return "打开\(displayTitle)：\(playlist.title)"
+        case .station(let station): return "打开\(displayTitle)：\(station.name)"
+        case .groupHeader: return displayTitle
         }
     }
 }

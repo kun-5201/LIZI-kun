@@ -32,7 +32,9 @@ struct LXSourceMeta: Codable {
     /// inited 上报的、带 musicUrl 的平台（去掉 'local' 伪源），如 ["tx", "wy"]。
     var platforms: [String]
     /// "url" = URL 导入（有 sourceUrl，可刷新）/ "local" = 本地文件导入。
-    /// 旧版预装的内置源 origin 是 "builtin"，list() 里启动时清掉（见 purgeBuiltinSources）。
+    /// "sponsored" = 赞助版内置源（构建机 secret 拉进包的 linglan.js，
+    /// 默认启用、可关不可删）。旧版预装的内置源 origin 是 "builtin"，
+    /// list() 里启动时清掉（见 purgeBuiltinSources）。
     var origin: String
     /// URL 导入的源地址（已转 raw）；本地源为 nil，旧记录补绑后才有。
     var sourceUrl: String?
@@ -134,6 +136,18 @@ enum LXSourceStore {
         return v.isEmpty ? nil : v
     }
 
+    /// 显示名清洗（只做显示处理，不做过期判断）：去掉脚本名里
+    /// "[过期: …]" 一类的后缀段。用户 2026-11-19 02:25 已纠正：这个
+    /// 音源没有过期，显示名里的 [过期: …] 不是真过期，不要再往过期
+    /// 方向查；这里只洗显示名，不改任何过期逻辑（本来就没有）。
+    static func displayName(_ raw: String) -> String {
+        var s = raw
+        if let r = s.range(of: #"\[过期:[^\]]*\]"#, options: .regularExpression) {
+            s.removeSubrange(r)
+        }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: 清单读写（调用方已在 ioQueue 上，不再 sync，避免死锁）
 
     static func loadManifest() -> [LXSourceMeta] {
@@ -182,8 +196,11 @@ final class LXSourceRegistry {
     /// 要求删掉全部 20 个预装源）：升级后用户手机上已经导入的那批也在
     /// 这里清掉——manifest 记录 + 脚本文件 + 运行实例一起删；没有内置
     /// 源时这步什么都不做。只留用户自己加的自定义源。
+    /// 读列表前先看包里有没有赞助版内置脚本（有就注册，没有就静默跳过）：
+    /// 壳版包里没有 LXSponsored 目录，调用是空操作，壳版行为不变。
     func list() -> [LXSourceMeta] {
-        ioQueue.sync {
+        registerBundledSponsoredSourceIfPresent()
+        return ioQueue.sync {
             purgeBuiltinSources()
             return LXSourceStore.loadManifest()
         }
@@ -204,18 +221,91 @@ final class LXSourceRegistry {
         UserDefaults.standard.removeObject(forKey: "lxSourcesSeededV1")
     }
 
+    // MARK: - 赞助版内置源（构建机 secret 拉取进包）
+
+    /// 赞助版内置源的固定清单 id：包内脚本更新时复用同一条记录，不重复建。
+    static let sponsoredSourceId = "sponsored-linglan"
+    /// 赞助版内置源的展示名（脚本 @name 自带 "[过期: …]" 后缀，validate()
+    /// 里已洗掉；这里再统一成全角括号的规范名）。
+    static let sponsoredDisplayName = "聆澜音源（赞助版）"
+
+    /// 包内存在 Resources/LXSponsored/linglan.js 时注册为内置源，默认启用、
+    /// 可关不可删（origin "sponsored"，delete() 拒绝删它）；包内没有该文件
+    ///（本地开发构建、secret 未配）时静默不出现，不报错、不留占位。
+    /// 脚本内容不硬编码进 Swift：只读包内文件，校验（validate()：跑起来 +
+    /// inited 上报 musicUrl 平台）通过才落盘进 lx-sources 目录；校验失败
+    /// 同样静默跳过。幂等：已注册且脚本未变时直接返回；脚本更新时刷新文件
+    /// 与元数据（版本/作者/平台/sha），保留用户的启用开关。
+    /// 壳版包里没有 LXSponsored 目录，Bundle 查找返回 nil，整段是空操作。
+    /// 调用点：LiziNativeApp init + list() 开头（自愈：init 时机万一错过，
+    /// 第一次读列表时补注册）。validate() 内部走 jsQueue，与 ioQueue 不
+    /// 嵌套；这里先校验（ioQueue 之外），再进 ioQueue 写清单，不死锁。
+    func registerBundledSponsoredSourceIfPresent() {
+        guard let url = Bundle.main.url(forResource: "linglan", withExtension: "js", subdirectory: "LXSponsored") else { return }
+        guard let script = try? String(contentsOf: url, encoding: .utf8),
+              !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let validated: (name: String, version: String, author: String, platforms: [String], instance: LXScriptInstance)
+        do {
+            validated = try validate(script: script, displayName: Self.sponsoredDisplayName)
+        } catch {
+            return
+        }
+        let sha = LXSourceStore.sha256Hex(script)
+        ioQueue.sync {
+            var manifest = LXSourceStore.loadManifest()
+            if let i = manifest.firstIndex(where: { $0.id == Self.sponsoredSourceId }) {
+                guard manifest[i].sha256 != sha else { return }
+                var updated = manifest[i]
+                updated.name = Self.sponsoredDisplayName
+                updated.version = validated.version
+                updated.author = validated.author
+                updated.platforms = validated.platforms
+                updated.sha256 = sha
+                try? Data(script.utf8).write(to: LXSourceStore.scriptURL(id: Self.sponsoredSourceId), options: .atomic)
+                manifest[i] = updated
+                LXSourceStore.saveManifest(manifest)
+                replaceInstance(id: Self.sponsoredSourceId, instance: validated.instance)
+                return
+            }
+            let meta = LXSourceMeta(
+                id: Self.sponsoredSourceId,
+                name: Self.sponsoredDisplayName,
+                version: validated.version,
+                author: validated.author,
+                platforms: validated.platforms,
+                origin: "sponsored",
+                sourceUrl: nil,
+                enabled: true,
+                importedAt: Date().timeIntervalSince1970,
+                sha256: sha
+            )
+            do {
+                try FileManager.default.createDirectory(at: LXSourceStore.directory, withIntermediateDirectories: true)
+                try Data(script.utf8).write(to: LXSourceStore.scriptURL(id: Self.sponsoredSourceId), options: .atomic)
+            } catch { return }
+            manifest.append(meta)
+            LXSourceStore.saveManifest(manifest)
+            replaceInstance(id: Self.sponsoredSourceId, instance: validated.instance)
+        }
+    }
+
     // MARK: - 导入
 
     /// 从 URL 导入：GitHub 链接先转 raw 再拉取，校验后落盘。
+    /// 注意：用户粘贴的 URL 原文绝不写进任何日志/报告——诊断日志里只用
+    /// 主机名或通用标签（URL 可能含私人仓库路径 / token 参数）。
     func importFromURL(_ urlString: String) async throws -> LXSourceMeta {
         let raw = LXSourceStore.githubRawURL(urlString)
         guard let url = URL(string: raw), let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else {
-            LXSourceStore.diagLog(sourceName: urlString, step: "fetch", reason: "脚本 URL 无效", host: "")
+            let hostLabel = URL(string: raw)?.host ?? "脚本 URL"
+            LXSourceStore.diagLog(sourceName: hostLabel, step: "fetch", reason: "脚本 URL 无效", host: hostLabel == "脚本 URL" ? "" : hostLabel)
             throw NSError(domain: "LXSources", code: 400, userInfo: [NSLocalizedDescriptionKey: "脚本 URL 无效"])
         }
         let fallbackName = url.deletingPathExtension().lastPathComponent
-        let script = try await fetchScript(url: url, displayName: fallbackName.isEmpty ? urlString : fallbackName)
+        // 文件名取不到时用主机名当展示名，绝不用 URL 原文（见上）。
+        let displayName = fallbackName.isEmpty ? (url.host ?? "脚本") : fallbackName
+        let script = try await fetchScript(url: url, displayName: displayName)
         return try importScript(script: script, nameHint: fallbackName.isEmpty ? nil : fallbackName,
                                 origin: "url", sourceUrl: raw)
     }
@@ -236,6 +326,11 @@ final class LXSourceRegistry {
         }
         guard resp.statusCode == 200 else {
             let reason = "拉取脚本失败（HTTP \(resp.statusCode)）"
+            LXSourceStore.diagLog(sourceName: displayName, step: "fetch", reason: reason, host: host)
+            throw NSError(domain: "LXSources", code: 400, userInfo: [NSLocalizedDescriptionKey: reason])
+        }
+        guard data.count <= LXSourceStore.maxScriptBytes else {
+            let reason = "脚本过大（超过 1MB）"
             LXSourceStore.diagLog(sourceName: displayName, step: "fetch", reason: reason, host: host)
             throw NSError(domain: "LXSources", code: 400, userInfo: [NSLocalizedDescriptionKey: reason])
         }
@@ -292,11 +387,16 @@ final class LXSourceRegistry {
     // MARK: - 删除 / 开关 / 刷新
 
     /// 删除源：脚本文件 + manifest 记录 + 运行实例一起清掉。
+    /// 内置源（origin == "builtin"）不可删、只能关——list() 启动时已清掉
+    /// 旧版预装的那批，这里是防御：万一哪天又有内置源进清单，删除也删
+    /// 不掉它，只能在设置页关掉（setEnabled）。赞助版内置源
+    ///（origin == "sponsored"）同样可关不可删。
     @discardableResult
     func delete(id: String) -> Bool {
         ioQueue.sync {
             var manifest = LXSourceStore.loadManifest()
             guard let i = manifest.firstIndex(where: { $0.id == id }) else { return false }
+            guard manifest[i].origin != "builtin" && manifest[i].origin != "sponsored" else { return false }
             manifest.remove(at: i)
             LXSourceStore.saveManifest(manifest)
             try? FileManager.default.removeItem(at: LXSourceStore.scriptURL(id: id))
@@ -567,7 +667,7 @@ final class LXSourceRegistry {
         }
         let alias: [String: String] = ["kuwo": "kw", "netease": "wy", "qq": "tx", "kugou": "kg", "migu": "mg"]
         let platforms = Array(Set(rawPlatforms.map { alias[$0] ?? $0 })).sorted()
-        let name = LXSourceStore.headerValue(script, "name")
+        let name = LXSourceStore.headerValue(script, "name").map(LXSourceStore.displayName)
         let version = LXSourceStore.headerValue(script, "version") ?? ""
         let author = LXSourceStore.headerValue(script, "author") ?? ""
         return (name ?? "自定义源", version, author, platforms, instance)

@@ -127,6 +127,15 @@ struct PlayerView: View {
                 .accessibilityLabel("搜索")
                 // 搜索页聚焦由搜索页负责：进搜索页时自动聚焦输入框（P1 搜索页 / 集成时接）。
 
+                // P3-A 舞台入口（壳版播放页抽屉「进入形态」对应物；顶栏常驻，
+                // 不用再开抽屉。进舞台默认用上次的形态）。
+                Button(action: { navigation.show(.stage()) }) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(PlayerTokens.playerForeground)
+                }
+                .accessibilityLabel("舞台")
+
                 Button(action: toggleQueuePanel) {
                     Image(systemName: "list.bullet")
                         .font(.system(size: 18, weight: .medium))
@@ -166,8 +175,7 @@ struct PlayerView: View {
     private var titleBlock: some View {
         VStack(spacing: 2) {
             Text(store.currentTrack?.title ?? "未在播放")
-                // 标题 39px；Fraunces 未打包进原生 target，用 DesignTokens 的
-                // liziDisplay（系统 serif 近似，见 Views/Home/DesignTokens.swift）。
+                // 标题 39px；Fraunces 已随包（见 DesignTokens.liziDisplay）。
                 .font(.liziDisplay(size: PlayerTokens.text3xl))
                 .foregroundStyle(PlayerTokens.playerForeground)
                 .lineLimit(1)

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// 平台条：7 家平台图标横排，点按切平台。
 ///
@@ -7,11 +8,11 @@ import SwiftUI
 /// - 切台只换数据、不拆音频（不碰 PlaybackStore）；未登录点图标直接进该平台
 ///   公开内容（Folia 式全功能），登录提示只在用到登录功能时出现——
 ///   P1 先做到切台 + 拉公开内容（每日推荐），登录流程本身在 P4。
-/// - 图标渲染：品牌色 + 首字 monogram 瓷砖（48pt，圆角 14）。
-///   public/assets/platforms/*.svg 是 iconfont 路径（每条约 1KB），
-///   手抄进 SwiftUI Path 容易抄错字形，P1 不逐字转录；
-///   P3 以 PDF/PNG 资源替换时只改 PlatformIconView，不动调用方。
-///   不联网拉图。
+/// - 图标渲染：真 logo（`Assets.xcassets` 里的 `Platform<Name>` imageset，
+///   由 `public/assets/platforms/*.svg` 渲染成 48/96/144 PNG；酷狗用自含
+///   蓝底的 `kugou.svg`，不用纯白的 `kugou-mark.svg`）。图标本身自带圆角
+///   底色与字形，这里只按 48pt 框定、描选中圈；不联网拉图。P1 的品牌色 +
+///   首字 monogram 瓷砖已撤下（字段保留在 `LiziPlatforms.Info` 作兜底）。
 struct PlatformStripView: View {
     @ObservedObject var viewModel: HomeViewModel
 
@@ -36,19 +37,28 @@ struct PlatformStripView: View {
     }
 }
 
-/// 单个平台图标：品牌色圆角瓷砖 + 首字；选中态描网易云红圈。
+/// 单个平台图标：真 logo 图（48pt，圆角 14 框定）；选中态描网易云红圈。
+/// logo 资源缺失时（资源没进包）回落旧的品牌色 + 首字瓷砖，不空白。
 struct PlatformIconView: View {
     let platform: LiziPlatforms.Info
     let selected: Bool
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: LiziTokens.radius14)
-                .fill(Color(hex: platform.brandHex))
-                .frame(width: 48, height: 48)
-            Text(platform.monogram)
-                .font(.liziDisplay(size: LiziTokens.size20))
-                .foregroundColor(platform.onBrandLight ? LiziTokens.ink : .white)
+            if UIImage(named: platform.assetName) != nil {
+                Image(platform.assetName)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 48, height: 48)
+                    .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius14))
+            } else {
+                RoundedRectangle(cornerRadius: LiziTokens.radius14)
+                    .fill(Color(hex: platform.brandHex))
+                    .frame(width: 48, height: 48)
+                Text(platform.monogram)
+                    .font(.liziDisplay(size: LiziTokens.size20))
+                    .foregroundColor(platform.onBrandLight ? LiziTokens.ink : .white)
+            }
         }
         .overlay(
             RoundedRectangle(cornerRadius: LiziTokens.radius14)

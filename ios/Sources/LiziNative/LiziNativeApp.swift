@@ -17,6 +17,10 @@ struct LiziNativeApp: App {
     private let nowPlayingCoordinator: NowPlayingCoordinator
 
     init() {
+        // 赞助版内置源：包内有 Resources/LXSponsored/linglan.js 时注册为
+        //「聆澜音源（赞助版）」（默认启用、可关不可删）；包内没有时静默
+        // 不出现。壳版包里没有该文件，调用是空操作。
+        LXSourceRegistry.shared.registerBundledSponsoredSourceIfPresent()
         let store = PlaybackStore()
         _playback = StateObject(wrappedValue: store)
         let island = NativeIslandCoordinator(store: store)

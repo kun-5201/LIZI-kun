@@ -17,6 +17,7 @@ import SwiftUI
 ///   平台限制）。
 struct RootView: View {
     @StateObject private var nav = AppNavigation()
+    @StateObject private var stageForms = StageFormStore()
     @State private var showAirPlay = false
 
     var body: some View {
@@ -28,6 +29,8 @@ struct RootView: View {
                 SearchViewWithBack()
             case .player:
                 PlayerView()
+            case .stage(let formId):
+                StageView(initialFormId: formId)
             case .playlist(let platform, let id, let isRank):
                 DetailWithBack {
                     PlaylistDetailView(platform: platform, id: id, isRank: isRank)
@@ -44,13 +47,26 @@ struct RootView: View {
                 DetailWithBack {
                     MyAlbumsView()
                 }
+            case .settings:
+                DetailWithBack {
+                    SettingsView()
+                }
             case .rail(let kind, let platform):
                 DetailWithBack {
                     RailDetailView(kind: RailKind(rawValue: kind) ?? .featured, platform: platform)
                 }
+            case .forms:
+                DetailWithBack {
+                    FormsGalleryView()
+                }
+            case .gallery:
+                DetailWithBack {
+                    SphereGalleryView()
+                }
             }
         }
         .environmentObject(nav)
+        .environmentObject(stageForms)
         .onOpenURL { url in
             handleDeepLink(url)
         }
@@ -60,6 +76,8 @@ struct RootView: View {
     }
 
     /// 深链路由：只认 `lizinative` scheme；host 为 now/airplay，其他一律忽略。
+    /// P3-B 增加：`lizinative://forms`（形态长廊）、`lizinative://gallery`
+    /// （球面画廊）、`lizinative://stage?id=001`（进指定形态的舞台页）。
     private func handleDeepLink(_ url: URL) {
         guard url.scheme == "lizinative" else { return }
         switch url.host {
@@ -67,6 +85,14 @@ struct RootView: View {
             nav.show(.player)
         case "airplay":
             showAirPlay = true
+        case "forms":
+            nav.show(.forms)
+        case "gallery":
+            nav.show(.gallery)
+        case "stage":
+            let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "id" })?.value
+            nav.show(.stage(formId: id))
         default:
             break
         }

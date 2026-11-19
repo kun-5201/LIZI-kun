@@ -7,7 +7,7 @@ import SwiftUI
 ///   其余四种来源在 P1 只有诚实空态——原生桥暂无对应列表接口，
 ///   不编假数据，P2 按平台逐个接：
 ///   - 精选：各平台精选接口待接。
-///   - 我的喜欢：只存了 id（PlaybackStore 的 likedTrackIds），
+///   - 喜欢 rail：只存了 id（PlaybackStore 的 likedTrackIds），
 ///     曲目详情待 P2 补全；P1 只报已喜欢的首数。
 ///   - 我收藏的歌单：收藏歌单列表接口待接。
 ///   - 电台：原生桥暂无电台接口，P2 先核查各平台官方接口再接。
@@ -20,7 +20,7 @@ struct SourceChipsView: View {
                 ForEach(HomeViewModel.Source.allCases, id: \.self) { source in
                     let selected = source == viewModel.selectedSource
                     Button(action: { viewModel.selectSource(source) }) {
-                        Label(source.title, systemImage: source.icon)
+                        Label(source.title(for: viewModel.selectedPlatform), systemImage: source.icon)
                             .font(.liziBody(size: LiziTokens.size13, weight: .medium))
                             .foregroundColor(selected ? .white : LiziTokens.ink2)
                             .padding(.horizontal, 14)
@@ -31,7 +31,7 @@ struct SourceChipsView: View {
                                 Capsule().stroke(LiziTokens.rule, lineWidth: selected ? 0 : 1)
                             )
                     }
-                    .accessibilityLabel("来源：\(source.title)")
+                    .accessibilityLabel("来源：\(source.title(for: viewModel.selectedPlatform))")
                 }
             }
             .padding(.horizontal, 16)

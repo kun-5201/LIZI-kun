@@ -77,18 +77,7 @@ struct TrackRowView: View {
     @ViewBuilder
     private var cover: some View {
         Group {
-            if let url = track.coverURL {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                    default:
-                        placeholder
-                    }
-                }
-            } else {
-                placeholder
-            }
+            ProxyImageView(url: track.coverURL) { placeholder }
         }
         .frame(width: coverSize, height: coverSize)
         .clipShape(RoundedRectangle(cornerRadius: SearchDesignTokens.radius10))

@@ -125,11 +125,7 @@ private struct MarqueeCard: View {
     var body: some View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 7) {
-                AsyncImage(url: track.coverURL) { image in
-                    image.resizable().aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    LiziTokens.paper2
-                }
+                ProxyImageView(url: track.coverURL) { LiziTokens.paper2 }
                 .frame(width: 156, height: 156)
                 .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
                 Text(track.title)

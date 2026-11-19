@@ -1,6 +1,7 @@
 import Foundation
 
-/// P2 四条 rails：精选 / 我的喜欢 / 我收藏的歌单 / 电台（`extension NativeBridge`）。
+/// P2 四条 rails：精选 / 喜欢 / 我收藏的歌单 / 电台（`extension NativeBridge`）。
+/// 喜欢 rail 的标题按平台取真名（见 `RailKind.likedTitle(for:)`）。
 ///
 /// 只加方法，不改 NativeBridge.swift 本体。端点照抄壳版 `public/api.js`，
 /// 逐平台映射照抄壳版 `public/app.js` 的 railFeatured / railLiked /
@@ -15,12 +16,20 @@ import Foundation
 ///   qishui → /api/qishui/feed（20）；bodian → /api/bodian/recommendations；
 ///   kuwo → /api/kuwo/recommend/playlists（12）/ ranks feed → /api/kuwo/rank/list；
 ///   applemusic → /api/applemusic/playlists（12）。
-/// - liked（我的喜欢）：netease → /api/session 取 userId 后 /api/user/playlist
-///   找 specialType==5（未登录 → 诚实空态「先登录」），再走 playlistDetail；
-///   qq → /api/qq/user/liked-songs（100）；qishui → /api/qishui/user/playlists
-///   找 isLikedPlaylist（type==1）再 /api/qishui/playlist/tracks；
-///   bodian → /api/bodian/liked_songs；kugou / kuwo / applemusic → 没有喜欢接口，
-///   只显示本地星标（PlaybackStore.likedTracks），没有就诚实空态写清原因。
+/// - liked（喜欢 rail，标题按平台取真名，唯一事实来源是
+///   `RailKind.likedTitle(for:)`；行标题 / 来源 chip / 空态文案 /
+///   详情页标题都从那里取，三处一致）：
+///   netease → 「我喜欢的音乐」（上游歌单 `name` 字段本名，
+///   specialType==5，未登录 → 诚实空态「先登录」），再走 playlistDetail；
+///   qq → 「我喜欢」（QQ dirid 201 收藏夹；接口只回曲目不回名字，
+///   名字见壳版 `public/app.js:11373` 注释「QQ → 我喜欢」）；
+///   qishui → 「我喜欢的音乐」（账号歌单里 `base_info.type==1` 那张，
+///   见 `specs/sidecars.md`「type=1 是账号的「我喜欢的音乐」歌单」），
+///   再 /api/qishui/playlist/tracks；
+///   bodian → 真名未核实到（fond 接口只回歌单对象、原生只取了 id，
+///   仓内无字面记载），保持「我的喜欢」，不编；
+///   kugou / kuwo / applemusic → 没有喜欢接口，rail 里只有本地星标，
+///   标题如实叫「本地星标收藏」，没有就诚实空态写清原因。
 /// - playlists（我收藏的歌单）：netease → /api/user/playlist，分我创建
 ///   （subscribed==false）/ 我收藏（subscribed==true），未登录 → 诚实空态；
 ///   qq / kugou / qishui / bodian → 各自 /api/<platform>/user/playlists
@@ -49,7 +58,7 @@ import Foundation
 ///   只显示诚实空态，不搭登录 UI。
 enum RailKind: String, CaseIterable, Hashable {
     case featured   // 精选
-    case liked      // 我的喜欢
+    case liked      // 喜欢 rail（标题按平台取真名，见 likedTitle）
     case playlists  // 我收藏的歌单
     case radio      // 电台
 
@@ -60,6 +69,39 @@ enum RailKind: String, CaseIterable, Hashable {
         case .playlists: return "我收藏的歌单"
         case .radio: return "电台"
         }
+    }
+
+    /// 喜欢 rail 按平台的真名（唯一事实来源；首页行标题、来源 chip、
+    /// 空态文案、详情页标题都从这里取，三处一致）。
+    /// - netease / qishui：「我喜欢的音乐」（上游歌单 `name` 字段本名：
+    ///   网易 specialType==5，见 `specs/netease.md:478`；汽水
+    ///   `base_info.type==1`，见 `specs/sidecars.md:496`）。
+    /// - qq：「我喜欢」（QQ 的 dirid 201 收藏夹，`QQ.swift`
+    ///   `userLikedSongs` 调 `CgiGetDiss disstid:0, dirid:201`；该接口
+    ///   只回曲目不回名字，名字见壳版 `public/app.js:11373` 注释
+    ///   「QQ → 我喜欢」，空态文案同款）。
+    /// - bodian：真名未核实到——fond 接口（`/api/service/playlist/fond`）
+    ///   只回歌单对象且原生只取了 id，仓内无字面记载；保持「我的喜欢」，
+    ///   不编。真机核实路径：登录后看 `/api/bodian/user/playlists` 里
+    ///   fond 那条的 `name` 字段（`bodianPlaylist` 已原样透传它）。
+    /// - kugou / kuwo / applemusic：无喜欢接口，rail 里只有本地星标，
+    ///   标题如实叫「本地星标收藏」（与 `railLocalLiked` 的 groupHeader
+    ///   文案同款），不冒充平台歌单名。
+    /// - 未知平台：回落到通用「我的喜欢」。
+    static func likedTitle(for platform: String) -> String {
+        switch platform {
+        case "netease": return "我喜欢的音乐"
+        case "qq": return "我喜欢"
+        case "qishui": return "我喜欢的音乐"
+        case "bodian": return "我的喜欢"
+        case "kugou", "kuwo", "applemusic": return "本地星标收藏"
+        default: return "我的喜欢"
+        }
+    }
+
+    /// 展示标题：只有 liked 按平台取真名，其余 rail 用固定 title。
+    func displayTitle(platform: String) -> String {
+        self == .liked ? Self.likedTitle(for: platform) : title
     }
 }
 
@@ -306,14 +348,14 @@ extension NativeBridge {
         }
     }
 
-    // MARK: - 我的喜欢
+    // MARK: - 喜欢 rail（标题按平台取真名，见 RailKind.likedTitle）
 
     static func railLiked(platform: String) async -> RailResult {
         switch platform {
         case "netease":
             guard let uid = await neteaseUserId() else {
                 return railEmpty(kind: .liked, platform: platform,
-                                 reason: "先在设置里登录网易云，才能看「我的喜欢」（登录流程在 P4，未登录时这里是空的）。")
+                                 reason: "先在设置里登录网易云，才能看「我喜欢的音乐」（登录流程在 P4，未登录时这里是空的）。")
             }
             guard let d = await call(path: "/api/user/playlist", query: ["uid": uid]) else {
                 return railFailed(kind: .liked, platform: platform)
@@ -376,7 +418,7 @@ extension NativeBridge {
             let tracks = railRows(d, keys: ["tracks"]).compactMap { Track.from(dict: $0, platform: platform) }
             return railDone(kind: .liked, platform: platform,
                             entries: tracks.map { RailEntry.track($0) },
-                            emptyReason: "波点的「我喜欢」是空的")
+                            emptyReason: "波点的「我的喜欢」是空的")
         case "kugou", "kuwo", "applemusic":
             // 这三家没有「我喜欢的音乐」列表接口：只显示本地星标（P2 起 PlaybackStore
             // 同时持久化完整 Track），没有就诚实空态写清原因，不编假数据。
@@ -387,8 +429,9 @@ extension NativeBridge {
         }
     }
 
-    /// 本地星标兜底（kugou / kuwo / applemusic 的「我的喜欢」）：
-    /// 有星标就列出来并在前面插一张说明卡，没有就诚实空态。
+    /// 本地星标兜底（kugou / kuwo / applemusic 的喜欢 rail，标题是
+    /// 「本地星标收藏」）：有星标就列出来并在前面插一张说明卡，
+    /// 没有就诚实空态。
     private static func railLocalLiked(kind: RailKind, platform: String) -> RailResult {
         let platformName = LiziPlatforms.all.first(where: { $0.id == platform })?.name ?? platform
         let local = PlaybackStore.likedTracks().filter { $0.platform == platform }

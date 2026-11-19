@@ -149,18 +149,7 @@ struct PlaylistDetailView: View {
     @ViewBuilder
     private func coverView(url: URL?) -> some View {
         Group {
-            if let url {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                    default:
-                        coverPlaceholder
-                    }
-                }
-            } else {
-                coverPlaceholder
-            }
+            ProxyImageView(url: url) { coverPlaceholder }
         }
         .frame(width: 120, height: 120)
         .clipShape(RoundedRectangle(cornerRadius: SearchDesignTokens.radius14))

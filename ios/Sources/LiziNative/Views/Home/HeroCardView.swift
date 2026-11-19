@@ -43,11 +43,7 @@ struct HeroCardView: View {
         ZStack(alignment: .bottomLeading) {
             // 底图：封面宽图；无封面时用纸面渐变兜底（不用金色占位）。
             if let url = track?.coverURL {
-                AsyncImage(url: url) { image in
-                    image.resizable().aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    LiziTokens.paper2
-                }
+                ProxyImageView(url: url) { LiziTokens.paper2 }
                 .frame(width: width, height: cardHeight)
                 .clipped()
             } else {

@@ -124,8 +124,7 @@ targets:
     type: application
     platform: iOS
     sources:
-      - Sources/LiziNative
-      # 壳版同款图标（只含 .xcassets 资源，不含任何壳代码）。
+      - Sources/LiziNative      # 壳版同款图标（只含 .xcassets 资源，不含任何壳代码）。
       - Sources/Lizi/Assets.xcassets
       # 共享后端：7 平台服务 + LX + 歌词 + 诊断 + 会话 + 加密 + 代理 + 本地文件 + 边车。
       - Sources/Lizi/Server/NetEase.swift
@@ -165,6 +164,35 @@ targets:
       - Sources/LiziNativeLiveActivity/LiziIslandIntents.swift
     dependencies:
       - target: LiziNativeLiveActivity
+    # P3-D 打磨：Fraunces 三档静态 TTF 随包（见 Sources/LiziNative/Fonts/
+    # README.md）。显式列进 resources（进包根目录，UIAppFonts 按文件名找）；
+    # Assets.xcassets（平台 logo）在 Sources/LiziNative 源码 glob 里，
+    # XcodeGen 按资源自动收，不另列。
+    resources:
+      - Sources/LiziNative/Fonts/Fraunces-Medium.ttf
+      - Sources/LiziNative/Fonts/Fraunces-SemiBold.ttf
+      - Sources/LiziNative/Fonts/Fraunces-Italic.ttf
+      # P3-B 画廊：本地 HTML 资源整目录进包（forms-labs 整页；目录结构
+      # 原样保留，`../vendor/` 相对路径才能解析；GalleryWebView 以 bundle
+      # 资源根目录为 readAccess 根，见 GalleryHTMLBundle）。
+      - Sources/LiziNative/Resources/GalleryHTML
+      # P3-A 舞台 + P3 r19 集成去重：形态文件只此一份完整拷贝进包
+      # （stages/*.html 69 个 + stages/assets/ 全部 83 个文件，形态相对
+      # 引用 assets/... 才能全解析）。`stages/` 全小写，与壳版 public/
+      # 下的相对引用 `stages/...` 同名；旧的第二份拷贝
+      # GalleryHTML/stages/（69 html + 15 个不全的 assets，约 27MB）
+      # 已删，长廊页的 stage-layer 改走 `../../stages/...`（见
+      # forms-labs/js/app.js stageSrc）。304-kidcore 的
+      # ../assets/fonts/ 字体放 Resources/assets/fonts/，与 stages/
+      # 平级，相对路径原样解析。
+      - Sources/LiziNative/Resources/stages
+      - Sources/LiziNative/Resources/assets
+      - Sources/LiziNative/Resources/LXSponsored
+      # 赞助版 LX 源：构建机上由 secret LX_SPONSORED_URL 拉取的 linglan.js
+      #（见 workflow ipa-native job「Fetch sponsored LX source script」），
+      # 目录进包后原生侧按 Bundle 子目录 LXSponsored 找。目录本地只有
+      # .gitkeep 占位（构建机上拉取步骤会写入 linglan.js）；secret 未配
+      # 时目录为空，原生侧静默不注册该源。
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lty5201.lizi-native
@@ -191,6 +219,13 @@ targets:
           - audio
         NSSupportsLiveActivities: true
         NSSupportsLiveActivitiesFrequentUpdates: true
+        # P3-D 打磨：Fraunces 随包字体注册（族名 Fraunces；文件见
+        # Sources/LiziNative/Fonts/，resources 负责拷进包）。
+        # 字体进包后 DesignTokens.liziDisplay 用 Font.custom("Fraunces")。
+        UIAppFonts:
+          - Fraunces-Medium.ttf
+          - Fraunces-SemiBold.ttf
+          - Fraunces-Italic.ttf
         UILaunchScreen: {}
         ITSAppUsesNonExemptEncryption: false
         NSAppTransportSecurity:

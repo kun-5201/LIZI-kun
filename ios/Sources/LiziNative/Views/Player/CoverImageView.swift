@@ -2,7 +2,8 @@ import SwiftUI
 
 /// 专辑封面图（封面流 / dock / 背景共用）。
 ///
-/// 有封面 URL 时用 `AsyncImage` 加载；无封面或加载失败时用白色占位
+/// 取图走 `ProxyImageView`（进程内 `/api/img` 代理 → 直链 → 占位三级兜底，
+/// 见 `CoverImageLoader.swift`）；无封面或加载失败时用白色占位
 /// （MEMORY：没有封面用白色，不用金色；绝不用 ♪ 冒充内容 —— 占位只是一个
 /// 静音的 music.note 图标，不是歌词也不是封面本身）。
 struct CoverImageView: View {
@@ -11,22 +12,7 @@ struct CoverImageView: View {
     var placeholderIconSize: CGFloat = 28
 
     var body: some View {
-        if let url {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .scaledToFill()
-                case .failure, .empty:
-                    placeholder
-                @unknown default:
-                    placeholder
-                }
-            }
-        } else {
-            placeholder
-        }
+        ProxyImageView(url: url) { placeholder }
     }
 
     private var placeholder: some View {

@@ -1,0 +1,5 @@
+# 占位：本目录由构建机在 ipa-native job 里用 Actions secret 拉取
+# 赞助版落雪音源脚本后写入 linglan.js（见
+# .github/workflows/build-unsigned-ipa.yml「Fetch sponsored LX source script」）。
+# 脚本不进仓库；本目录只留 .gitkeep 占位，保证 XcodeGen 引用的资源路径存在。
+# secret 未配时构建跳过拉取、目录为空，原生侧静默不注册该源。

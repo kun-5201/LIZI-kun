@@ -1,10 +1,13 @@
 import SwiftUI
+import UIKit
 
 /// 设计令牌：照抄壳版 `public/tokens.css`，只做 SwiftUI 能用的近似。
 ///
-/// - 字体：Fraunces（品牌 / 大标题）与 Geist（正文）都没有随包提供，
-///   原生版用系统字体近似——Fraunces → 系统 serif，Geist → 系统字体；
-///   等字体文件随包引入后再把这两处换成定制字体，不要在别处另起字族。
+/// - 字体：Fraunces（品牌 / 大标题）已随包提供（`Sources/LiziNative/Fonts/`
+///   三档静态 TTF，`UIAppFonts` 注册；见 Fonts/README.md），
+///   `liziDisplay` 用 `Font.custom("Fraunces")`，注册缺失时回落系统 serif；
+///   中文不在 Fraunces 字库内，由系统字体兜底。Geist（正文）未随包提供，
+///   仍用系统字体近似。
 /// - 字号：12 / 13 / 14 / 16 / 20 / 25 / 31 / 39（tokens.css 的 1.25 级数）。
 /// - 圆角：10 / 14 / 20 / 28。
 /// - 颜色：浅色纸面 + 墨色文字；accent 只有一个——网易云红 #EA3E3C。
@@ -61,10 +64,16 @@ extension Color {
 }
 
 extension Font {
-    /// 品牌 / 大标题字体：tokens.css --font-display（Fraunces），
-    /// 未随包提供时用系统 serif 近似。
+    /// 品牌 / 大标题字体：tokens.css --font-display（Fraunces）。
+    /// 字体已随包（Fraunces-Medium 500 / SemiBold 600 / Italic 500，
+    /// `UIAppFonts` 注册）；字重透传，CoreText 按最近档匹配
+    /// （.regular→500，.semibold→600）；中文等缺字由系统字体兜底。
+    /// 字体未注册进包时（资源漏拷）回落系统 serif，不崩、不空白。
     static func liziDisplay(size: CGFloat, weight: Font.Weight = .semibold) -> Font {
-        .system(size: size, weight: weight, design: .serif)
+        if UIFont(name: "Fraunces-Medium", size: size) != nil {
+            return .custom("Fraunces", size: size).weight(weight)
+        }
+        return .system(size: size, weight: weight, design: .serif)
     }
 
     /// 正文字体：tokens.css --font-body（Geist），

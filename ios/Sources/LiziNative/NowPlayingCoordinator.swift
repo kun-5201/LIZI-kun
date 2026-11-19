@@ -92,18 +92,34 @@ final class NowPlayingCoordinator: ObservableObject {
         if let art = lastArtwork, lastTrackId == track.id {
             info[MPMediaItemPropertyArtwork] = art
         }
-        // iOS 26+ 动态封面：只挂 supportedAnimatedArtworkKeys 里在列的键；
-        // 本歌视频没就绪就挂上一首的缓存，不要静默变回静态。
+        // iOS 26+ 动态封面：先问路线 B（Apple 官方真视频），就绪就挂真视频；
+        // 未就绪（首次切歌专辑解析还没回来）直接走路线 A，不等。
         if #available(iOS 26.0, *), animatedArtworkEnabled,
-           let animKey = animatedArtworkKeyForCurrentTrack() {
+           let appleKey = AppleAnimatedArtworkProvider.shared.albumKey(for: track),
+           AppleAnimatedArtworkProvider.shared.isReady(key: appleKey) {
             let supported = MPNowPlayingInfoCenter.supportedAnimatedArtworkKeys
             if supported.contains(MPNowPlayingInfoProperty3x4AnimatedArtwork),
-               let art = AnimatedArtworkManager.shared.artwork(forKey: animKey, aspect: .portrait) {
+               let art = AppleAnimatedArtworkProvider.shared.artwork(forKey: appleKey, aspect: .portrait) {
                 info[MPNowPlayingInfoProperty3x4AnimatedArtwork] = art
             }
             if supported.contains(MPNowPlayingInfoProperty1x1AnimatedArtwork),
-               let art = AnimatedArtworkManager.shared.artwork(forKey: animKey, aspect: .square) {
+               let art = AppleAnimatedArtworkProvider.shared.artwork(forKey: appleKey, aspect: .square) {
                 info[MPNowPlayingInfoProperty1x1AnimatedArtwork] = art
+            }
+        } else {
+            // 路线 A：只挂 supportedAnimatedArtworkKeys 里在列的键；
+            // 本歌视频没就绪就挂上一首的缓存，不要静默变回静态。
+            if #available(iOS 26.0, *), animatedArtworkEnabled,
+               let animKey = animatedArtworkKeyForCurrentTrack() {
+                let supported = MPNowPlayingInfoCenter.supportedAnimatedArtworkKeys
+                if supported.contains(MPNowPlayingInfoProperty3x4AnimatedArtwork),
+                   let art = AnimatedArtworkManager.shared.artwork(forKey: animKey, aspect: .portrait) {
+                    info[MPNowPlayingInfoProperty3x4AnimatedArtwork] = art
+                }
+                if supported.contains(MPNowPlayingInfoProperty1x1AnimatedArtwork),
+                   let art = AnimatedArtworkManager.shared.artwork(forKey: animKey, aspect: .square) {
+                    info[MPNowPlayingInfoProperty1x1AnimatedArtwork] = art
+                }
             }
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
@@ -129,6 +145,12 @@ final class NowPlayingCoordinator: ObservableObject {
             // 生成动态视频（AnimatedArtworkManager.defaultKey，所有没封面的歌共用）。
             lastCoverKey = AnimatedArtworkManager.defaultKey
             let key = AnimatedArtworkManager.defaultKey
+            // 路线 B 并行准备真视频（匹配只用歌手+专辑名，不依赖封面）：
+            // 就绪后回调里重写一次 Now Playing 挂上；无素材什么都不做。
+            AppleAnimatedArtworkProvider.shared.prepare(for: track) { [weak self] ready in
+                guard let self, ready else { return }
+                Task { @MainActor in self.writeNowPlaying() }
+            }
             if !AnimatedArtworkManager.shared.isReady(key: key) {
                 AnimatedArtworkManager.shared.prepare(cover: defaultCoverImage(), key: key) { [weak self] in
                     guard let self else { return }
@@ -163,6 +185,12 @@ final class NowPlayingCoordinator: ObservableObject {
         guard let image, lastCoverURL == urlString else { return }
         lastArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
         writeNowPlaying()
+        // 路线 B 并行准备真视频：就绪后回调里重写一次 Now Playing 挂上；
+        // 未就绪/无素材什么都不做（本歌继续用路线 A）。
+        AppleAnimatedArtworkProvider.shared.prepare(for: track) { [weak self] ready in
+            guard let self, ready else { return }
+            Task { @MainActor in self.writeNowPlaying() }
+        }
         // 动态视频：后台渲染，完了在主线程回调补写（渲染失败也回调，调用方用上一首缓存兜底）。
         AnimatedArtworkManager.shared.prepare(cover: image, key: key) { [weak self] in
             guard let self else { return }

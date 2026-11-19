@@ -112,18 +112,7 @@ struct ArtistView: View {
 
     private var avatar: some View {
         Group {
-            if let url = vm.artist.coverURL {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                    default:
-                        placeholder
-                    }
-                }
-            } else {
-                placeholder
-            }
+            ProxyImageView(url: vm.artist.coverURL) { placeholder }
         }
         .frame(width: 120, height: 120)
         .clipShape(Circle())
@@ -299,18 +288,7 @@ private struct ArtistAlbumCard: View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 6) {
                 Group {
-                    if let url = album.coverURL {
-                        AsyncImage(url: url) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image.resizable().scaledToFill()
-                            default:
-                                ArtistAlbumPlaceholder()
-                            }
-                        }
-                    } else {
-                        ArtistAlbumPlaceholder()
-                    }
+                    ProxyImageView(url: album.coverURL) { ArtistAlbumPlaceholder() }
                 }
                 .aspectRatio(1, contentMode: .fit)
                 .clipShape(RoundedRectangle(cornerRadius: SearchDesignTokens.radius10))

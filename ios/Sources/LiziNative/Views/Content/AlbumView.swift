@@ -99,18 +99,7 @@ struct AlbumView: View {
 
     private var cover: some View {
         Group {
-            if let url = vm.album.coverURL {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                    default:
-                        AlbumCoverPlaceholder()
-                    }
-                }
-            } else {
-                AlbumCoverPlaceholder()
-            }
+            ProxyImageView(url: vm.album.coverURL) { AlbumCoverPlaceholder() }
         }
         .frame(width: 240, height: 240)
         .clipShape(RoundedRectangle(cornerRadius: SearchDesignTokens.radius14))

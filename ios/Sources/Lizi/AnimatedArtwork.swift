@@ -32,6 +32,10 @@ final class AnimatedArtworkManager {
     private static let fps: Int32 = 24
     /// 缓存上限：8 首歌（每首 2 个视频，约 40MB，放 Caches 里，系统紧张时可清）。
     private static let maxCachedSongs = 8
+    /// 渲染版本 v2（2026-11-19 倒置+恒蓝修复）：v1 的帧是上下颠倒且恒蓝的，
+    /// 旧视频缓存在 Caches 里、键只认封面 URL，`prepare` 一旦 `isReady` 就永不
+    /// 重渲染——不改文件名的话修复永远到不了用户手机。所以文件名带版本号，
+    /// `init` 里删掉全部 v1 旧文件（见 `deleteLegacyCacheFiles`），强制重渲染。
 
     enum Aspect {
         case portrait  // 3:4，锁屏全屏铺满用
@@ -70,9 +74,23 @@ final class AnimatedArtworkManager {
     /// 这样调用方不用在类型上碰 iOS 26 的符号；同实例复用，系统不会反复重认）。
     private var artworks: [String: Any] = [:]
 
-    private init() {}
+    private init() { deleteLegacyCacheFiles() }
 
-    /// 封面 URL → 缓存键（SHA256 前 16 位，稳定；同封面共用一个 artworkID、同一份视频）。
+    /// 删掉 v1 渲染器留下的旧视频（`<key>-p.mp4` / `<key>-s.mp4`，无版本号）。
+    /// v1 的帧上下颠倒且恒蓝（见 `makePixelBuffer` 注释），又因为缓存键只认
+    /// 封面 URL，不清掉它们，`isReady` 会一直命中旧文件、修复永不生效。
+    /// 只在单例第一次创建时跑一次：渲染是按启动隔离的，启动时刻不存在
+    /// 正在写入的临时文件，删 `*.mp4` 里不带 `.v2.` 的就是安全的。
+    private func deleteLegacyCacheFiles() {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) else { return }
+        for f in files where f.pathExtension == "mp4" && !f.lastPathComponent.contains(".v2.") {
+            try? fm.removeItem(at: f)
+        }
+    }
+
+    /// 封面 URL → 缓存键（SHA256 前 16 位，稳定；同封面共用同一份视频；
+    /// artworkID 还要再带尺寸后缀，见 `makeArtwork`）。
     static func key(forCoverURL url: String) -> String {
         let digest = SHA256.hash(data: Data(url.utf8))
         return digest.map { String(format: "%02x", $0) }.joined().prefix(16).description
@@ -86,7 +104,7 @@ final class AnimatedArtworkManager {
     }
 
     private func fileURL(key: String, aspect: Aspect) -> URL {
-        cacheDir.appendingPathComponent(key + aspect.suffix + ".mp4")
+        cacheDir.appendingPathComponent(key + aspect.suffix + ".v2.mp4")
     }
 
     /// 两个尺寸的视频都在磁盘上才算就绪（Caches 可能被系统清掉，只信文件不信内存）。
@@ -167,8 +185,10 @@ final class AnimatedArtworkManager {
     private func makeArtwork(key: String, aspect: Aspect) -> MPMediaItemAnimatedArtwork {
         let url = fileURL(key: key, aspect: aspect)
         let cacheKey = key + aspect.suffix
+        // artworkID 必须按尺寸区分：之前竖版和方形共用 "lizi-<key>"，系统可能
+        // 把两个不同视频当成同一张封面去重。ID 里带上尺寸后缀，各是各的。
         return MPMediaItemAnimatedArtwork(
-            artworkID: "lizi-" + key,
+            artworkID: "lizi-" + cacheKey,
             previewImageRequestHandler: { [weak self] _ in
                 self?.croppedPreview(forKey: cacheKey, aspect: aspect)
             },
@@ -208,16 +228,17 @@ final class AnimatedArtworkManager {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(
             at: cacheDir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
-        let portraits = files.filter { $0.lastPathComponent.hasSuffix("-p.mp4")
+        let portraits = files.filter { $0.lastPathComponent.hasSuffix("-p.v2.mp4")
             && !$0.lastPathComponent.hasPrefix(Self.defaultKey + "-") }
         guard portraits.count > Self.maxCachedSongs else { return }
         let sorted = portraits.sorted {
             (($0.modificationDate ?? .distantPast) < ($1.modificationDate ?? .distantPast))
         }
         for old in sorted.dropLast(Self.maxCachedSongs) {
-            let stem = old.deletingPathExtension().lastPathComponent.dropLast(2)
-            for suffix in ["-p.mp4", "-s.mp4"] {
-                try? fm.removeItem(at: cacheDir.appendingPathComponent(String(stem) + suffix))
+            // 文件名 <key>-p.v2.mp4：去掉 "-p.v2.mp4"（9 个字符）得 key。
+            let stem = String(old.lastPathComponent.dropLast("-p.v2.mp4".count))
+            for suffix in ["-p.v2.mp4", "-s.v2.mp4"] {
+                try? fm.removeItem(at: cacheDir.appendingPathComponent(stem + suffix))
             }
         }
     }
@@ -247,6 +268,10 @@ final class AnimatedArtworkManager {
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
                 kCVPixelBufferWidthKey as String: Int(size.width),
                 kCVPixelBufferHeightKey as String: Int(size.height),
+                // 像素缓冲要进 CGContext 画：声明 CG 兼容，CoreVideo 按 CG 可用的
+                // 对齐方式分配，否则个别设备上可能拿到 CG 写不进去的缓冲。
+                kCVPixelBufferCGImageCompatibilityKey as String: true,
+                kCVPixelBufferCGBitmapContextCompatibilityKey as String: true,
             ])
         guard writer.canAdd(input) else { throw RenderError.cannotAddInput }
         writer.add(input)
@@ -303,7 +328,33 @@ final class AnimatedArtworkManager {
         try FileManager.default.moveItem(at: tmpURL, to: finalURL)
     }
 
-    /// 一帧：把封面画进像素缓冲。Core Graphics 的 y 轴朝上，先翻转再按左上角坐标画。
+    /// 一帧：把封面画进像素缓冲。
+    ///
+    /// 2026-11-19 倒置+恒蓝修复（v2），两处都是这一函数里的错，别处没动：
+    ///
+    /// 1. 恒蓝——bitmapInfo 缺了 `byteOrder32Little`。像素缓冲是
+    ///    `kCVPixelFormatType_32BGRA`，内存里每个像素是 [B,G,R,A]；只写
+    ///    `premultipliedFirst` 时 Core Graphics 默认按大端写 [A,R,G,B]，
+    ///    编码器再按 BGRA 读回去，解出来是 R'=G、G'=R、B'=A=255、A'=B——
+    ///    每个不透明像素的蓝色都被钉死在 255，整张封面恒蓝（真封面 FLOWER
+    ///    平均色 (94,55,39) 会被写成 (55,94,255)，100% 像素 B==255，
+    ///    见 verification/r19-artwork.cjs 的模拟数据）。修法就是补上
+    ///    `byteOrder32Little`，让 CG 按 [B,G,R,A] 写，解码后与原图恒等。
+    ///
+    /// 2. 倒置——之前这里 `translateBy(0, 高) + scaleBy(1, -1)` 再画。
+    ///    这套翻转是「位图 → CGImage → UIKit 视图」那条链的修正，不适用
+    ///    于「像素缓冲内存 → H.264 编码器」这条链：编码器按内存行序
+    ///    （首行即帧顶行）直接读，`CGContext.draw(cgImage)` 本来就把图
+    ///    顶行写进首行，手动再翻一次等于倒过来（对照：ikyle.me 的
+    ///    BGRA→H.264 导出器同样不翻转直接画，输出方向正确；翻转版在
+    ///    真机锁屏全屏上就是用户看到的倒置）。修法：删掉翻转，直接画。
+    ///    注意 rect 的数学不用动：cover-fit 矩形是中心对称的，翻不翻转
+    ///    可见行集合相同；Ken Burns 的 panY 只是正弦漂移方向反一下，
+    ///    幅度（±5px）与循环接缝都不变。
+    ///
+    /// 另外先涂黑底：池子里的缓冲可能带上一段视频的残留像素，Ken Burns
+    ///    在 zoom=1.0 的首尾帧会留几像素没画到的边（pan ±5px），不涂黑
+    ///    那些边会闪旧画面。
     private func makePixelBuffer(adaptor: AVAssetWriterInputPixelBufferAdaptor,
                                  size: CGSize, cgImage: CGImage, rect: CGRect) -> CVPixelBuffer? {
         guard let pool = adaptor.pixelBufferPool else { return nil }
@@ -317,9 +368,10 @@ final class AnimatedArtworkManager {
                                   bitsPerComponent: 8,
                                   bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
                                   space: CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue) else { return nil }
-        ctx.translateBy(x: 0, y: size.height)
-        ctx.scaleBy(x: 1, y: -1)
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                    | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+        ctx.setFillColor(CGColor(gray: 0, alpha: 1))
+        ctx.fill(CGRect(origin: .zero, size: size))
         ctx.draw(cgImage, in: rect)
         return buffer
     }

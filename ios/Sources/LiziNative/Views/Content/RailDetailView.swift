@@ -52,6 +52,10 @@ struct RailDetailView: View {
         LiziPlatforms.all.first(where: { $0.id == platform })?.name ?? platform
     }
 
+    /// 本页标题（喜欢 rail 按平台取真名，与首页行标题、来源 chip、
+    /// 空态文案同一份事实来源 `RailKind.likedTitle(for:)`）。
+    private var displayTitle: String { kind.displayTitle(platform: platform) }
+
     private var feeds: [(id: String, name: String)] {
         kind == .featured ? NativeBridge.featuredFeeds(for: platform) : []
     }
@@ -67,7 +71,7 @@ struct RailDetailView: View {
                     railView
                 }
             }
-            .navigationTitle(isDrilled ? drilledTitle : "\(kind.title) · \(platformName)")
+            .navigationTitle(isDrilled ? drilledTitle : "\(displayTitle) · \(platformName)")
             .navigationBarTitleDisplayMode(.inline)
         }
         .task {
@@ -87,7 +91,7 @@ struct RailDetailView: View {
             }
             Group {
                 if isLoading {
-                    loadingView(text: "正在拉取\(kind.title)…")
+                    loadingView(text: "正在拉取\(displayTitle)…")
                 } else if let error = result?.error {
                     errorView(error: error) { Task { await load() } }
                 } else if let result, result.entries.isEmpty {
@@ -167,12 +171,12 @@ struct RailDetailView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "chevron.left")
                             .font(.system(size: 14, weight: .semibold))
-                        Text(kind.title)
+                        Text(displayTitle)
                             .font(.liziBody(size: LiziTokens.size14, weight: .medium))
                     }
                     .foregroundColor(LiziTokens.ink2)
                 }
-                .accessibilityLabel("返回\(kind.title)")
+                .accessibilityLabel("返回\(displayTitle)")
                 Spacer()
             }
             .padding(.horizontal, 16)

@@ -78,6 +78,27 @@ enum NativeBridge {
         return dict
     }
 
+    /// 带 JSON body 的调用（r23a 登录底座；现有无 body 的 `call` 一行没动）。
+    ///
+    /// 用途：酷我 Cookie 登录（`POST /api/kuwo/login/cookie`，`{ cookie }`）、
+    /// Apple Music token 粘贴（`POST /api/applemusic/login/token`，
+    /// `{ token, userToken }`）、QQ 网页登录导入（`POST /api/qq/login/web`，
+    /// `{ cookie }`）。`body` 序列化进 `HttpRequest.body`；服务端
+    /// `HttpRequest.params` 是 query + JSON body 合并、body 优先
+    /// （`HttpServer.swift`），与壳版 `public/api.js postSoft` 同款。
+    /// body 序列化失败时直接回 nil，不发一个空 body 的 POST 去误导后端。
+    static func call(path: String, query: [String: String] = [:],
+                     method: String = "GET", body: [String: Any]) async -> [String: Any]? {
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+        let req = HttpRequest(method: method, path: path, query: query,
+                              headers: ["Content-Type": "application/json"], body: bodyData)
+        let resp = await router.handle(req)
+        guard (200...299).contains(resp.status),
+              let obj = try? JSONSerialization.jsonObject(with: resp.body),
+              let dict = obj as? [String: Any] else { return nil }
+        return dict
+    }
+
     /// 带硬超时的异步调用（超时抛错，调用方按失败处理；LX 取链专用）。
     /// TimeoutError 不能嵌在泛型函数里（Swift 禁止），放枚举作用域。
     private struct TimeoutError: Error {}

@@ -6,9 +6,17 @@ import UniformTypeIdentifiers
 ///
 /// 对照表（壳版行 → 原生实现）：
 /// 1. 平台账号：7 行平铺（网易云/QQ/酷狗/汽水/波点/酷我/Apple Music），
-///    状态由 SettingsStore.platformAccounts() 实读会话；登录流程是 P4，
-///    本轮登录按钮只弹空态提示，不做假登录；未登录点行也是提示（公开内容
-///    走首页平台条 / 搜索，不在这里另开入口）。
+///    顺序与 `SettingsStore.platformIds` 一致；每行左边是平台小 logo
+///    （`PlatformIconView` 26pt，r22j 平台管理行同款）+ 名字 + 限制说明
+///    （照抄 `SettingsStore.platformLimits`，不改字）；右边是登录状态
+///    （已登录显示昵称、取不到昵称显示「已登录」，未登录显示「未登录」）。
+///    点整行：未登录 → 弹 `LoginSheetView`（r23a 底座，该平台登录流程，
+///    r23b–e 填）；已登录 → 进 `AccountDetailView`（昵称/头像/VIP 状态 +
+///    「退出登录」，退出前二次确认，走 `LoginStore.logout`）。
+///    登录态以 `LoginStore` 为准（与 `platformAccounts()` 同源，见
+///    `LoginPromptView.swift` 文件头的 r23a 接口约定）；设置页出现时
+///    调 `LoginStore.refresh()`，登录/登出成功后底座发布变化、账号行
+///    立即重绘。切台不碰登录态（`selectPlatform` 五步原样，一个字不动）。
 /// 2. 自定义源管理：LXSourceRegistry 已有存储，列表/添加（URL + 本地文件）
 ///    /删除/开关/刷新/补绑 URL/自动切换，全接真接口；不改 LX 取链逻辑。
 /// 3. 本地音乐：数量实读 LocalMusic 清单；在首页显示开关真持久化；
@@ -36,6 +44,15 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @EnvironmentObject var playback: PlaybackStore
     @StateObject private var settings = SettingsStore()
+    /// r23f：登录底座（r23a，`Views/Login/`）——设置页只消费它的接口
+    /// （约定见 `LoginPromptView.swift` 文件头）；登录/登出成功后它发布
+    /// 变化，账号行随之重绘。未落地前本引用编译不过（见 r23f 驱动 GAP）。
+    @ObservedObject private var loginStore = LoginStore.shared
+
+    /// 未登录行点开的登录页目标；账号详情里防御分支的「去登录」也用它。
+    @State private var loginTarget: LoginSheetTarget?
+    /// 已登录行点开的账号详情目标。
+    @State private var accountDetailTarget: AccountDetailTarget?
 
     @State private var notice: Notice?
     @State private var showPlatformManager = false
@@ -62,7 +79,18 @@ struct SettingsView: View {
             .padding(.bottom, 32)
         }
         .background(LiziTokens.paper)
-        .onAppear { settings.refreshLXSources() }
+        .onAppear {
+            settings.refreshLXSources()
+            // r23f：设置页出现时刷新登录态（登录/登出可能发生在别处——
+            // 登录页、账号详情页；回来时行状态必须是最新的）。
+            loginStore.refresh()
+        }
+        .sheet(item: $loginTarget) { target in
+            LoginSheetView(platform: target.platform)
+        }
+        .sheet(item: $accountDetailTarget) { target in
+            AccountDetailView(platform: target.platform)
+        }
         .alert(item: $notice) { n in
             Alert(title: Text(n.title), message: Text(n.message),
                   dismissButton: .default(Text("知道了")))
@@ -133,29 +161,38 @@ struct SettingsView: View {
     private var accountSection: some View {
         sectionCard(title: "平台账号", note: "七家平台平级，登录方式各不相同，限制都写在自己那一行里。") {
             ForEach(settings.platformAccounts()) { account in
+                // r23f：真入口（占位文案已删）。登录态取 platformAccounts()
+                // 的实读会话（与 LoginStore 同源）；昵称取自 LoginStore，
+                // 取不到昵称的已登录态显示「已登录」，不编昵称。
+                let info = LiziPlatforms.all.first(where: { $0.id == account.id })
+                let nickname = account.loggedIn
+                    ? loginStore.displayName(platform: account.id) : nil
                 Button(action: {
-                    notice = Notice(
-                        title: account.loggedIn ? account.name : "未登录",
-                        message: account.loggedIn
-                            ? "登录流程（含退出登录）P4 上线，本轮只做状态显示。"
-                            : "登录流程 P4 上线。先回首页点「\(account.name)」图标看公开内容，或用搜索直接听公开曲目。")
+                    if account.loggedIn {
+                        accountDetailTarget = AccountDetailTarget(platform: account.id)
+                    } else {
+                        loginTarget = LoginSheetTarget(platform: account.id)
+                    }
                 }) {
                     HStack(spacing: 10) {
+                        if let info {
+                            PlatformIconView(platform: info, selected: false, size: 26)
+                        }
                         rowLabel(account.name, hint: account.limit)
                         Spacer()
-                        Text(account.statusText)
+                        Text(nickname ?? (account.loggedIn ? "已登录" : "未登录"))
                             .font(.liziBody(size: LiziTokens.size13))
                             .foregroundColor(account.loggedIn ? .green : LiziTokens.ink3)
-                        Text(account.loggedIn ? "退出" : "登录")
-                            .font(.liziBody(size: LiziTokens.size13, weight: .medium))
-                            .foregroundColor(LiziTokens.ink2)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(LiziTokens.paper)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(LiziTokens.ink3)
                     }
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(account.loggedIn
+                    ? "\(account.name)，已登录，查看账号详情"
+                    : "\(account.name)，未登录，点此登录")
                 Divider()
             }
             Button(action: { showPlatformManager.toggle() }) {

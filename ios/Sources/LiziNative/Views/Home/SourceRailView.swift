@@ -20,6 +20,9 @@ struct SourceChipsView: View {
     /// 预览只改 chips 的高亮，松手才调 selectSource 提交。
     @State private var switchStart: Int? = nil
     @State private var switchPreview: HomeViewModel.Source? = nil
+    /// 登录提示（r23 集成）：切到需要登录的来源时弹提示，不切过去。
+    @State private var loginPrompt: LoginPrompt?
+    @State private var loginTarget: LoginSheetTarget?
 
     /// 长按进入切换模式的按住时长（0.5s；短于一次点按不会误触发）。
     private static let longPressDuration: Double = 0.5
@@ -31,6 +34,17 @@ struct SourceChipsView: View {
     /// 切换中正在预览的来源（没在切换时就是当前来源）。
     private var shownSource: HomeViewModel.Source { switchPreview ?? viewModel.selectedSource }
 
+    /// 带登录墙的来源切换（r23 集成）：liked / playlists 未登录时弹提示，
+    /// 不切过去；其余来源（每日推荐/精选/电台）直接切（LoginGate 判定表里本来就是 nil）。
+    private func selectSourceGated(_ source: HomeViewModel.Source) {
+        if let kind = source.railKind,
+           let p = LoginGate.prompt(forRail: kind, platform: viewModel.selectedPlatform) {
+            loginPrompt = p
+        } else {
+            viewModel.selectSource(source)
+        }
+    }
+
     /// r22j：chips 住在铺色面板里（见 HomeView），横向留白由面板的 10pt
     /// 内边距给，这里不再另加 16（壳版来源滚轮也是浮在面板里、不另占 gutter）。
     var body: some View {
@@ -39,7 +53,7 @@ struct SourceChipsView: View {
                 HStack(spacing: 8) {
                     ForEach(sources, id: \.self) { source in
                         let selected = source == shownSource
-                        Button(action: { viewModel.selectSource(source) }) {
+                        Button(action: { selectSourceGated(source) }) {
                             Label(source.title(for: viewModel.selectedPlatform), systemImage: source.icon)
                                 .font(.liziBody(size: LiziTokens.size13, weight: .medium))
                                 .foregroundColor(selected ? .white : LiziTokens.ink2)
@@ -72,6 +86,9 @@ struct SourceChipsView: View {
             }
         }
         .highPriorityGesture(switchGesture)
+        // r23 集成：登录提示 alert + 「去登录」 sheet（来源 chips 切换用）。
+        .loginRequiredAlert(prompt: $loginPrompt, loginTarget: $loginTarget)
+        .sheet(item: $loginTarget) { LoginSheetView(platform: $0.platform) }
     }
 
     /// 长按 + 上下滑切换来源（r22j 第二件）。
@@ -125,7 +142,7 @@ struct SourceChipsView: View {
                 let idx = min(max(start + steps, 0), sources.count - 1)
                 let target = sources[idx]
                 guard target != viewModel.selectedSource else { return }
-                viewModel.selectSource(target)
+                selectSourceGated(target)
             }
     }
 }

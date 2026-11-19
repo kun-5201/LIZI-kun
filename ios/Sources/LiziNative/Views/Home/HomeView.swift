@@ -56,6 +56,9 @@ struct HomeView: View {
     @StateObject private var viewModel = HomeViewModel()
     /// 首页环状态机（r21）：平面带与全屏环覆盖层共用（见 HomeCoverRingView 文件头）。
     @StateObject private var ringModel = HomeCoverRingModel()
+    /// 登录提示（r23 集成）：rail 展开需要登录时弹提示，不进详情。
+    @State private var loginPrompt: LoginPrompt?
+    @State private var loginTarget: LoginSheetTarget?
 
     var body: some View {
         GeometryReader { outer in
@@ -135,7 +138,14 @@ struct HomeView: View {
                                     platform: viewModel.selectedPlatform,
                                     result: viewModel.rails[kind],
                                     isLoading: viewModel.railLoading[kind] ?? false,
-                                    onExpand: { viewModel.openRail(kind) },
+                                    onExpand: {
+                                        // r23 集成：需要登录的 rail 未登录时弹提示，不进详情。
+                                        if let p = LoginGate.prompt(forRail: kind, platform: viewModel.selectedPlatform) {
+                                            loginPrompt = p
+                                        } else {
+                                            viewModel.openRail(kind)
+                                        }
+                                    },
                                     onRetry: {
                                         Task { await viewModel.loadRail(kind) }
                                     }
@@ -177,6 +187,9 @@ struct HomeView: View {
         // 底部留白由内容自己留 50（16 净空 + 34 Home Indicator），
         // 不靠系统安全区（否则首屏底边对不上模板的屏底线）。
         .ignoresSafeArea(edges: [.top, .bottom])
+        // r23 集成：登录提示 alert + 「去登录」 sheet（rail 展开用）。
+        .loginRequiredAlert(prompt: $loginPrompt, loginTarget: $loginTarget)
+        .sheet(item: $loginTarget) { LoginSheetView(platform: $0.platform) }
         .task {
             await viewModel.initialLoad()
             // r22j 平台管理：当前选中平台被取消勾选时，自动切到第一个勾选

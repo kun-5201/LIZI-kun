@@ -1,0 +1,3055 @@
+import Foundation
+
+/// QQ 音乐：@yakult-green-tea/qq-music-api@3.3.5 的 Swift 移植。
+///
+/// 关键实测结论（2026-11-17，本机 Node 探针）：
+/// - musicu 接受空 QIMEI：GetSession 与 CreateQRCode 在 QIMEI/QIMEI36 为空时均回 code 0，
+///   CreateQRCode 直接给了真实 qrcodeID + PNG（expiresIn 900）。所以本移植跳过 QIMEI 启动
+///  （QIMEI_SECRET 在工具输出里被遮蔽、拿不到；也不需要它）。
+/// - 设备身份仍按包内规则合成（MI 6 / MI 6 指纹 / Luhn IMEI / 16 位 androidId / 32 位 openUdid），
+///   持久化在 .auth-qq-device.json；会话 uid/sid/vkey 由 GetSession 下发后存入。
+/// - 扫码三通道：qq / qqmusic 走 MQTT（wss://mu.y.qq.com/ws/handshake，MQTT 5）；
+///   wechat 走 open.weixin.qq.com 的 HTTP 长轮询。ptlogin 通道不在 server.mjs 的
+///   QQ_CHANNELS 里，本期不做。
+/// - 匿名搜索搜歌送 search_type=7（送 0 会回 2001）；匿名播放走 UCommon CgiGetVkey。
+/// - 其余路由按 specs/sidecars.md §1 的主服务形状返回，绝不编假数据。
+
+// MARK: - 常量
+
+private let qqMusicuURL = "https://u.y.qq.com/cgi-bin/musicu.fcg"
+private let qqCgiBase = "https://c.y.qq.com"
+private let qqUCommonSign = "zzannc1o6o9b4i971602f3554385022046ab796512b7012"
+private let qqUA = "QQMusic 14090008(android 10)"
+private let qqLiteUA = "okhttp/3.14.9"
+private let qqChannels = ["qq", "wechat", "qqmusic", "ptlogin"]
+private let qqQrTTL: TimeInterval = 180
+private let qqQrCooldown: TimeInterval = 15
+private let qqQrRateLimitCooldown: TimeInterval = 30
+private let qqQrClaim: TimeInterval = 60
+private let qqCredentialRejectionCodes: Set<Int> = [1000, 104401, 104400]
+private let qqWechatAppId = "wx48db31d50e334801"
+
+/// 上游抛出的业务码（global code / req_0.code / CGI code）。
+struct QQUpstreamError: Error {
+    let code: Int
+    let message: String
+}
+
+struct QQAuthError: Error {
+    /// 401：凭证被拒或缺失；409：已有扫码进行中；429：冷却中；502：上游/协议失败。
+    let code: Int
+    let message: String
+    let retryAfterMs: Int?
+    init(_ code: Int, _ message: String, retryAfterMs: Int? = nil) {
+        self.code = code; self.message = message; self.retryAfterMs = retryAfterMs
+    }
+}
+
+// MARK: - 小工具
+
+private func qqRandomHex(_ n: Int) -> String {
+    (0..<n).map { _ in String(Int.random(in: 0..<16), radix: 16) }.joined()
+}
+
+private func qqRandomDigits(_ n: Int) -> String {
+    (0..<n).map { _ in String(Int.random(in: 0...9)) }.joined()
+}
+
+/// Luhn 校验位（IMEI 标准算法：从右起第二位开始每隔一位 ×2，>9 减 9）。
+private func qqIMEI() -> String {
+    let d14 = (0..<14).map { _ in Int.random(in: 0...9) }
+    var sum = 0
+    for (i, d) in d14.enumerated() {
+        // 0-based 奇数位 = 从右数第偶数位（不含校验位），需要 ×2。
+        var v = d
+        if i % 2 == 1 {
+            v *= 2
+            if v > 9 { v -= 9 }
+        }
+        sum += v
+    }
+    return d14.map(String.init).joined() + String((10 - (sum % 10)) % 10)
+}
+
+private func qqJSONStringEscape(_ s: String) -> String {
+    var out = ""
+    for ch in s {
+        switch ch {
+        case "\\": out += "\\\\"
+        case "\"": out += "\\\""
+        case "\n": out += "\\n"
+        case "\r": out += "\\r"
+        case "\t": out += "\\t"
+        default: out.append(ch)
+        }
+    }
+    return out
+}
+
+private let qqGb18030: String.Encoding = {
+    // kCFStringEncodingGB_18030_2000 = 0x0632（SDK 头文件值）。
+    // Swift 的 CFStringEncodings 未暴露 gb_18030_2000 成员，直接用数值。
+    let cf = CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(0x0632))
+    return String.Encoding(rawValue: cf)
+}()
+
+private func qqDecodeText(_ data: Data) -> String {
+    String(data: data, encoding: .utf8) ?? String(data: data, encoding: qqGb18030) ?? ""
+}
+
+/// 去 JSONP 包裹（callback(...) / MusicJsonCallback(...)），失败返回原串。
+private func qqStripJSONP(_ text: String) -> String {
+    let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let open = t.firstIndex(of: "("), t.hasSuffix(")") else { return t }
+    let inner = t[t.index(after: open)..<t.index(before: t.endIndex)]
+    return String(inner).trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func qqParseJSONText(_ text: String) -> Any? {
+    if let obj = try? JSONSerialization.jsonObject(with: Data(text.utf8)) { return obj }
+    let stripped = qqStripJSONP(text)
+    if stripped != text, let obj = try? JSONSerialization.jsonObject(with: Data(stripped.utf8)) { return obj }
+    return nil
+}
+
+private func qqJSONData(_ obj: Any) -> Data? {
+    try? JSONSerialization.data(withJSONObject: obj)
+}
+
+// MARK: - 设备与凭证（持久化在 Application Support/lizi/ 下的 .auth-qq*.json）
+
+actor QQService {
+    private let store = SessionStore.shared
+    private var device: [String: String] = [:]
+    private var deviceLoaded = false
+    private var credential: [String: Any]?
+    private var credentialLoaded = false
+    private var refreshRetryAt: TimeInterval = 0
+    private var qrSessions: [String: QQSession] = [:]
+    private var nextQrAllowedAt: Date = .distantPast
+    private var creatingSession = false
+    private var searchCache: [(key: String, at: Date, data: [String: Any])] = []
+
+    /// ptlogin 专用会话：ephemeral + 禁重定向 + 不接管 cookie。
+    /// cookie 全部由每会话的 ptCookies jar 手工收发（见 ptCollectCookies），
+    /// 不走共享 jar——两个 host 的同名 qrsig 会互相顶掉，扫完也被报过期。
+    private let ptSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpShouldSetCookies = false
+        config.httpCookieAcceptPolicy = .never
+        config.timeoutIntervalForRequest = 10
+        config.timeoutIntervalForResource = 30
+        return URLSession(configuration: config, delegate: QQPtNoRedirectDelegate(), delegateQueue: nil)
+    }()
+
+    // MARK: 设备
+
+    private func loadDevice() -> [String: String] {
+        if deviceLoaded { return device }
+        deviceLoaded = true
+        if let saved = store.sidecarAuth("qq-device") as? [String: String], !saved.isEmpty {
+            device = saved
+            return device
+        }
+        device = [
+            "androidId": qqRandomHex(16),
+            "openUdid": qqRandomHex(32),
+            "imei": qqIMEI(),
+            "fingerprint": "xiaomi/iarim/sagit:10/eomam.200122.001/\(qqRandomDigits(7)):user/release-keys",
+            "procVersion": "Linux 5.4.0-54-generic-\(qqRandomHex(8)) (android-build@google.com)",
+            "display": "QMAPI.\(qqRandomDigits(6)).001",
+            "sessionUid": "",
+            "sessionSid": "",
+            "sessionVkey": "",
+        ]
+        store.saveSidecarAuth("qq-device", device)
+        return device
+    }
+
+    private func saveDevice() {
+        store.saveSidecarAuth("qq-device", device)
+    }
+
+    private func credentialMusicId(_ cred: [String: Any]? = nil) -> String {
+        let c = cred ?? credential ?? [:]
+        for k in ["str_musicid", "musicid"] {
+            let v = scStrOrNum(c, k)
+            if !v.isEmpty && v != "0" { return v }
+        }
+        return ""
+    }
+
+    private func loadCredential() -> [String: Any]? {
+        if credentialLoaded { return credential }
+        credentialLoaded = true
+        credential = store.sidecarAuth("qq")
+        return credential
+    }
+
+    private func saveCredential(_ cred: [String: Any]?) {
+        credential = cred
+        if let cred { store.saveSidecarAuth("qq", cred) } else { store.clearSidecarAuth("qq") }
+    }
+
+    private func credentialCookieHeader(_ cred: [String: Any]) -> String {
+        // 网页登录导入的会话：整罐发（Moumusic 同款——musicu 调用要整罐 cookie，
+        // 只发 uin + musickey 会把 p_skey 之类的票据丢在半路）。
+        // scStr 返回非可选 String（缺失即 ""），不能用 if let 解包。
+        let web = scStr(cred, "webCookie")
+        if !web.isEmpty { return web }
+        let id = credentialMusicId(cred)
+        let key = scStr(cred, "musickey")
+        return "uin=\(id); qqmusic_uin=\(id); qm_keyst=\(key); qqmusic_key=\(key)"
+    }
+
+    // MARK: comm
+
+    /// Android comm（buildAndroidComm）：登录态与匿名态只差 qq/authst/tmeLoginType 三字段。
+    private func androidComm(overrides: [String: Any] = [:]) -> [String: Any] {
+        let d = loadDevice()
+        var c: [String: Any] = [
+            "ct": 11, "cv": 14090008, "v": 14090008, "chid": "10003505", "tmeAppID": "qqmusic",
+            "QIMEI": "", "QIMEI36": "",
+            "OpenUDID": d["openUdid"] ?? "", "udid": d["openUdid"] ?? "", "OpenUDID2": d["openUdid"] ?? "",
+            "aid": d["androidId"] ?? "", "os_ver": "10", "phonetype": "MI 6",
+            "devicelevel": "29", "newdevicelevel": "29",
+            "rom": d["fingerprint"] ?? "",
+        ]
+        if let uid = d["sessionUid"], !uid.isEmpty { c["uid"] = uid }
+        if let sid = d["sessionSid"], !sid.isEmpty { c["sid"] = sid }
+        if let cred = loadCredential() {
+            c["qq"] = credentialMusicId(cred)
+            c["authst"] = scStr(cred, "musickey")
+            c["tmeLoginType"] = scInt(cred, "loginType")
+        }
+        for (k, v) in overrides { c[k] = v }
+        return c
+    }
+
+    // MARK: musicu 客户端
+
+    /// 核心 musicu 调用：POST {comm, req_0:{module,method,param}}。
+    /// 只读请求最多 2 次（退避 200*2^attempt ms + 抖动）；global code / req_0.code /
+    /// subcode 任一非 0 即抛 QQUpstreamError。
+    private func musicu(comm: [String: Any], module: String, method: String, param: [String: Any],
+                        headers: [String: String]? = nil, readOnly: Bool = true,
+                        timeout: TimeInterval = 25) async throws -> [String: Any] {
+        let body: [String: Any] = ["comm": comm, "req_0": ["module": module, "method": method, "param": param]]
+        guard let bodyData = qqJSONData(body), let url = URL(string: qqMusicuURL) else {
+            throw QQUpstreamError(code: -1, message: "musicu 请求构造失败")
+        }
+        var lastError: Error = QQUpstreamError(code: -1, message: "musicu 请求失败")
+        let attempts = readOnly ? 2 : 1
+        for attempt in 0..<attempts {
+            if attempt > 0 {
+                let backoff = Double(200 * (1 << (attempt - 1))) + Double.random(in: 0...200)
+                try? await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000))
+            }
+            do {
+                var h: [String: String] = ["Content-Type": "application/json"]
+                if let headers { for (k, v) in headers { h[k] = v } }
+                let (data, resp) = try await Upstream.fetch(url, headers: h, timeout: timeout, method: "POST", body: bodyData)
+                guard resp.statusCode == 200 else {
+                    if resp.statusCode >= 500 {
+                        throw NSError(domain: "LiziUpstream", code: resp.statusCode, userInfo: nil)
+                    }
+                    throw QQUpstreamError(code: resp.statusCode, message: "musicu HTTP \(resp.statusCode)")
+                }
+                guard let obj = Upstream.jsonObject(data) else {
+                    throw QQUpstreamError(code: -1, message: "musicu 返回无法解析")
+                }
+                let global = scInt(obj, "code")
+                guard global == 0 else {
+                    throw QQUpstreamError(code: global, message: "musicu 上游错误 \(global)")
+                }
+                guard let req0 = obj["req_0"] as? [String: Any] else {
+                    throw QQUpstreamError(code: -1, message: "musicu 返回缺 req_0")
+                }
+                let rc = scInt(req0, "code")
+                guard rc == 0 else {
+                    throw QQUpstreamError(code: rc, message: "musicu 上游错误 \(rc)")
+                }
+                if let sub = req0["subcode"] as? NSNumber, sub.intValue != 0 {
+                    throw QQUpstreamError(code: sub.intValue, message: "musicu subcode \(sub.intValue)")
+                }
+                guard let d = req0["data"] as? [String: Any] else {
+                    throw QQUpstreamError(code: -1, message: "musicu 返回缺 data")
+                }
+                return d
+            } catch let e as QQUpstreamError {
+                lastError = e
+                // 业务码错误不重试（只有传输错误才重试）。
+                throw e
+            } catch {
+                lastError = error
+                if attempt == attempts - 1 { throw QQUpstreamError(code: -1, message: "musicu 请求失败：\(error.localizedDescription)") }
+            }
+        }
+        throw lastError
+    }
+
+    /// 多 req 批量 musicu（song/batch 用）：{comm, req_0, req_1, ...}。
+    private func musicuMulti(comm: [String: Any], calls: [(module: String, method: String, param: [String: Any])],
+                             headers: [String: String]? = nil) async throws -> [[String: Any]] {
+        var body: [String: Any] = ["comm": comm]
+        for (i, c) in calls.enumerated() {
+            body["req_\(i)"] = ["module": c.module, "method": c.method, "param": c.param]
+        }
+        guard let bodyData = qqJSONData(body), let url = URL(string: qqMusicuURL) else {
+            throw QQUpstreamError(code: -1, message: "musicu 请求构造失败")
+        }
+        var h: [String: String] = ["Content-Type": "application/json"]
+        if let headers { for (k, v) in headers { h[k] = v } }
+        let (data, resp) = try await Upstream.fetch(url, headers: h, timeout: 25, method: "POST", body: bodyData)
+        guard resp.statusCode == 200, let obj = Upstream.jsonObject(data) else {
+            throw QQUpstreamError(code: resp.statusCode, message: "musicu HTTP \(resp.statusCode)")
+        }
+        guard scInt(obj, "code") == 0 else {
+            throw QQUpstreamError(code: scInt(obj, "code"), message: "musicu 上游错误")
+        }
+        var out: [[String: Any]] = []
+        for i in calls.indices {
+            guard let req = obj["req_\(i)"] as? [String: Any], scInt(req, "code") == 0,
+                  let d = req["data"] as? [String: Any] else {
+                out.append([:])
+                continue
+            }
+            out.append(d)
+        }
+        return out
+    }
+
+    /// 登录态 musicu：Android comm + QQMusic UA + 凭证 Cookie。
+    private func musicuAuth(module: String, method: String, param: [String: Any],
+                           commOverride: [String: Any] = [:], readOnly: Bool = true,
+                           timeout: TimeInterval = 25) async throws -> [String: Any] {
+        var h: [String: String] = ["User-Agent": qqUA]
+        if let cred = loadCredential() { h["Cookie"] = credentialCookieHeader(cred) }
+        return try await musicu(comm: androidComm(overrides: commOverride), module: module, method: method,
+                                param: param, headers: h, readOnly: readOnly, timeout: timeout)
+    }
+
+    /// 匿名 musicu：comm {ct:24, cv:0}（+uin:0），无 UA、无 Cookie。
+    private func musicuAnon(module: String, method: String, param: [String: Any],
+                            withUin: Bool = false, readOnly: Bool = true) async throws -> [String: Any] {
+        var comm: [String: Any] = ["ct": 24, "cv": 0]
+        if withUin { comm["uin"] = 0 }
+        return try await musicu(comm: comm, module: module, method: method, param: param,
+                                headers: [:], readOnly: readOnly)
+    }
+
+    // MARK: 旧 CGI 客户端
+
+    /// GET https://c.y.qq.com/<path>：通用参数 + Referer；JSONP / GB18030 容错；code != 0 抛错。
+    private func cgi(path: String, params: [String: String], referer: String = "https://c.y.qq.com/",
+                     headers: [String: String] = [:], timeout: TimeInterval = 20) async throws -> [String: Any] {
+        var all: [String: String] = [
+            "format": "json", "outCharset": "utf-8", "g_tk": "1124214810",
+            "loginUin": "0", "hostUin": "0", "inCharset": "utf8",
+            "notice": "0", "platform": "yqq.json", "needNewCode": "0",
+        ]
+        for (k, v) in params { all[k] = v }
+        var comps = URLComponents(string: qqCgiBase + path) ?? URLComponents()
+        comps.queryItems = all.map { URLQueryItem(name: $0.key, value: $0.value) }
+        guard let url = comps.url else {
+            throw QQUpstreamError(code: -1, message: "CGI 请求构造失败")
+        }
+        let (data, resp) = try await Upstream.fetch(url, headers: ["Referer": referer].merging(headers) { _, new in new }, timeout: timeout)
+        guard resp.statusCode == 200 else {
+            throw QQUpstreamError(code: resp.statusCode, message: "CGI HTTP \(resp.statusCode)")
+        }
+        let text = qqDecodeText(data)
+        guard let obj = qqParseJSONText(text) as? [String: Any] else {
+            throw QQUpstreamError(code: -1, message: "CGI 返回无法解析")
+        }
+        let code = scInt(obj, "code")
+        guard code == 0 else {
+            throw QQUpstreamError(code: code, message: "CGI 上游错误 \(code)")
+        }
+        return obj
+    }
+
+    // MARK: UCommon 客户端（匿名取链）
+
+    /// GET musicu.fcg?format=json&sign=<固定>&data=<JSON>。
+    private func ucommon(data: [String: Any], timeout: TimeInterval = 25) async throws -> [String: Any] {
+        guard let dataJson = qqJSONData(data),
+              let dataStr = String(data: dataJson, encoding: .utf8) else {
+            throw QQUpstreamError(code: -1, message: "UCommon 请求构造失败")
+        }
+        var comps = URLComponents(string: qqMusicuURL) ?? URLComponents()
+        comps.queryItems = [
+            URLQueryItem(name: "format", value: "json"),
+            URLQueryItem(name: "sign", value: qqUCommonSign),
+            URLQueryItem(name: "data", value: dataStr),
+        ]
+        guard let url = comps.url else {
+            throw QQUpstreamError(code: -1, message: "UCommon 请求构造失败")
+        }
+        let (respData, resp) = try await Upstream.fetch(
+            url,
+            headers: ["Referer": "https://y.qq.com/portal/player.html",
+                      "Content-Type": "application/x-www-form-urlencoded"],
+            timeout: timeout)
+        guard resp.statusCode == 200, let obj = Upstream.jsonObject(respData) else {
+            throw QQUpstreamError(code: resp.statusCode, message: "UCommon HTTP \(resp.statusCode)")
+        }
+        guard scInt(obj, "code") == 0 else {
+            throw QQUpstreamError(code: scInt(obj, "code"), message: "UCommon 上游错误")
+        }
+        guard let req0 = obj["req_0"] as? [String: Any], scInt(req0, "code") == 0 else {
+            throw QQUpstreamError(code: -1, message: "UCommon 返回缺 req_0")
+        }
+        guard let d = req0["data"] as? [String: Any] else {
+            throw QQUpstreamError(code: -1, message: "UCommon 返回缺 data")
+        }
+        return d
+    }
+
+    // MARK: 单曲详情预查
+
+    /// get_song_detail_yqq：登录走 musicu，匿名走 UCommon。返回 track_info 或 nil。
+    private func songDetail(mid: String) async -> [String: Any]? {
+        let param: [String: Any] = ["song_type": 0, "song_mid": mid]
+        if loadCredential() != nil {
+            if let d = try? await musicuAuth(module: "music.pf_song_detail_svr", method: "get_song_detail_yqq", param: param) {
+                return d["track_info"] as? [String: Any]
+            }
+            return nil
+        }
+        let data: [String: Any] = [
+            "comm": ["ct": 24, "cv": 0],
+            "req_0": ["module": "music.pf_song_detail_svr", "method": "get_song_detail_yqq", "param": param],
+        ]
+        if let d = try? await ucommon(data: data) {
+            return d["track_info"] as? [String: Any]
+        }
+        return nil
+    }
+
+    // MARK: - MQTT 5（扫码登录，wss://mu.y.qq.com/ws/handshake，子协议 mqtt）
+
+    private struct QQSession {
+        var key: String
+        var channel: String
+        var state: String // created/waiting/scanned/exchanging/confirmed/expired/failed
+        var createdAt: Date
+        var expiresAt: Date
+        var qrcodeId: String?
+        var imageUrl: String?
+        var wxUuid: String?
+        var wxLast: Int?
+        var wxPollErrors: Int = 0
+        var cookies: [String: String] = [:]
+        var failureReason: String?
+        var retryAfterMs: Int?
+        var listenerReady: Bool = false
+        var listenerFailed: String?
+        var wsTask: URLSessionWebSocketTask?
+        var driverTask: Task<Void, Never>?
+        // ptlogin（Moumusic 形状）：每会话独立 cookie jar，不走共享 jar；
+        // qrsig 单次有效，旧值绝不复用。
+        var ptQrsig: String?
+        var ptLoginSig: String?
+        var ptCookies: [String: String] = [:]
+        var ptPollErrors: Int = 0
+        // 进入 exchanging（扫完换凭证）的时间戳：换凭证中途任务死掉/客户端
+        // 断开时，会话会永远停在 exchanging、下次 check 永远回 802 卡死。
+        // checkQr 里超 90 秒未完成就判失败，前端自动换码重扫。
+        var exchangingAt: Date?
+    }
+}
+
+// MARK: - ptlogin 扫码（Moumusic QQMusicAPI.swift 的接口形状移植）
+//
+// Moumusic 的 QQ 登录不走 Android MQTT，走 QQ 网页 ptlogin：
+//   xlogin 拿 pt_login_sig → ptqrshow 拿图 + qrsig → ptqrlogin 轮询
+//   → 0 成功后手动跟 check_sig 跳转链 → graph authorize 换 code
+//   → musicu QQLogin 换 musickey。
+// 关键形状原样保留：禁重定向会话（每跳 Set-Cookie 都是会话的一部分）、
+// 每会话独立 cookie jar（qrsig 单次有效，旧值残留会让新码扫完也被报过期）、
+// 65 与 68 都算过期、图片先验 magic 再发给前端。
+// Lizi 侧只改接口与流程，不搬 Moumusic 的 SwiftUI。
+
+/// 禁重定向：check_sig 跳转链必须逐跳暴露响应，否则中间 Set-Cookie 会丢。
+private final class QQPtNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+}
+
+private let qqPtUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148"
+
+/// JS 语义的 hash33（ptqrtoken 用）：Double 累加 + 32 位截断，与
+/// Moumusic 的 Swift 移植逐行一致。
+private func qqPtHash33(_ value: String) -> Int {
+    var result: Double = 0
+    for unit in value.utf16 {
+        result += Double(qqPtToInt32Shift(result)) + Double(unit)
+    }
+    return Int(qqPtToInt32(result) & 0x7FFF_FFFF)
+}
+
+/// JS 语义的 hash5381（g_tk 用）。
+private func qqPtHash5381(_ value: String) -> Int {
+    var result: Double = 5381
+    for unit in value.utf16 {
+        result += Double(qqPtToInt32Shift(result)) + Double(unit)
+    }
+    return Int(qqPtToInt32(result) & 0x7FFF_FFFF)
+}
+
+private func qqPtToInt32Shift(_ value: Double) -> Int32 {
+    Int32(bitPattern: qqPtToUInt32(value) &* 32)
+}
+
+private func qqPtToInt32(_ value: Double) -> Int32 {
+    Int32(bitPattern: qqPtToUInt32(value))
+}
+
+private func qqPtToUInt32(_ value: Double) -> UInt32 {
+    var remainder = value.truncatingRemainder(dividingBy: 4_294_967_296)
+    if remainder < 0 { remainder += 4_294_967_296 }
+    return UInt32(remainder)
+}
+
+/// QQ 偶尔回 200 的 HTML 反爬页：只认图片 magic，否则一律当取码失败。
+private func qqPtLooksLikeImage(_ data: Data) -> Bool {
+    let bytes = [UInt8](data.prefix(12))
+    if bytes.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) { return true }
+    if bytes.starts(with: [0xFF, 0xD8, 0xFF]) { return true }
+    if bytes.starts(with: [0x47, 0x49, 0x46, 0x38]) { return true }
+    return bytes.count >= 12 && Array(bytes[0...3]) == [0x52, 0x49, 0x46, 0x46]
+        && Array(bytes[8...11]) == [0x57, 0x45, 0x42, 0x50]
+}
+
+private func qqPtImageMime(_ data: Data) -> String {
+    let bytes = [UInt8](data.prefix(12))
+    if bytes.starts(with: [0xFF, 0xD8, 0xFF]) { return "image/jpeg" }
+    if bytes.starts(with: [0x47, 0x49, 0x46, 0x38]) { return "image/gif" }
+    if bytes.count >= 12 && Array(bytes[0...3]) == [0x52, 0x49, 0x46, 0x46]
+        && Array(bytes[8...11]) == [0x57, 0x45, 0x42, 0x50] { return "image/webp" }
+    return "image/png"
+}
+
+/// ptuiCB('66',...) / ptui_callback('66',...)：不认回调名，只取括号里的字段。
+private func qqPtParseCallback(_ body: String) -> (code: String, url: URL?)? {
+    let fields = qqPtCallbackFields(body)
+    guard fields.count >= 3, let code = fields.first else { return nil }
+    let candidate = fields.dropFirst().first(where: { $0.hasPrefix("http") })
+    return (code, candidate.flatMap(URL.init(string:)))
+}
+
+private func qqPtCallbackFields(_ body: String) -> [String] {
+    guard let start = body.firstIndex(of: "("),
+          let end = body.lastIndex(of: ")"), start < end else { return [] }
+    let payload = body[body.index(after: start)..<end]
+    return payload.split(separator: ",", omittingEmptySubsequences: false).map { value in
+        var item = String(value).trimmingCharacters(in: .whitespacesAndNewlines)
+        if item.hasPrefix("'") && item.hasSuffix("'") && item.count >= 2 {
+            item.removeFirst()
+            item.removeLast()
+        } else if item.hasPrefix("\"") && item.hasSuffix("\"") && item.count >= 2 {
+            item.removeFirst()
+            item.removeLast()
+        }
+        return item
+            .replacingOccurrences(of: "\\'", with: "'")
+            .replacingOccurrences(of: "\\\"", with: "\"")
+    }
+}
+
+private func qqPtFormEncode(_ fields: [String: String]) -> String {
+    var allowed = CharacterSet.alphanumerics
+    allowed.insert(charactersIn: "-._~")
+    return fields.map { key, value in
+        let escapedKey = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key
+        let escapedValue = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+        return "\(escapedKey)=\(escapedValue)"
+    }.joined(separator: "&")
+}
+
+private func qqPtExtractCode(from urlString: String) -> String? {
+    guard let url = URL(string: urlString),
+          let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        return nil
+    }
+    return components.queryItems?.first(where: { $0.name == "code" })?.value
+}
+
+/// graph.qq.com 通常把 code 放 302 Location；个别边缘节点回 200 HTML，
+/// 里面同样带跳转 URL。两种都认，但绝不把任意 body 当凭证。
+private func qqPtExtractCode(from data: Data, response: HTTPURLResponse) -> String? {
+    if let location = response.value(forHTTPHeaderField: "Location"),
+       let code = qqPtExtractCode(from: location),
+       !code.isEmpty {
+        return code
+    }
+    guard let body = String(data: data, encoding: .utf8), !body.isEmpty else { return nil }
+    let candidates = [body, body.replacingOccurrences(of: "&amp;", with: "&")]
+    for candidate in candidates {
+        if let match = candidate.range(of: #"(?:[?&])code=([^&#\"'\s<>]+)"#, options: .regularExpression) {
+            let fragment = String(candidate[match])
+            let value = fragment
+                .split(separator: "=", maxSplits: 1)
+                .dropFirst()
+                .first.map(String.init) ?? ""
+            if let decoded = value.removingPercentEncoding, !decoded.isEmpty {
+                return decoded
+            }
+        }
+    }
+    return nil
+}
+
+/// graph authorize 失败时 body 里常带的 QQ 业务码 → 中文原因。
+/// 只取码、不记 body（body 里可能带跳转地址与凭证片段）。
+private func qqPtAuthorizeErrorReason(_ data: Data) -> String? {
+    guard let body = String(data: data, encoding: .utf8), !body.isEmpty else { return nil }
+    let map = [
+        "100035": "QQ 拒绝了这次登录（100035 用户未登录），请改走网页登录",
+        "100012": "QQ 要求 POST 方式换凭证（100012），请重试或改走网页登录",
+        "100010": "回调地址不合法（100010），请重试或改走网页登录",
+        "100011": "QQ 拒绝了这次登录（100011），请改走网页登录",
+    ]
+    for (code, reason) in map where body.contains(code) { return reason }
+    return nil
+}
+
+private func qqPtText(_ value: Any?) -> String? {
+    if let value = value as? String, !value.isEmpty { return value }
+    if let value = value as? NSNumber { return value.stringValue }
+    return nil
+}
+
+private func qqPtFirstInteger(in object: [String: Any], containers: [String], keys: [String]) -> Int? {
+    for container in containers {
+        if let nested = object[container] as? [String: Any],
+           let value = qqPtInteger(in: nested, keys: keys) {
+            return value
+        }
+    }
+    return qqPtInteger(in: object, keys: keys)
+}
+
+private func qqPtInteger(in object: [String: Any], keys: [String]) -> Int? {
+    for key in keys {
+        if let value = object[key] as? NSNumber { return value.intValue }
+        if let value = object[key] as? String, let number = Int(value) { return number }
+    }
+    return nil
+}
+
+/// 兜底：有的版本把 musickey 藏在 data/result 之下，递归找一遍。
+private func qqPtFindCredentials(_ value: Any) -> (key: String?, id: String?) {
+    if let dictionary = value as? [String: Any] {
+        var key: String?
+        var id: String?
+        for (name, child) in dictionary {
+            switch name.lowercased() {
+            case "musickey", "qm_keyst", "qqmusic_key", "music_key":
+                if key == nil, let v = qqPtText(child), !v.isEmpty { key = v }
+            case "musicid", "uin", "loginuin", "qqmusic_uin":
+                if id == nil, let v = qqPtText(child), !v.isEmpty, v != "0" { id = v }
+            default:
+                break
+            }
+            let nested = qqPtFindCredentials(child)
+            if key == nil { key = nested.key }
+            if id == nil { id = nested.id }
+            if key != nil && id != nil { return (key, id) }
+        }
+        return (key, id)
+    }
+    if let array = value as? [Any] {
+        for child in array {
+            let found = qqPtFindCredentials(child)
+            if found.key != nil || found.id != nil { return found }
+        }
+    }
+    return (nil, nil)
+}
+
+/// MQTT 固定头 + 变长剩余长度 + 载荷。
+private func qqMqttPacket(type: UInt8, flags: UInt8, payload: Data) -> Data {
+    var out = Data([type << 4 | flags])
+    var n = payload.count
+    repeat {
+        var b = UInt8(n % 128)
+        n /= 128
+        if n > 0 { b |= 0x80 }
+        out.append(b)
+    } while n > 0
+    out.append(payload)
+    return out
+}
+
+private func qqMqttUTF8(_ s: String) -> Data {
+    let bytes = Data(s.utf8)
+    var out = Data([UInt8((bytes.count >> 8) & 0xff), UInt8(bytes.count & 0xff)])
+    out.append(bytes)
+    return out
+}
+
+private func qqMqttVarint(_ n: Int) -> Data {
+    var out = Data()
+    var v = n
+    repeat {
+        var b = UInt8(v % 128)
+        v /= 128
+        if v > 0 { b |= 0x80 }
+        out.append(b)
+    } while v > 0
+    return out
+}
+
+/// MQTT 5 属性块：[(属性 id, 已编码值)] → 变长总长度 + 拼接。
+private func qqMqttProperties(_ props: [(UInt8, Data)]) -> Data {
+    var body = Data()
+    for (id, value) in props {
+        body.append(id)
+        body.append(value)
+    }
+    return qqMqttVarint(body.count) + body
+}
+
+/// CONNECT 包（MQTT 5，Clean Start，KeepAlive 45，authMethod pass，用户属性 5 组）。
+private func qqMqttConnect(clientId: String, qrcodeId: String) -> Data {
+    var variable = Data()
+    variable.append(qqMqttUTF8("MQTT"))
+    variable.append(0x05) // 协议级 5
+    variable.append(0x02) // Clean Start
+    variable.append(contentsOf: [0x00, 0x2D]) // KeepAlive 45
+    let props = qqMqttProperties([
+        (0x15, qqMqttUTF8("pass")),
+        (0x26, qqMqttUTF8("tmeAppID") + qqMqttUTF8("qqmusic")),
+        (0x26, qqMqttUTF8("business") + qqMqttUTF8("management")),
+        (0x26, qqMqttUTF8("hashTag") + qqMqttUTF8(qrcodeId)),
+        (0x26, qqMqttUTF8("clientTag") + qqMqttUTF8("management.user")),
+        (0x26, qqMqttUTF8("userID") + qqMqttUTF8(qrcodeId)),
+    ])
+    variable.append(props)
+    variable.append(qqMqttUTF8(clientId))
+    return qqMqttPacket(type: 1, flags: 0, payload: variable)
+}
+
+/// SUBSCRIBE 包（PacketId 1，authorization=tmelogin，pubsub=unicast）。
+private func qqMqttSubscribe(qrcodeId: String) -> Data {
+    var variable = Data([0x00, 0x01]) // PacketId 1
+    variable.append(qqMqttProperties([
+        (0x26, qqMqttUTF8("authorization") + qqMqttUTF8("tmelogin")),
+        (0x26, qqMqttUTF8("pubsub") + qqMqttUTF8("unicast")),
+    ]))
+    variable.append(qqMqttUTF8("management.qrcode_login/\(qrcodeId)"))
+    variable.append(0x00) // QoS 0
+    return qqMqttPacket(type: 8, flags: 0x02, payload: variable)
+}
+
+private let qqMqttPingreq = Data([0xC0, 0x00])
+
+/// 从缓冲里拆出完整 MQTT 包；返回 [(包类型, 变头+载荷)]，不完整时留待下次。
+private func qqMqttSplitPackets(_ buffer: inout Data) -> [(Int, Data)] {
+    var out: [(Int, Data)] = []
+    var offset = 0
+    while offset < buffer.count {
+        let first = buffer[offset]
+        let type = Int(first >> 4)
+        var multiplier = 1
+        var length = 0
+        var idx = offset + 1
+        var done = false
+        while idx < buffer.count {
+            let b = buffer[idx]
+            idx += 1
+            length += Int(b & 0x7F) * multiplier
+            multiplier *= 128
+            if b & 0x80 == 0 { done = true; break }
+            if multiplier > 128 * 128 * 128 { break }
+        }
+        guard done, idx + length <= buffer.count else { break }
+        out.append((type, buffer.subdata(in: idx..<(idx + length))))
+        offset = idx + length
+    }
+    if offset > 0 { buffer.removeFirst(offset) }
+    return out
+}
+
+/// 解析 MQTT 5 属性块：返回用户属性字典与 serverReference（CONNACK 重定向用）。
+private func qqMqttParseProperties(_ data: Data, offset: inout Int) -> (user: [String: String], serverReference: String?) {
+    var user: [String: String] = [:]
+    var serverReference: String?
+    guard offset < data.count else { return (user, serverReference) }
+    // 变长属性总长度（与 qqMqttSplitPackets 同款上限：MQTT 变长整数最多 4 字节，
+    // 超过就截断丢弃；不设上限时 multiplier *= 128 会在 9 个连续 0x80 后溢出 Int64 闪退）。
+    var propLen = 0
+    var multiplier = 1
+    while offset < data.count {
+        let b = data[offset]
+        offset += 1
+        propLen += Int(b & 0x7F) * multiplier
+        multiplier *= 128
+        if b & 0x80 == 0 { break }
+        if multiplier > 128 * 128 * 128 { break }
+    }
+    let end = min(data.count, offset + propLen)
+    func readUTF8() -> String? {
+        guard offset + 2 <= end else { return nil }
+        let n = Int(data[offset]) << 8 | Int(data[offset + 1])
+        offset += 2
+        guard offset + n <= end else { return nil }
+        let s = String(data: data.subdata(in: offset..<(offset + n)), encoding: .utf8)
+        offset += n
+        return s
+    }
+    func readBytes(_ n: Int) -> Data? {
+        guard offset + n <= end else { return nil }
+        let d = data.subdata(in: offset..<(offset + n))
+        offset += n
+        return d
+    }
+    while offset < end {
+        let id = data[offset]
+        offset += 1
+        switch id {
+        case 0x01, 0x24, 0x25, 0x28, 0x29, 0x2A: // 1 字节
+            _ = readBytes(1)
+        case 0x21, 0x22, 0x23: // 2 字节
+            _ = readBytes(2)
+        case 0x02, 0x11, 0x27: // 4 字节
+            _ = readBytes(4)
+        case 0x03, 0x08, 0x15, 0x1C, 0x1F: // UTF-8 字符串
+            if let s = readUTF8(), id == 0x1C { serverReference = s }
+        case 0x09: // 二进制（2 字节长度）
+            if let n = readBytes(2) {
+                let len = Int(n[0]) << 8 | Int(n[1])
+                _ = readBytes(len)
+            }
+        case 0x0B: // 变长整数
+            while offset < end {
+                let b = data[offset]
+                offset += 1
+                if b & 0x80 == 0 { break }
+            }
+        case 0x26: // 用户属性：两个 UTF-8 字符串
+            if let k = readUTF8(), let v = readUTF8() { user[k] = v }
+        default:
+            return (user, serverReference)
+        }
+    }
+    offset = end
+    return (user, serverReference)
+}
+
+/// MQTT 驱动的终结状态（extension 内不能声明带访问修饰符的嵌套类型，故放文件作用域）。
+private enum MqttOutcome: Sendable { case closed; case redirect(String); case expired }
+
+extension QQService {
+    private func qqMqttRedirectPath(current: String, reference: String) -> String {
+        let trimmed = current.hasSuffix("/") ? String(current.dropLast()) : current
+        var parts = trimmed.split(separator: "/").map(String.init)
+        if let last = parts.last, last.contains(":") {
+            parts[parts.count - 1] = reference
+        } else {
+            parts.append(reference)
+        }
+        return "/" + parts.joined(separator: "/")
+    }
+
+    // MARK: MQTT 驱动
+
+    /// 等 SUBACK 就绪（轮询标志，最多 20 秒）。
+    /// 等监听器就绪：SUBACK 正常 1 秒内就到。只等 3 秒——以前等满 20 秒才回，
+    /// 前端 60 秒超时 + 用户反复点，会把一次登录放大成好几个并发会话
+    /// （内存临界的真机上这就是压垮的稻草）。3 秒没到也不算失败：驱动还
+    /// 在后台连，check 轮询会在监听器失败时立刻报 800 + 原因，前端自动换码。
+    private func waitListenerReady(key: String, maxWaitMs: Int = 3000) async -> Bool {
+        let iterations = max(1, maxWaitMs / 100)
+        for _ in 0..<iterations {
+            guard let s = qrSessions[key] else { return false }
+            if s.listenerReady { return true }
+            if s.listenerFailed != nil { return false }
+            if s.state == "expired" || s.state == "failed" { return false }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return qrSessions[key]?.listenerReady ?? false
+    }
+
+    private func failSession(key: String, reason: String) async {
+        guard var s = qrSessions[key] else { return }
+        if s.state == "confirmed" { return }
+        s.state = "failed"
+        s.failureReason = reason
+        s.listenerFailed = reason
+        qrSessions[key] = s
+        // 驱动失败是唯一的落点（MQTT 握手/重定向/CONNACK/SUBACK/数据异常都走
+        // 这里）：以前静默，只剩前端一句 800，真机排障无从下手。
+        DiagLog.shared.recordLog(category: "qq", message: "二维码会话失败", fields: ["reason": reason])
+        nextQrAllowedAt = Date().addingTimeInterval(qqQrCooldown)
+        s.wsTask?.cancel()
+        s.driverTask?.cancel()
+    }
+
+    private func runMqttDriver(key: String) async {
+        var path = "/ws/handshake"
+        var redirects = 0
+        while redirects <= 3 {
+            let (finished, redirect) = await mqttConnectOnce(key: key, path: path)
+            if finished { return }
+            if let redirect {
+                path = redirect
+                redirects += 1
+                continue
+            }
+            return
+        }
+        await failSession(key: key, reason: "MQTT 重定向次数过多")
+    }
+
+    private func mqttConnectOnce(key: String, path: String) async -> (finished: Bool, redirect: String?) {
+        guard let session = qrSessions[key], let qrcodeId = session.qrcodeId,
+              let url = URL(string: "wss://mu.y.qq.com\(path)") else {
+            return (true, nil)
+        }
+        // 握手 10 秒：黑洞网络下 30 秒才失败，驱动在后台挂着、前端又看不到
+        // 码，用户会反复点。10 秒失败后 failSession 会标失败，check 轮询
+        // 下一轮就报 800 + 原因，前端自动换码。
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("mqtt", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        let ws = URLSession.shared.webSocketTask(with: req)
+        if var s = qrSessions[key] { s.wsTask = ws; qrSessions[key] = s }
+        ws.resume()
+        let clientId = "\(Int(Date().timeIntervalSince1970 * 1000))\(qqRandomDigits(4))"
+        do {
+            try await ws.send(.data(qqMqttConnect(clientId: clientId, qrcodeId: qrcodeId)))
+        } catch {
+            await failSession(key: key, reason: "MQTT 连接失败")
+            return (true, nil)
+        }
+        let outcome = await withTaskGroup(of: MqttOutcome.self) { group in
+            group.addTask { await self.mqttReceiveLoop(key: key, ws: ws) }
+            group.addTask { await self.mqttPingLoop(key: key, ws: ws) }
+            group.addTask { await self.mqttExpiryWatch(key: key) }
+            var first: MqttOutcome = .closed
+            if let o = await group.next() { first = o }
+            group.cancelAll()
+            // receive 循环正停在 ws.receive() 里，Task 取消唤不醒它；
+            // 不在这里关 socket，群组要等服务端关连接才退（Linux 对照实测：hang）。
+            ws.cancel()
+            return first
+        }
+        ws.cancel()
+        if var s = qrSessions[key], s.wsTask === ws { s.wsTask = nil; qrSessions[key] = s }
+        if case .redirect(let p) = outcome { return (false, p) }
+        return (true, nil)
+    }
+
+    private func mqttReceiveLoop(key: String, ws: URLSessionWebSocketTask) async -> MqttOutcome {
+        var buffer = Data()
+        while true {
+            do {
+                let msg = try await ws.receive()
+                switch msg {
+                case .data(let d): buffer.append(d)
+                case .string(let s): buffer.append(Data(s.utf8))
+                @unknown default: break
+                }
+            } catch {
+                return .closed
+            }
+            // 未成包缓冲上限 1MB：异常服务端一直发碎片会把 buffer 撑爆（内存紧张
+            // 时这就是压垮的稻草）；超了按会话失败处理，驱动随之结束，不等 180 秒超时。
+            if buffer.count > 1_048_576 {
+                await failSession(key: key, reason: "MQTT 数据异常（未成包超过 1MB）")
+                return .closed
+            }
+            for (type, payload) in qqMqttSplitPackets(&buffer) {
+                if let outcome = await handleMqttPacket(key: key, ws: ws, type: type, payload: payload) {
+                    return outcome
+                }
+                if let s = qrSessions[key], ["confirmed", "expired", "failed"].contains(s.state) {
+                    return .closed
+                }
+            }
+        }
+    }
+
+    private func mqttPingLoop(key: String, ws: URLSessionWebSocketTask) async -> MqttOutcome {
+        while true {
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            if Task.isCancelled { return .closed }
+            do { try await ws.send(.data(qqMqttPingreq)) } catch { return .closed }
+        }
+    }
+
+    private func mqttExpiryWatch(key: String) async -> MqttOutcome {
+        guard let s = qrSessions[key] else { return .closed }
+        let delay = s.expiresAt.timeIntervalSinceNow
+        if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+        if Task.isCancelled { return .closed }
+        if var s2 = qrSessions[key], !["confirmed", "expired", "failed"].contains(s2.state) {
+            s2.state = "expired"
+            qrSessions[key] = s2
+        }
+        return .expired
+    }
+
+    private func handleMqttPacket(key: String, ws: URLSessionWebSocketTask, type: Int, payload: Data) async -> MqttOutcome? {
+        switch type {
+        case 2: // CONNACK
+            guard payload.count >= 2 else {
+                await failSession(key: key, reason: "MQTT CONNACK 异常")
+                return .closed
+            }
+            let reason = payload[1]
+            if reason == 0 {
+                if let qrcodeId = qrSessions[key]?.qrcodeId {
+                    try? await ws.send(.data(qqMqttSubscribe(qrcodeId: qrcodeId)))
+                }
+                return nil
+            }
+            if reason == 0x9c || reason == 0x9d {
+                var off = 2
+                let (_, ref) = qqMqttParseProperties(payload, offset: &off)
+                if let ref {
+                    return .redirect(qqMqttRedirectPath(current: "/ws/handshake", reference: ref))
+                }
+            }
+            await failSession(key: key, reason: "MQTT CONNACK 拒绝：0x\(String(reason, radix: 16))")
+            return .closed
+        case 9: // SUBACK
+            var off = 2
+            _ = qqMqttParseProperties(payload, offset: &off)
+            var rejected = false
+            while off < payload.count {
+                if payload[off] >= 0x80 { rejected = true }
+                off += 1
+            }
+            if rejected {
+                await failSession(key: key, reason: "MQTT SUBACK 拒绝")
+                return .closed
+            }
+            if var s = qrSessions[key] { s.listenerReady = true; qrSessions[key] = s }
+            return nil
+        case 3: // PUBLISH：topic + 属性（用户属性 type）+ JSON 体
+            guard payload.count >= 2 else { return nil }
+            let topicLen = Int(payload[0]) << 8 | Int(payload[1])
+            var off = 2 + topicLen
+            guard off <= payload.count else { return nil }
+            let (user, _) = qqMqttParseProperties(payload, offset: &off)
+            let bodyData = payload.subdata(in: off..<payload.count)
+            let body = (try? JSONSerialization.jsonObject(with: bodyData)) as? [String: Any] ?? [:]
+            let evType = user["type"] ?? scStr(body, "type")
+            await mqttEvent(key: key, type: evType, body: body)
+            return nil
+        case 13: // PINGRESP
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    private func mqttEvent(key: String, type: String, body: [String: Any]) async {
+        guard var s = qrSessions[key] else { return }
+        switch type {
+        case "waiting":
+            s.state = "waiting"
+        case "scanned":
+            s.state = "scanned"
+        case "cookies":
+            s.state = "exchanging"
+            let cookies = (body["cookies"] as? [String: Any]) ?? [:]
+            func cookieVal(_ name: String) -> String {
+                if let d = cookies[name] as? [String: Any], let v = d["value"] as? String { return v }
+                if let v = cookies[name] as? String { return v }
+                return ""
+            }
+            s.cookies = ["musicid": cookieVal("qqmusic_uin"),
+                         "token": cookieVal("qqmusic_key"),
+                         "tmeLoginType": cookieVal("tmeLoginType")]
+            qrSessions[key] = s
+            await exchangeMqttCredential(key: key)
+            return
+        case "canceled":
+            s.state = "failed"
+            s.failureReason = "扫码已取消"
+        case "timeout":
+            s.state = "expired"
+        case "loginFailed":
+            s.state = "failed"
+            s.failureReason = scStr(body, "message")
+        default:
+            break
+        }
+        qrSessions[key] = s
+    }
+
+    // MARK: 换凭证
+
+    private func musicuRawBody(_ bodyString: String, timeout: TimeInterval = 25) async throws -> [String: Any] {
+        guard let bodyData = bodyString.data(using: .utf8), let url = URL(string: qqMusicuURL) else {
+            throw QQUpstreamError(code: -1, message: "musicu 请求构造失败")
+        }
+        let (data, resp) = try await Upstream.fetch(url, headers: ["Content-Type": "application/json", "User-Agent": qqUA],
+                                                    timeout: timeout, method: "POST", body: bodyData)
+        guard resp.statusCode == 200, let obj = Upstream.jsonObject(data), scInt(obj, "code") == 0,
+              let req0 = obj["req_0"] as? [String: Any], scInt(req0, "code") == 0,
+              let d = req0["data"] as? [String: Any] else {
+            throw QQUpstreamError(code: -1, message: "musicu 上游错误")
+        }
+        return d
+    }
+
+    private func credentialFrom(data: [String: Any], defaultLoginType: Int) throws -> [String: Any] {
+        let musicid = scStrOrNum(data, "musicid")
+        let strId = scStrOrNum(data, "str_musicid")
+        let musickey = scStr(data, "musickey")
+        guard !musickey.isEmpty, !(musicid.isEmpty && strId.isEmpty) else {
+            throw QQUpstreamError(code: -1, message: "换凭证返回缺 musickey")
+        }
+        var cred: [String: Any] = [
+            "musicid": musicid.isEmpty ? strId : musicid,
+            "str_musicid": strId.isEmpty ? musicid : strId,
+            "musickey": musickey,
+            "loginType": scInt(data, "loginType") == 0 ? defaultLoginType : scInt(data, "loginType"),
+            "musickeyCreateTime": Date().timeIntervalSince1970,
+            "keyExpiresIn": 259200,
+        ]
+        for k in ["openid", "refresh_token", "refresh_key", "unionid", "encryptUin", "nick", "nickname", "logo", "avatarUrl"] {
+            let v = scStr(data, k)
+            if !v.isEmpty { cred[k] = v }
+        }
+        if let exp = data["keyExpiresIn"] as? NSNumber, exp.intValue > 0 { cred["keyExpiresIn"] = exp.intValue }
+        if let ct = data["musickeyCreateTime"] as? NSNumber, ct.doubleValue > 0 { cred["musickeyCreateTime"] = ct.doubleValue }
+        return cred
+    }
+
+    /// LoginServer/Login 换凭证。musicid 超 JS 安全整数时送不带引号的数字面量（ExactInteger）。
+    private func loginExchange(musicid: String, qrcodeId: String, token: String, loginType: Int) async throws -> [String: Any] {
+        let needsRaw: Bool = {
+            guard musicid.count >= 16, musicid.allSatisfy({ $0.isNumber }) else { return false }
+            if musicid.count > 16 { return true }
+            return (Int(musicid) ?? 0) > 9007199254740991
+        }()
+        if needsRaw {
+            guard let commData = qqJSONData(androidComm(overrides: ["tmeLoginType": loginType])),
+                  let commStr = String(data: commData, encoding: .utf8) else {
+                throw QQUpstreamError(code: -1, message: "musicu 请求构造失败")
+            }
+            let bodyStr = "{\"comm\":\(commStr),\"req_0\":{\"module\":\"music.login.LoginServer\",\"method\":\"Login\",\"param\":{\"musicid\":\(musicid),\"qrCodeID\":\"\(qqJSONStringEscape(qrcodeId))\",\"token\":\"\(qqJSONStringEscape(token))\"}}}"
+            let d = try await musicuRawBody(bodyStr)
+            return try credentialFrom(data: d, defaultLoginType: loginType)
+        }
+        let param: [String: Any] = ["musicid": Int(musicid) ?? 0, "qrCodeID": qrcodeId, "token": token]
+        let d = try await musicuAuth(module: "music.login.LoginServer", method: "Login", param: param,
+                                     commOverride: ["tmeLoginType": loginType], readOnly: false)
+        return try credentialFrom(data: d, defaultLoginType: loginType)
+    }
+
+    private func finalizeCredential(key: String, cred: [String: Any]) async {
+        saveCredential(cred)
+        if let profile = await getLoginProfile() {
+            var c = cred
+            if let nick = profile["nickname"] as? String, !nick.isEmpty { c["nickname"] = nick }
+            if let av = profile["avatar"] as? String, !av.isEmpty { c["avatarUrl"] = av }
+            saveCredential(c)
+        }
+        if var s = qrSessions[key] {
+            s.state = "confirmed"
+            s.expiresAt = max(s.expiresAt, Date().addingTimeInterval(qqQrClaim))
+            qrSessions[key] = s
+            s.wsTask?.cancel()
+            s.driverTask?.cancel()
+        }
+    }
+
+    private func exchangeMqttCredential(key: String) async {
+        guard let s = qrSessions[key] else { return }
+        let musicid = s.cookies["musicid"] ?? ""
+        let token = s.cookies["token"] ?? ""
+        guard let qrcodeId = s.qrcodeId, !musicid.isEmpty, !token.isEmpty else {
+            await failSession(key: key, reason: "MQTT 票据缺失")
+            return
+        }
+        let loginType = s.channel == "qqmusic" ? (s.cookies["tmeLoginType"] == "1" ? 1 : 6) : 6
+        do {
+            let cred = try await loginExchange(musicid: musicid, qrcodeId: qrcodeId, token: token, loginType: loginType)
+            await finalizeCredential(key: key, cred: cred)
+        } catch {
+            // 兜底：MQTT 原始票据直连 GetLoginUserInfo 校验一次；失败恢复原有登录态。
+            let direct: [String: Any] = ["musicid": musicid, "str_musicid": musicid,
+                                          "musickey": token, "loginType": loginType,
+                                          "musickeyCreateTime": Date().timeIntervalSince1970,
+                                          "keyExpiresIn": 259200]
+            let previous = loadCredential()
+            saveCredential(direct)
+            if await getLoginProfile() != nil {
+                await finalizeCredential(key: key, cred: direct)
+            } else {
+                saveCredential(previous)
+                await failSession(key: key, reason: "换凭证失败")
+            }
+        }
+    }
+
+    private func exchangeWechatCredential(key: String, code: String) async {
+        guard !code.isEmpty else {
+            await failSession(key: key, reason: "WeChat authorization missing code")
+            return
+        }
+        do {
+            let d = try await musicuAuth(module: "music.login.LoginServer", method: "Login",
+                                         param: ["code": code, "strAppid": qqWechatAppId],
+                                         commOverride: ["tmeLoginType": 1], readOnly: false)
+            let cred = try credentialFrom(data: d, defaultLoginType: 1)
+            await finalizeCredential(key: key, cred: cred)
+        } catch {
+            await failSession(key: key, reason: "换凭证失败")
+        }
+    }
+
+    // MARK: 扫码会话
+
+    private func refreshAndroidSession() async throws {
+        var d = loadDevice()
+        let param: [String: Any] = ["uid": d["sessionUid"] ?? "", "vkey": 0, "caller": 0]
+        // 登录链路单次 10 秒：默认 25 秒 × 2 次重试 × 两次 musicu 调用，
+        // 慢网下拿码请求能拖过前端 60 秒超时，前端 abort、用户重拍，
+        // 并发会话越攒越多。10 秒对正常调用（1–3 秒）绰绰有余。
+        let data = try await musicuAuth(module: "music.getSession.session", method: "GetSession", param: param, timeout: 10)
+        guard let session = data["session"] as? [String: Any] else {
+            throw QQUpstreamError(code: -1, message: "GetSession 返回缺 session")
+        }
+        d["sessionUid"] = scStrOrNum(session, "uid")
+        d["sessionSid"] = scStr(session, "sid")
+        d["sessionVkey"] = scStr(session, "vkey")
+        device = d
+        saveDevice()
+    }
+
+    private func createSession(channel: String) async throws -> String {
+        let ch = qqChannels.contains(channel) ? channel : "qqmusic"
+        let now = Date()
+        if now < nextQrAllowedAt {
+            throw QQAuthError(429, "QR login is temporarily backed off",
+                              retryAfterMs: Int(nextQrAllowedAt.timeIntervalSince(now) * 1000))
+        }
+        if creatingSession { throw QQAuthError(409, "Another QR login is already active") }
+        if qrSessions.values.contains(where: { $0.state == "exchanging" }) {
+            throw QQAuthError(409, "Another QR login is already active")
+        }
+        // 先取消被丢弃的过期会话的驱动/连接：只过滤字典不取消，驱动会空跑到
+        // 180 秒（qqQrTTL）才退，点一次登录就漏一个驱动。
+        for s in qrSessions.values where s.expiresAt <= now {
+            s.wsTask?.cancel()
+            s.driverTask?.cancel()
+        }
+        qrSessions = qrSessions.filter { $0.value.expiresAt > now }
+        // 单飞：一次只允许一个活着的二维码会话。前端「登录」按钮在拿码期间
+        // 没禁用，用户连点（或码半天不出再点）会起第二个会话；旧会话前端
+        // 拿不到 key、cancel 不到它，旧驱动就一直跑到 180 秒过期。新会话
+        // 建起来之前先把旧的活会话顶掉（只取消任务 + 删字典，不走 failSession：
+        // failSession 会设 15 秒冷却，刚好把正在进行的这次登录也挡住）。
+        // exchanging 的会话上面已经 409 拦住了，不会走到这里。
+        let superseded = qrSessions.filter { ["created", "waiting", "scanned"].contains($0.value.state) }
+        for (k, s) in superseded {
+            s.wsTask?.cancel()
+            s.driverTask?.cancel()
+            qrSessions.removeValue(forKey: k)
+        }
+        if !superseded.isEmpty {
+            DiagLog.shared.recordLog(category: "qq", message: "顶掉旧二维码会话",
+                                     fields: ["reason": "\(superseded.count) 个"])
+        }
+        creatingSession = true
+        defer { creatingSession = false }
+        do {
+            try await refreshAndroidSession()
+        } catch {
+            // 别把上游原因吞掉：以前这里只回一句固定文案，真机排障时
+            // 分不清是 GetSession 超时、被拒还是解析失败。
+            let detail = (error as? QQUpstreamError)?.message ?? error.localizedDescription
+            let code = (error as? QQUpstreamError)?.code ?? -1
+            DiagLog.shared.recordLog(category: "qq", message: "QQ 设备会话建立失败",
+                                     fields: ["code": code, "reason": detail])
+            throw QQAuthError(502, "QQ 设备会话建立失败：\(detail)")
+        }
+        let key = qqRandomHex(48)
+        qrSessions[key] = QQSession(key: key, channel: ch, state: "created", createdAt: now,
+                                    expiresAt: now.addingTimeInterval(qqQrTTL))
+        return key
+    }
+
+    private func createQr(key: String) async throws -> String {
+        guard var s = qrSessions[key] else { throw QQAuthError(404, "QR code expired") }
+        if let img = s.imageUrl, !img.isEmpty { return img }
+        guard s.state == "created" else { throw QQAuthError(409, "QR session is not in created state") }
+        if s.channel == "wechat" {
+            let (uuid, img) = try await wechatCreateQr()
+            // 同下：上游调用回来之后会话可能已被取消/顶掉，别把死会话写回字典。
+            guard qrSessions[key] != nil else {
+                DiagLog.shared.recordLog(category: "qq", message: "二维码已生成但会话已取消",
+                                         fields: ["reason": "session gone during wechatCreateQr"])
+                throw QQAuthError(404, "QR code expired")
+            }
+            if let existingImg = qrSessions[key]?.imageUrl, !existingImg.isEmpty { return existingImg }
+            s.wxUuid = uuid
+            s.imageUrl = img
+            s.state = "waiting"
+            qrSessions[key] = s
+            return img
+        }
+        // ptlogin 优先（Moumusic 形状）：取码 + 轮询都是轻量 HTTPS，
+        // 取码那一刻不启动任何 WebSocket/驱动——二维码「一准备转出来」
+        // 正是旧链路同时起 MQTT 驱动的时刻。ptlogin 失败才走 MQTT 兜底。
+        // qq（手机 QQ）也走 ptlogin：ptlogin 的码就是 QQ 网页登录码，本来就是给手机 QQ 扫的；
+        // 第 7 轮只把 qqmusic 切过来，qq 还留在 MQTT 老路上，用户 14:44 报的正是这条路
+        // 取码时（码还没刷新出来）就崩。ptlogin 失败时下面照样回落到 MQTT，不丢兜底。
+        if s.channel == "qqmusic" || s.channel == "ptlogin" || s.channel == "qq" {
+            do {
+                let img = try await ptQrCodeWithRetry(key: key)
+                guard qrSessions[key] != nil else {
+                    DiagLog.shared.recordLog(category: "qq", message: "二维码已生成但会话已取消，不起轮询",
+                                             fields: ["reason": "session gone during ptQrshow"])
+                    throw QQAuthError(404, "QR code expired")
+                }
+                if let existingImg = qrSessions[key]?.imageUrl, !existingImg.isEmpty { return existingImg }
+                if var s2 = qrSessions[key] {
+                    s2.imageUrl = img
+                    s2.state = "waiting"
+                    s2.channel = "ptlogin"
+                    // 客户端侧过期只做兜底（300 秒）：服务端 65/68 先到为准，
+                    // 别让 180 秒的 MQTT TTL 提前掐掉一张还有效的码。
+                    s2.expiresAt = max(s2.expiresAt, Date().addingTimeInterval(300))
+                    qrSessions[key] = s2
+                }
+                return img
+            } catch let e as QQAuthError {
+                // 404 是会话已死，别再兜底；其它失败走 MQTT。
+                if e.code == 404 { throw e }
+                DiagLog.shared.recordLog(category: "qq", message: "ptlogin 取码失败，走 MQTT 兜底",
+                                         fields: ["reason": e.message])
+            } catch {
+                DiagLog.shared.recordLog(category: "qq", message: "ptlogin 取码失败，走 MQTT 兜底",
+                                         fields: ["reason": error.localizedDescription])
+            }
+        }
+        let t0 = Date()
+        let data: [String: Any]
+        do {
+            data = try await musicuAuth(module: "music.login.LoginServer", method: "CreateQRCode",
+                                        param: ["tmeAppID": "qqmusic", "ct": 11, "cv": 14090008],
+                                        commOverride: ["ct": 23, "cv": 0], timeout: 10)
+        } catch {
+            // CreateQRCode 本身失败（超时/上游码）：别再回固定文案，把真原因带给前端。
+            let detail = (error as? QQUpstreamError)?.message ?? error.localizedDescription
+            let code = (error as? QQUpstreamError)?.code ?? -1
+            DiagLog.shared.recordLog(category: "qq", message: "CreateQRCode 失败",
+                                     fields: ["code": code, "reason": detail])
+            throw QQAuthError(502, "二维码生成失败：\(detail)（上游 \(code)）")
+        }
+        // 上游调用回来之后、写回字典之前，会话可能已被取消/顶掉（用户关面板、
+        // 又点了一次登录）：这时绝不能把旧会话写回字典、更不能起驱动——
+        // 以前这里无条件写回，死会话带着一条活 MQTT 连接被复活，重复点
+        // 几次就攒出几条孤儿连接（第 5 轮「会话堆积」修的正是这类泄漏，
+        // 但只拦住了 supersede 那一刻已在字典里的会话，没拦住还悬在
+        // await 里、事后才写回的这一个）。
+        guard qrSessions[key] != nil else {
+            DiagLog.shared.recordLog(category: "qq", message: "二维码已生成但会话已取消，不起驱动",
+                                     fields: ["reason": "session gone during CreateQRCode"])
+            throw QQAuthError(404, "QR code expired")
+        }
+        if let existingImg = qrSessions[key]?.imageUrl, !existingImg.isEmpty {
+            return existingImg // 另一路 createQr 已先完成，不再起第二个驱动
+        }
+        let qrcodeId = scStr(data, "qrcodeID")
+        guard !qrcodeId.isEmpty else {
+            DiagLog.shared.recordLog(category: "qq", message: "CreateQRCode 缺 qrcodeID",
+                                     fields: ["reason": "empty qrcodeID"])
+            throw QQAuthError(502, "二维码生成失败：上游没给 qrcodeID")
+        }
+        let qrcodeRaw = scStr(data, "qrcode")
+        let b64 = qrcodeRaw.split(separator: ",").last.map(String.init) ?? qrcodeRaw
+        guard let png = Data(base64Encoded: b64) else {
+            DiagLog.shared.recordLog(category: "qq", message: "二维码 base64 解码失败",
+                                     fields: ["reason": "收到 \(b64.count) 字符"])
+            throw QQAuthError(502, "二维码生成失败：图片损坏（base64 解码失败）")
+        }
+        guard png.prefix(8).map({ String(format: "%02x", $0) }).joined() == "89504e470d0a1a0a" else {
+            DiagLog.shared.recordLog(category: "qq", message: "二维码非 PNG",
+                                     fields: ["reason": "收到 \(png.count) 字节"])
+            throw QQAuthError(502, "二维码生成失败：图片格式异常（非 PNG）")
+        }
+        let img = "data:image/png;base64,\(b64)"
+        s.qrcodeId = qrcodeId
+        s.imageUrl = img
+        if let exp = data["expiresIn"] as? NSNumber, exp.intValue > 0 {
+            s.expiresAt = min(s.expiresAt, Date().addingTimeInterval(TimeInterval(exp.intValue)))
+        }
+        qrSessions[key] = s
+        s.driverTask = Task { await self.runMqttDriver(key: key) }
+        qrSessions[key] = s
+        DiagLog.shared.recordLog(category: "qq", message: "二维码已生成",
+                                 fields: ["code": 200, "channel": s.channel,
+                                          "reason": "png=\(png.count)B 耗时=\(Int(Date().timeIntervalSince(t0) * 1000))ms"])
+        // 监听器只等 3 秒就回码：SUBACK 正常 <1 秒；3 秒还没到就先把码给
+        // 用户、驱动后台继续连——check 轮询会在监听器失败时立刻报 800 +
+        // 原因，前端自动换码。以前等满 20 秒才回，慢网下整个拿码请求能拖
+        // 到 60 秒以上，前端 abort、用户重拍，并发会话越攒越多。
+        // 只有监听器已经明确失败（listenerFailed 非空）才立刻报错。
+        let ready = await waitListenerReady(key: key)
+        if !ready, let failed = qrSessions[key]?.listenerFailed {
+            await failSession(key: key, reason: failed)
+            throw QQAuthError(502, failed)
+        }
+        // 等监听器的 3 秒里会话也可能被取消：字典里没了就别把码交给前端，
+        // 否则前端拿着一个已死的 key 开始轮询，下一轮 800 又触发自动换码。
+        guard qrSessions[key] != nil else {
+            s.driverTask?.cancel()
+            throw QQAuthError(404, "QR code expired")
+        }
+        return img
+    }
+
+    private func wechatCreateQr() async throws -> (String, String) {
+        var comps = URLComponents(string: "https://open.weixin.qq.com/connect/qrconnect") ?? URLComponents()
+        comps.queryItems = [
+            URLQueryItem(name: "appid", value: qqWechatAppId),
+            URLQueryItem(name: "redirect_uri", value: "https://y.qq.com/portal/wx_redirect.html?login_type=2&surl=https://y.qq.com/"),
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "scope", value: "snsapi_login"),
+            URLQueryItem(name: "state", value: "STATE"),
+            URLQueryItem(name: "href", value: "https://y.qq.com/mediastyle/music_v17/src/css/popup_wechat.css#wechat_redirect"),
+        ]
+        guard let url = comps.url else { throw QQAuthError(502, "二维码生成失败（上游没给图片）") }
+        let (data, _) = try await Upstream.fetch(url, timeout: 15)
+        let html = qqDecodeText(data)
+        guard let m = try? NSRegularExpression(pattern: #"uuid=(.+?)""#).firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+              let r = Range(m.range(at: 1), in: html) else {
+            throw QQAuthError(502, "二维码生成失败（上游没给图片）")
+        }
+        let uuid = String(html[r])
+        guard let imgUrl = URL(string: "https://open.weixin.qq.com/connect/qrcode/\(uuid)") else {
+            throw QQAuthError(502, "二维码生成失败（上游没给图片）")
+        }
+        let (imgData, _) = try await Upstream.fetch(imgUrl, headers: ["Referer": "https://open.weixin.qq.com/connect/qrconnect"], timeout: 15)
+        let magic = imgData.prefix(8).map { String(format: "%02x", $0) }.joined()
+        let mime: String
+        if magic.hasPrefix("89504e470d0a1a0a") { mime = "image/png" }
+        else if magic.hasPrefix("ffd8ff") { mime = "image/jpeg" }
+        else { throw QQAuthError(502, "二维码生成失败（上游没给图片）") }
+        return (uuid, "data:\(mime);base64,\(imgData.base64EncodedString())")
+    }
+
+    /// 微信通道轮询一轮（长轮询 15 秒预算）：408 等待 / 404 已扫 / 405 确认 / 402 过期 / 403 拒绝。
+    private func advanceWechat(key: String) async {
+        guard var s = qrSessions[key], let uuid = s.wxUuid else { return }
+        var comps = URLComponents(string: "https://lp.open.weixin.qq.com/connect/l/qrconnect") ?? URLComponents()
+        var items = [URLQueryItem(name: "uuid", value: uuid)]
+        if s.state == "scanned", let last = s.wxLast {
+            items.append(URLQueryItem(name: "last", value: String(last)))
+        }
+        items.append(URLQueryItem(name: "_", value: String(Int(Date().timeIntervalSince1970 * 1000))))
+        comps.queryItems = items
+        guard let url = comps.url else { return }
+        do {
+            let (data, _) = try await Upstream.fetch(url, headers: ["Referer": "https://open.weixin.qq.com/"], timeout: 15)
+            let text = qqDecodeText(data)
+            s.wxPollErrors = 0
+            guard let m = try? NSRegularExpression(pattern: #"window\.wx_errcode=(\d+);window\.wx_code='([^']*)'"#).firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                  let r1 = Range(m.range(at: 1), in: text) else {
+                qrSessions[key] = s
+                return
+            }
+            let errcode = Int(text[r1]) ?? 0
+            let wxCode = Range(m.range(at: 2), in: text).map { String(text[$0]) } ?? ""
+            switch errcode {
+            case 408:
+                s.state = "waiting"
+            case 404:
+                s.state = "scanned"
+                s.wxLast = 404
+            case 405:
+                s.state = "exchanging"
+                qrSessions[key] = s
+                await exchangeWechatCredential(key: key, code: wxCode)
+                return
+            case 402:
+                s.state = "expired"
+            case 403:
+                s.state = "failed"
+                s.failureReason = "扫码被拒绝"
+            default:
+                break
+            }
+            qrSessions[key] = s
+        } catch {
+            s.wxPollErrors += 1
+            if s.wxPollErrors > 3 {
+                s.state = "failed"
+                s.failureReason = "微信轮询失败"
+            }
+            qrSessions[key] = s
+        }
+    }
+
+    // MARK: ptlogin 扫码（Moumusic 形状）
+
+    /// 收 Set-Cookie 进本会话的 jar（Moumusic collectCookies 的同款做法，
+    /// 只是落点从共享 HTTPCookieStorage 换成每会话字典）。
+    private func ptCollectCookies(key: String, response: URLResponse) {
+        guard let http = response as? HTTPURLResponse, let url = http.url,
+              var s = qrSessions[key] else { return }
+        var headers: [String: String] = [:]
+        for (k, v) in http.allHeaderFields { headers[String(describing: k)] = String(describing: v) }
+        for cookie in HTTPCookie.cookies(withResponseHeaderFields: headers, for: url) {
+            s.ptCookies[cookie.name] = cookie.value
+        }
+        qrSessions[key] = s
+    }
+
+    /// 全量 cookie 头（check_sig 链 / authorize 用：要送全部 ptlogin 票据，
+    /// 不只账号那几颗）。
+    private func ptFullCookieHeader(key: String) -> String {
+        guard let s = qrSessions[key] else { return "" }
+        return s.ptCookies.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: "; ")
+    }
+
+    /// Moumusic qrCode()：xlogin 拿 pt_login_sig → ptqrshow 拿图 + qrsig。
+    /// 每会话独立 jar；qrsig 单次有效，重试前先清掉旧值。
+    private func ptQrCode(key: String) async throws -> String {
+        guard qrSessions[key] != nil else { throw QQAuthError(404, "QR code expired") }
+        if var s = qrSessions[key] {
+            s.ptCookies.removeValue(forKey: "qrsig")
+            s.ptCookies.removeValue(forKey: "pt_login_sig")
+            s.ptQrsig = nil
+            s.ptLoginSig = nil
+            qrSessions[key] = s
+        }
+        let t0 = Date()
+        // 1. 登录页拿 pt_login_sig（拿不到也不致命：轮询时 login_sig 送空串，
+        // Moumusic 同样 try? 容错）。
+        if let xlogin = URL(string: "https://xui.ptlogin2.qq.com/cgi-bin/xlogin?appid=716027609&daid=383&style=33&login_text=%E7%99%BB%E5%BD%95&hide_title_bar=1&hide_border=1&target=self&s_url=https%3A%2F%2Fgraph.qq.com%2Foauth2.0%2Flogin_jump&pt_3rd_aid=100497308&theme=2&verify_theme=") {
+            var req = URLRequest(url: xlogin, timeoutInterval: 5)
+            req.setValue(qqPtUA, forHTTPHeaderField: "User-Agent")
+            if let (_, resp) = try? await ptSession.data(for: req) {
+                ptCollectCookies(key: key, response: resp)
+                if var s = qrSessions[key], let sig = s.ptCookies["pt_login_sig"], !sig.isEmpty {
+                    s.ptLoginSig = sig
+                    qrSessions[key] = s
+                }
+            }
+        }
+        // 2. 取二维码图（图本身就是 body；qrsig 在 Set-Cookie 里）。
+        var comps = URLComponents(string: "https://ssl.ptlogin2.qq.com/ptqrshow") ?? URLComponents()
+        comps.queryItems = [
+            URLQueryItem(name: "appid", value: "716027609"),
+            URLQueryItem(name: "e", value: "2"),
+            URLQueryItem(name: "l", value: "M"),
+            URLQueryItem(name: "s", value: "3"),
+            URLQueryItem(name: "d", value: "72"),
+            URLQueryItem(name: "v", value: "4"),
+            URLQueryItem(name: "t", value: String(format: "%.6f", Double.random(in: 0...1))),
+            URLQueryItem(name: "daid", value: "383"),
+            URLQueryItem(name: "pt_3rd_aid", value: "100497308"),
+        ]
+        guard let showURL = comps.url else { throw QQAuthError(502, "二维码生成失败：上游没给图片") }
+        var req = URLRequest(url: showURL, timeoutInterval: 8)
+        req.setValue(qqPtUA, forHTTPHeaderField: "User-Agent")
+        req.setValue("https://xui.ptlogin2.qq.com/", forHTTPHeaderField: "Referer")
+        let data: Data
+        let resp: URLResponse
+        do {
+            let r = try await ptSession.data(for: req)
+            data = r.0
+            resp = r.1
+        } catch {
+            throw QQAuthError(502, "二维码生成失败：\(error.localizedDescription)")
+        }
+        ptCollectCookies(key: key, response: resp)
+        guard qrSessions[key] != nil else { throw QQAuthError(404, "QR code expired") }
+        if (resp as? HTTPURLResponse)?.statusCode == 403 {
+            throw QQAuthError(502, "QQ 当前拒绝了二维码请求，请稍后重试")
+        }
+        guard (resp as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) == true,
+              let qrsig = qrSessions[key]?.ptCookies["qrsig"], !qrsig.isEmpty else {
+            throw QQAuthError(502, "二维码生成失败：上游没给 qrsig")
+        }
+        // QQ 偶尔回 200 的 HTML 反爬页：绝不把它当二维码图发给前端
+        //（否则前端一直转圈、码永远出不来）。
+        guard qqPtLooksLikeImage(data) else {
+            throw QQAuthError(502, "QQ 当前拒绝了二维码请求，请稍后重试")
+        }
+        if var s = qrSessions[key] {
+            s.ptQrsig = qrsig
+            s.ptLoginSig = s.ptCookies["pt_login_sig"]
+            qrSessions[key] = s
+        }
+        let img = "data:\(qqPtImageMime(data));base64,\(data.base64EncodedString())"
+        DiagLog.shared.recordLog(category: "qq", message: "二维码已生成（ptlogin）",
+                                 fields: ["code": 200, "reason": "png=\(data.count)B 耗时=\(Int(Date().timeIntervalSince(t0) * 1000))ms"])
+        return img
+    }
+
+    /// Moumusic requestQRCodeWithRetry()：2 次，间隔 700ms。
+    /// 第 12 轮：原来 3 次、ptqrshow 10 秒超时，ptlogin 挂起时最多烧约 45 秒
+    /// 才 fallback 到 MQTT，逼近前端 60 秒超时 —— 2 次 + 8 秒让 MQTT 更快接手。
+    private func ptQrCodeWithRetry(key: String) async throws -> String {
+        var lastError: Error?
+        for attempt in 0..<2 {
+            do {
+                return try await ptQrCode(key: key)
+            } catch {
+                lastError = error
+                // 会话已死别再试；只对上游失败重试。
+                if let e = error as? QQAuthError, e.code == 404 { throw e }
+                if attempt < 1 { try? await Task.sleep(nanoseconds: 700_000_000) }
+            }
+        }
+        throw lastError ?? QQAuthError(502, "QQ 当前拒绝了二维码请求，请稍后重试")
+    }
+
+    /// Moumusic poll(qrsig:)：一次 ptqrlogin，只返回状态码 + 跳转地址，
+    /// OAuth 交换由调用方在 0 时做。返回码：66 等待 / 67 已扫 /
+    /// 65·68 过期 / 0 成功。
+    private func ptPoll(key: String) async throws -> (code: String, jumpURL: URL?) {
+        guard let s = qrSessions[key], let qrsig = s.ptQrsig, !qrsig.isEmpty else {
+            throw QQAuthError(404, "QR code expired")
+        }
+        // 签名同时留在 jar 里：后继 check_sig 必须送同一个 qrsig。
+        if var s2 = qrSessions[key] { s2.ptCookies["qrsig"] = qrsig; qrSessions[key] = s2 }
+        var comps = URLComponents(string: "https://ssl.ptlogin2.qq.com/ptqrlogin") ?? URLComponents()
+        comps.queryItems = [
+            URLQueryItem(name: "u1", value: "https://graph.qq.com/oauth2.0/login_jump"),
+            URLQueryItem(name: "ptqrtoken", value: String(qqPtHash33(qrsig))),
+            URLQueryItem(name: "ptredirect", value: "0"),
+            URLQueryItem(name: "h", value: "1"),
+            URLQueryItem(name: "t", value: "1"),
+            URLQueryItem(name: "g", value: "1"),
+            URLQueryItem(name: "from_ui", value: "1"),
+            URLQueryItem(name: "ptlang", value: "2052"),
+            URLQueryItem(name: "action", value: "0-0-\(Int(Date().timeIntervalSince1970 * 1000))"),
+            URLQueryItem(name: "js_ver", value: "22080914"),
+            URLQueryItem(name: "js_type", value: "1"),
+            URLQueryItem(name: "login_sig", value: qrSessions[key]?.ptLoginSig ?? ""),
+            URLQueryItem(name: "pt_uistyle", value: "40"),
+            URLQueryItem(name: "aid", value: "716027609"),
+            URLQueryItem(name: "daid", value: "383"),
+            URLQueryItem(name: "pt_3rd_aid", value: "100497308"),
+            // 缺了它也能回 0，但后继 check_sig 链拿不到 skey/p_skey，
+            // 音乐凭证换不出来。
+            URLQueryItem(name: "o1vId", value: "49283d5cbb01a744d46314da4608d929"),
+        ]
+        guard let url = comps.url else { throw QQAuthError(502, "QQ 轮询失败") }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        var pollCookie = "qrsig=\(qrsig)"
+        if let sig = qrSessions[key]?.ptLoginSig, !sig.isEmpty { pollCookie += "; pt_login_sig=\(sig)" }
+        req.setValue(pollCookie, forHTTPHeaderField: "Cookie")
+        req.setValue(qqPtUA, forHTTPHeaderField: "User-Agent")
+        req.setValue("https://xui.ptlogin2.qq.com/", forHTTPHeaderField: "Referer")
+        let (data, resp) = try await ptSession.data(for: req)
+        ptCollectCookies(key: key, response: resp)
+        guard (resp as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) == true,
+              let body = String(data: data, encoding: .utf8),
+              let parsed = qqPtParseCallback(body) else {
+            throw QQAuthError(502, "QQ 轮询失败：上游返回无法识别")
+        }
+        if parsed.code != "66" {
+            DiagLog.shared.recordLog(category: "qq", message: "扫码状态 \(parsed.code)",
+                                     fields: ["reason": String(body.prefix(160))])
+        }
+        return (code: parsed.code, jumpURL: parsed.url)
+    }
+
+    /// Moumusic completeOAuth：手动跟 check_sig 跳转链（每跳都收
+    /// Set-Cookie，自动跟随会丢中间凭证）→ graph authorize 换 code
+    /// （3 档 scope/openapi 依次试）→ musicu QQLogin 换 musickey。
+    /// 返回与 MQTT 链路同一形状的凭证字典（musickey + musicid）。
+    private func ptCompleteOAuth(key: String, redirectURL: URL) async throws -> [String: Any] {
+        var currentURL = redirectURL
+        // 跳转链最多 6 跳；no-redirect 会话把每跳的 3xx 暴露出来。
+        for _ in 0..<6 {
+            var req = URLRequest(url: currentURL, timeoutInterval: 10)
+            req.setValue(qqPtUA, forHTTPHeaderField: "User-Agent")
+            req.setValue("https://xui.ptlogin2.qq.com/", forHTTPHeaderField: "Referer")
+            req.setValue(ptFullCookieHeader(key: key), forHTTPHeaderField: "Cookie")
+            let (_, resp) = try await ptSession.data(for: req)
+            ptCollectCookies(key: key, response: resp)
+            guard let http = resp as? HTTPURLResponse,
+                  (300...399).contains(http.statusCode),
+                  let location = http.value(forHTTPHeaderField: "Location"), !location.isEmpty else { break }
+            if let absolute = URL(string: location), absolute.scheme != nil {
+                currentURL = absolute
+            } else if let resolved = URL(string: location, relativeTo: currentURL) {
+                currentURL = resolved
+            } else {
+                break
+            }
+        }
+        let credential = qrSessions[key]?.ptCookies["qqmusic_key"]
+            ?? qrSessions[key]?.ptCookies["p_skey"]
+            ?? qrSessions[key]?.ptCookies["skey"] ?? ""
+        guard !credential.isEmpty else {
+            DiagLog.shared.recordLog(category: "qq", message: "check_sig 完成但无凭证", fields: [:])
+            throw QQAuthError(502, "QQ 扫码成功，但音乐登录凭证获取失败，请重新扫码")
+        }
+        // g_tk 必须用 p_skey 算（L-1124 对表：hash33(p_skey, 5381)）。
+        // 之前用 qqmusic_key 优先 —— check_sig 有的变体回 qqmusic_key，
+        // 用它算出的 g_tk 会被 graph 拒掉。p_skey 没有才退 skey。
+        let gtkSource = qrSessions[key]?.ptCookies["p_skey"]
+            ?? qrSessions[key]?.ptCookies["skey"]
+            ?? credential
+        // graph authorize：3 档依次试，取第一个吐 code 的。
+        let variants: [(scope: String, openapi: String)] = [
+            ("get_user_info,get_app_friends", "1010_1030"),
+            ("get_user_info,get_app_friends", "80901010_1030"),
+            ("all", "80901010_1030"),
+        ]
+        var foundCode: String?
+        var lastAuthorizeReason: String?
+        for variant in variants {
+            let fields: [String: String] = [
+                "response_type": "code",
+                "client_id": "100497308",
+                "redirect_uri": "https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https://y.qq.com/",
+                "scope": variant.scope,
+                "state": "state",
+                "switch": "",
+                "from_ptlogin": "1",
+                "src": "1",
+                "update_auth": "1",
+                "openapi": variant.openapi,
+                "g_tk": String(qqPtHash5381(gtkSource)),
+                "auth_time": String(Int(Date().timeIntervalSince1970 * 1000)),
+                "ui": "DFEC5395-9E69-4D3E-96A6-300BB770874D",
+            ]
+            var authReq = URLRequest(url: URL(string: "https://graph.qq.com/oauth2.0/authorize")!, timeoutInterval: 10)
+            authReq.httpMethod = "POST"
+            authReq.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            authReq.setValue(qqPtUA, forHTTPHeaderField: "User-Agent")
+            authReq.setValue("https://graph.qq.com/oauth2.0/show?which=Login&display=pc&client_id=100497308", forHTTPHeaderField: "Referer")
+            authReq.setValue("https://graph.qq.com", forHTTPHeaderField: "Origin")
+            authReq.setValue(ptFullCookieHeader(key: key), forHTTPHeaderField: "Cookie")
+            authReq.httpBody = qqPtFormEncode(fields).data(using: .utf8)
+            let (authData, authResp) = try await ptSession.data(for: authReq)
+            ptCollectCookies(key: key, response: authResp)
+            if let http = authResp as? HTTPURLResponse,
+               let code = qqPtExtractCode(from: authData, response: http), !code.isEmpty {
+                foundCode = code
+                break
+            }
+            // 诊断：每档记 HTTP 状态 + 有没有拿到 code；body 里若带 QQ 业务码
+            //（100035 用户未登录 / 100012 非 POST / 100010 回调不合法）记中文
+            // 原因。Cookie 值、code、uin 一律不记。
+            let httpStatus = (authResp as? HTTPURLResponse)?.statusCode ?? -1
+            let qqReason = qqPtAuthorizeErrorReason(authData)
+            DiagLog.shared.recordLog(category: "qq", message: "authorize 未取得 code",
+                                     fields: ["reason": "scope=\(variant.scope) openapi=\(variant.openapi) http=\(httpStatus)" + (qqReason.map { " \($0)" } ?? "")])
+            if let r = qqReason { lastAuthorizeReason = r }
+        }
+        guard let code = foundCode else {
+            // Lulumusic02 真机教训：扫码链最后一步常被腾讯服务端拦（100035）。
+            // 原因能对上就直接告诉用户走网页登录，别只说「重新扫码」。
+            throw QQAuthError(502, lastAuthorizeReason ?? "QQ 扫码成功，但音乐登录凭证获取失败，请重新扫码")
+        }
+        // musicu QQLogin：注意是 "req" 不是 "req_0"，不能走 musicu()。
+        // comm 带 tmeLoginType: 2（L-1124 对表）；Cookie 整罐发（Lulumusic02
+        // 教训：白名单会丢 pt_oauth_token / pt_login_type，musicu 认不到人）。
+        let loginPayload: [String: Any] = [
+            "comm": ["g_tk": 5381, "platform": "yqq", "ct": 24, "cv": 0, "tmeLoginType": 2],
+            "req": ["module": "QQConnectLogin.LoginServer", "method": "QQLogin", "param": ["code": code]],
+        ]
+        guard let loginBody = qqJSONData(loginPayload),
+              let loginURL = URL(string: qqMusicuURL) else {
+            throw QQAuthError(502, "QQ 扫码成功，但音乐登录凭证获取失败，请重新扫码")
+        }
+        let (loginData, loginResp) = try await Upstream.fetch(
+            loginURL,
+            headers: ["Content-Type": "application/json; charset=utf-8", "User-Agent": qqPtUA,
+                      "Referer": "https://y.qq.com/", "Cookie": ptFullCookieHeader(key: key)],
+            timeout: 10, method: "POST", body: loginBody)
+        guard (200..<300).contains(loginResp.statusCode),
+              let root = Upstream.jsonObject(loginData) else {
+            throw QQAuthError(502, "QQ 扫码成功，但音乐登录凭证获取失败，请重新扫码")
+        }
+        if let codeValue = qqPtFirstInteger(in: root, containers: ["req", "req_0"], keys: ["code", "ret"]),
+           codeValue != 0 {
+            throw QQAuthError(502, "QQ 扫码成功，但音乐登录凭证获取失败，请重新扫码")
+        }
+        var musicKey: String?
+        var musicID: String?
+        for container in [(root["req"] as? [String: Any])?["data"] as? [String: Any],
+                          (root["req_0"] as? [String: Any])?["data"] as? [String: Any],
+                          root["data"] as? [String: Any]].compactMap({ $0 }) {
+            if musicKey == nil, let v = qqPtText(container["musickey"]), !v.isEmpty { musicKey = v }
+            if musicID == nil, let v = qqPtText(container["musicid"]), !v.isEmpty { musicID = v }
+        }
+        if musicKey == nil || musicID == nil {
+            let found = qqPtFindCredentials(root)
+            if musicKey == nil { musicKey = found.key }
+            if musicID == nil { musicID = found.id }
+        }
+        guard let keyValue = musicKey, !keyValue.isEmpty,
+              let idValue = musicID, !idValue.isEmpty, idValue != "0" else {
+            throw QQAuthError(502, "QQ 扫码成功，但音乐登录凭证获取失败，请重新扫码")
+        }
+        if var s = qrSessions[key] {
+            s.ptCookies["musickey"] = keyValue
+            s.ptCookies["qm_keyst"] = keyValue
+            s.ptCookies["qqmusic_key"] = keyValue
+            s.ptCookies["uin"] = idValue
+            qrSessions[key] = s
+        }
+        // loginType 6 = Lizi 里 QQ 音乐 App 登录的默认值（MQTT qqmusic 通道同款）；
+        // ptlogin 凭证没有 refresh_key，不走静默刷新，过期靠 status() 重验。
+        return ["musicid": idValue, "str_musicid": idValue, "musickey": keyValue,
+                "loginType": 6, "musickeyCreateTime": Date().timeIntervalSince1970,
+                "keyExpiresIn": 259200]
+    }
+
+    /// checkQr 侧的 ptlogin 驱动：前端每 2 秒调一次 check，这里只做一轮
+    /// ptqrlogin（Moumusic 的 sheet 每 2.5 秒 poll 一次是同一形状）。
+    /// 连续 8 轮网络/解析失败才判死（Moumusic 同款容忍度），单轮抖动只回 801。
+    private func ptPollOnce(key: String) async -> [String: Any] {
+        guard var s = qrSessions[key] else {
+            return ["code": 800, "message": "QR code expired"]
+        }
+        let poll: (code: String, jumpURL: URL?)
+        do {
+            poll = try await ptPoll(key: key)
+        } catch {
+            s.ptPollErrors += 1
+            qrSessions[key] = s
+            if s.ptPollErrors >= 8 {
+                await failSession(key: key, reason: "QQ 轮询失败")
+                return ["code": 800, "message": "QR login failed", "error": "QQ 轮询失败"]
+            }
+            return ["code": 801, "message": "Waiting for QR scan"]
+        }
+        s.ptPollErrors = 0
+        qrSessions[key] = s
+        switch poll.code {
+        case "66":
+            return ["code": 801, "message": "Waiting for QR scan"]
+        case "67":
+            if var s2 = qrSessions[key] { s2.state = "scanned"; qrSessions[key] = s2 }
+            return ["code": 802, "message": "QR code scanned"]
+        case "65", "68":
+            // 68 是 token 被作废/顶掉（比如又刷了一张码）：绝不能当等待，
+            // 否则前端一直轮一张死码；qrsig 同时清掉，永不复用。
+            // 这里只标过期、不进 failSession（不设 15 秒冷却），前端
+            // 800 自动换码才能立刻重取。
+            if var s2 = qrSessions[key] {
+                s2.state = "expired"
+                s2.ptQrsig = nil
+                s2.ptCookies.removeValue(forKey: "qrsig")
+                qrSessions[key] = s2
+            }
+            return ["code": 800, "message": "QR code expired"]
+        case "0":
+            guard let jumpURL = poll.jumpURL else {
+                await failSession(key: key, reason: "QQ 扫码成功，但音乐登录凭证获取失败，请重新扫码")
+                return ["code": 800, "message": "QR login failed", "error": "QQ 扫码成功，但音乐登录凭证获取失败，请重新扫码"]
+            }
+            if var s2 = qrSessions[key] { s2.state = "exchanging"; s2.exchangingAt = Date(); qrSessions[key] = s2 }
+            do {
+                let cred = try await ptCompleteOAuth(key: key, redirectURL: jumpURL)
+                await finalizeCredential(key: key, cred: cred)
+                var out: [String: Any] = ["code": 803, "message": "Authorization login successful", "loggedIn": true]
+                if let profile = await getLoginProfile() {
+                    out["nickname"] = profile["nickname"] as? String ?? ""
+                    out["avatar"] = profile["avatar"] as? String ?? ""
+                }
+                return out
+            } catch {
+                // 具体原因往前传（比如 100035 用户未登录）：前端按真实原因
+                // 分开提示，不再一律「重新扫码」；failSession 会把它存进
+                // failureReason，checkQr 的 800 分支原样回给前端。
+                let reason = (error as? QQAuthError)?.message ?? "换凭证失败"
+                await failSession(key: key, reason: reason)
+                return ["code": 800, "message": "QR login failed", "error": reason]
+            }
+        default:
+            return ["code": 801, "message": "Waiting for QR scan"]
+        }
+    }
+
+    private func checkQr(key: String) async -> [String: Any] {
+        guard var s = qrSessions[key] else {
+            return ["code": 800, "message": "QR code expired"]
+        }
+        if s.state != "confirmed" && Date() > s.expiresAt {
+            s.state = "expired"
+            qrSessions[key] = s
+        }
+        if s.channel == "wechat" && ["created", "waiting", "scanned"].contains(s.state) {
+            await advanceWechat(key: key)
+            s = qrSessions[key] ?? s
+        }
+        if s.channel == "ptlogin" && ["created", "waiting", "scanned"].contains(s.state) {
+            return await ptPollOnce(key: key)
+        }
+        switch s.state {
+        case "confirmed":
+            var out: [String: Any] = ["code": 803, "message": "Authorization login successful", "loggedIn": true]
+            if let profile = await getLoginProfile() {
+                out["nickname"] = profile["nickname"] as? String ?? ""
+                out["avatar"] = profile["avatar"] as? String ?? ""
+            }
+            return out
+        case "scanned":
+            return ["code": 802, "message": "QR code scanned"]
+        case "exchanging":
+            // 换凭证超 90 秒没完成：任务大概率已经死掉，再等也只会永远 802。
+            // 判失败让前端自动换码重扫，别卡死。
+            if let at = s.exchangingAt, Date().timeIntervalSince(at) > 90 {
+                await failSession(key: key, reason: "换凭证超时，请重新扫码")
+                return ["code": 800, "message": "QR login failed", "error": "换凭证超时，请重新扫码"]
+            }
+            return ["code": 802, "message": "QR code scanned"]
+        case "expired", "failed":
+            var out: [String: Any] = ["code": 800,
+                                      "message": s.state == "failed" ? "QR login failed" : "QR code expired"]
+            if let r = s.retryAfterMs { out["retryAfterMs"] = r }
+            if let f = s.failureReason { out["error"] = f }
+            return out
+        default:
+            return ["code": 801, "message": "Waiting for QR scan"]
+        }
+    }
+
+    private func cancelQrSession(key: String) {
+        guard let s = qrSessions[key] else { return }
+        if s.state == "confirmed" { return }
+        if s.state == "exchanging" {
+            // 换凭证已经在路上：选「先取消再删」，不保留等换完。
+            // 保留会让 createSession 的 exchanging 409 一直拦着下一次登录；
+            // 取消后换完的 finalizeCredential / failSession 都以 qrSessions[key]
+            // 为准，会话没了就直接 no-op，不会写回已删的会话。
+            s.wsTask?.cancel()
+            s.driverTask?.cancel()
+            qrSessions.removeValue(forKey: key)
+            return
+        }
+        s.wsTask?.cancel()
+        s.driverTask?.cancel()
+        qrSessions.removeValue(forKey: key)
+    }
+
+    // MARK: 凭证续期与画像
+
+    private func isCredentialRejection(_ error: Error) -> Bool {
+        if let e = error as? QQUpstreamError { return qqCredentialRejectionCodes.contains(e.code) }
+        return false
+    }
+
+    /// 到期前 6h 且有 refresh_key 时静默刷新；失败 5 分钟内不再试；凭证被拒时清凭证返回 nil。
+    private func ensureCredential() async -> [String: Any]? {
+        guard var cred = loadCredential() else { return nil }
+        let now = Date().timeIntervalSince1970
+        let created = (cred["musickeyCreateTime"] as? NSNumber)?.doubleValue ?? 0
+        let expiresIn = (cred["keyExpiresIn"] as? NSNumber)?.doubleValue ?? 0
+        let expiresAt = (created > 0 && expiresIn > 0) ? created + expiresIn : now + 86400
+        let refreshKey = scStr(cred, "refresh_key")
+        if !refreshKey.isEmpty && now > expiresAt - 6 * 3600 && now >= refreshRetryAt {
+            do {
+                let d = try await musicuAuth(module: "music.login.LoginServer", method: "Login",
+                                             param: ["openid": scStr(cred, "openid"),
+                                                     "refresh_token": scStr(cred, "refresh_token"),
+                                                     "str_musicid": credentialMusicId(cred),
+                                                     "musickey": scStr(cred, "musickey"),
+                                                     "unionid": scStr(cred, "unionid"),
+                                                     "refresh_key": refreshKey,
+                                                     "loginMode": 2],
+                                             commOverride: ["tmeLoginType": scInt(cred, "loginType")],
+                                             readOnly: false)
+                let refreshed = try credentialFrom(data: d, defaultLoginType: scInt(cred, "loginType"))
+                var merged = cred
+                for (k, v) in refreshed { merged[k] = v }
+                cred = merged
+                saveCredential(cred)
+            } catch {
+                if isCredentialRejection(error) {
+                    // 凭证被拒：不删登录态文件（status 还要靠它出 stale 头像），只推迟重试。
+                    refreshRetryAt = now + 300
+                    return cred
+                }
+                refreshRetryAt = now + 300
+            }
+        }
+        return cred
+    }
+
+    /// GetLoginUserInfo（param {}）：返回画像；失败返回 nil。
+    private func getLoginProfile() async -> [String: Any]? {
+        guard let cred = loadCredential() else { return nil }
+        do {
+            let d = try await musicuAuth(module: "music.UserInfo.userInfoServer", method: "GetLoginUserInfo", param: [:])
+            let info = d["info"] as? [String: Any] ?? [:]
+            var nickname = scStr(cred, "nick")
+            if nickname.isEmpty { nickname = scStr(cred, "nickname") }
+            if nickname.isEmpty { nickname = scStr(info, "nick") }
+            if nickname.isEmpty { nickname = "QQ 音乐用户" }
+            var avatar = qqProfileAvatar(cred, info: info)
+            if avatar.isEmpty { avatar = scStr(cred, "avatarUrl") }
+            return ["loggedIn": true, "nickname": nickname, "avatar": avatar, "uin": credentialMusicId(cred)]
+        } catch {
+            return nil
+        }
+    }
+
+    /// headpic → avatarUrl → avatar → info.logo，第一个 http(s) 且不含 t_user_default 的。
+    private func qqProfileAvatar(_ cred: [String: Any], info: [String: Any]) -> String {
+        for c in [scStr(cred, "headpic"), scStr(cred, "avatarUrl"), scStr(cred, "avatar"), scStr(info, "logo")] {
+            if c.hasPrefix("http") && !c.contains("t_user_default") { return c }
+        }
+        return ""
+    }
+
+    private func publicAvatarByUin(_ uid: String) async -> String? {
+        let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        guard let url1 = URL(string: "https://c.y.qq.com/rsc/fcgi-bin/fcg_user_created_diss?hostuin=\(uid)&sin=0&size=5&format=json&inCharset=utf8&outCharset=utf-8&g_tk=5381&loginUin=0&hostUin=0&platform=yqq.json&needNewCode=0"),
+              let (data1, _) = try? await Upstream.fetch(url1, headers: ["User-Agent": ua, "Referer": "https://y.qq.com/"], timeout: 4),
+              let obj1 = qqParseJSONText(qqDecodeText(data1)) as? [String: Any],
+              let dataObj = obj1["data"] as? [String: Any],
+              let disslist = dataObj["disslist"] as? [[String: Any]] else { return nil }
+        for diss in disslist.prefix(2) {
+            let tid = scStrOrNum(diss, "tid")
+            guard !tid.isEmpty,
+                  let url2 = URL(string: "https://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg?type=1&json=1&utf8=1&onlysong=0&disstid=\(tid)&format=json&g_tk=5381&loginUin=0&hostUin=0&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq.json&needNewCode=0"),
+                  let (data2, _) = try? await Upstream.fetch(url2, headers: ["User-Agent": ua, "Referer": "https://y.qq.com/"], timeout: 4),
+                  let obj2 = qqParseJSONText(qqDecodeText(data2)) as? [String: Any],
+                  let cdlist = obj2["cdlist"] as? [[String: Any]],
+                  let first = cdlist.first else { continue }
+            let av = scStr(first, "headurl")
+            if !av.isEmpty { return av }
+            let av2 = scStr(first, "avatar")
+            if !av2.isEmpty { return av2 }
+        }
+        return nil
+    }
+
+    /// 失效会话的只读头像：只返回昵称/头像，绝不把 loggedIn 改成 true。
+    private func cachedProfile() async -> [String: Any] {
+        guard let cred = loadCredential() else { return ["code": 200, "empty": true] }
+        let uid = credentialMusicId(cred)
+        var nickname = scStr(cred, "nick")
+        if nickname.isEmpty { nickname = scStr(cred, "nickname") }
+        var avatar = scStr(cred, "avatarUrl")
+        if avatar.isEmpty { avatar = scStr(cred, "logo") }
+        if (avatar.isEmpty || avatar.contains("t_user_default")),
+           uid.range(of: "^[1-9]\\d{0,19}$", options: .regularExpression) != nil,
+           let pub = await publicAvatarByUin(uid), !pub.isEmpty {
+            avatar = pub
+        }
+        if uid.isEmpty && nickname.isEmpty && avatar.isEmpty { return ["code": 200, "empty": true] }
+        return ["code": 200, "uid": uid, "nickname": nickname, "avatar": avatar]
+    }
+}
+
+extension QQService {
+    // MARK: - 播放取链
+
+    private func qqVkeyFilename(quality: String, mid: String, mediaMid: String) -> String {
+        switch quality {
+        case "m4a": return "C400\(mid)\(mediaMid).m4a"
+        case "320": return "M800\(mid)\(mediaMid).mp3"
+        case "ape": return "A000\(mid)\(mediaMid).ape"
+        case "flac": return "F000\(mid)\(mediaMid).flac"
+        // 第 13 轮第 12 件（臻品档）：前缀按 QQ 官方 vkey 档位表（music-lib 等
+        // 多个开源实现一致）：AI00=母带、Q001=全景声 5.1、Q000=全景声 2.0；
+        // RS01=Hi-Res（一家实现在用，另一家注「不在维护的枚举里」，未完全
+        // 证实——拿不到时 resolvePlayUrl 会自动向低档退，显示实际档）。
+        case "master": return "AI00\(mid)\(mediaMid).flac"
+        case "atmos51": return "Q001\(mid)\(mediaMid).flac"
+        case "atmos20": return "Q000\(mid)\(mediaMid).flac"
+        case "hires": return "RS01\(mid)\(mediaMid).flac"
+        default: return "M500\(mid)\(mediaMid).mp3"
+        }
+    }
+
+    /// vkey 取链：登录走 UrlGetVkey，匿名走 UCommon CgiGetVkey。返回 req_0.data。
+    private func vkeyRequest(mid: String, filename: String, guid: String) async throws -> [String: Any] {
+        if loadCredential() != nil {
+            return try await musicuAuth(module: "music.vkey.GetVkey", method: "UrlGetVkey",
+                                        param: ["filename": [filename], "guid": guid, "songmid": [mid],
+                                                "songtype": [0], "uin": credentialMusicId(), "ctx": 0])
+        }
+        let data: [String: Any] = [
+            "req_0": ["module": "vkey.GetVkeyServer", "method": "CgiGetVkey",
+                      "param": ["filename": [filename], "guid": "1429839143", "songmid": [mid],
+                                "songtype": [0], "uin": "0", "loginflag": 1, "platform": "20"]],
+            "loginUin": "0",
+            "comm": ["uin": "0", "format": "json", "ct": 24, "cv": 0],
+        ]
+        return try await ucommon(data: data)
+    }
+
+    /// sip/midurlinfo 拼直链：domain 取第一个不以 http://ws 开头的 sip，否则取 sip[0]。
+    private func urlFromVkey(_ data: [String: Any], mid: String) -> (url: String?, purl: String?) {
+        guard let midurlinfo = data["midurlinfo"] as? [[String: Any]] else { return (nil, nil) }
+        var purl: String?
+        for info in midurlinfo where scStr(info, "songmid") == mid {
+            purl = scStr(info, "purl")
+            break
+        }
+        if purl == nil || purl!.isEmpty {
+            purl = midurlinfo.compactMap { scStr($0, "purl") }.first(where: { !$0.isEmpty })
+        }
+        guard let p = purl, !p.isEmpty else { return (nil, nil) }
+        if let sip = data["sip"] as? [String] {
+            let domain = sip.first(where: { !$0.hasPrefix("http://ws") }) ?? sip.first
+            if let domain, !domain.isEmpty { return (domain + p, p) }
+        }
+        return (nil, p)
+    }
+
+    /// sip 为空时的 CDN 兜底：首选 sjy6 探测，失败调 GetCdnDispatch 再试其 sip，末尾追加 dl。
+    private func cdnFallbackUrl(purl: String, guid: String) async -> String {
+        var candidates: [String] = ["http://sjy6.stream.qqmusic.qq.com/"]
+        if let d = try? await musicuAnon(module: "music.audioCdnDispatch.cdnDispatch", method: "GetCdnDispatch",
+                                         param: ["guid": guid, "uid": "0", "use_new_domain": 1, "use_ipv6": 1]),
+           let sip = d["sip"] as? [String] {
+            candidates.append(contentsOf: sip.filter { $0 != "http://sjy6.stream.qqmusic.qq.com/" })
+        }
+        candidates.append("http://dl.stream.qqmusic.qq.com/")
+        for domain in candidates {
+            if await qqProbeURL(domain + purl) { return domain + purl }
+        }
+        return "http://dl.stream.qqmusic.qq.com/" + purl
+    }
+
+    /// 第 13 轮第 12 件：返回实际命中的档位（served），前端只显示它。
+    /// 所选档拿不到时沿梯子向低档重试：master → atmos51 → atmos20 → hires
+    /// → flac → 320 → 128（与 music-lib 的 VIP 优先级一致）。
+    private func resolvePlayUrl(mid: String, quality: String) async -> (url: String, loginRequired: Bool, served: String) {
+        var loginRequired = false
+        let q = ["m4a", "128", "320", "ape", "flac", "best", "master", "atmos51", "atmos20", "hires"].contains(quality) ? quality : "128"
+        let detail = await songDetail(mid: mid)
+        let file = detail?["file"] as? [String: Any] ?? [:]
+        let mediaMid = scStr(file, "media_mid").isEmpty ? mid : scStr(file, "media_mid")
+        let ladder = ["master", "atmos51", "atmos20", "hires", "flac", "320", "128"]
+        var order: [String]
+        if q == "best" {
+            if loadCredential() == nil {
+                order = ["128"]
+            } else {
+                order = []
+                if scInt(file, "size_flac") > 0 { order.append("flac") }
+                if scInt(file, "size_320mp3") > 0 { order.append("320") }
+                order.append("128")
+            }
+        } else if let i = ladder.firstIndex(of: q) {
+            order = Array(ladder[i...])
+        } else {
+            order = [q]
+        }
+        let guid = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        for attemptQuality in order {
+            let filename = qqVkeyFilename(quality: attemptQuality, mid: mid, mediaMid: mediaMid)
+            do {
+                let data = try await vkeyRequest(mid: mid, filename: filename, guid: guid)
+                let (url, purl) = urlFromVkey(data, mid: mid)
+                if let url { return (url, loginRequired, attemptQuality) }
+                if let purl { return (await cdnFallbackUrl(purl: purl, guid: guid), loginRequired, attemptQuality) }
+            } catch {
+                if isCredentialRejection(error) { loginRequired = true }
+            }
+            // m4a/128 登录分支：首次无链接时同一 guid、同一文件名再要一次。
+            if loadCredential() != nil && (attemptQuality == "m4a" || attemptQuality == "128") {
+                do {
+                    let data = try await vkeyRequest(mid: mid, filename: filename, guid: guid)
+                    let (url, _) = urlFromVkey(data, mid: mid)
+                    if let url { return (url, loginRequired, attemptQuality) }
+                } catch {
+                    if isCredentialRejection(error) { loginRequired = true }
+                }
+            }
+        }
+        return ("", loginRequired, "")
+    }
+
+    /// 试听：RS02<14 位 mediaId>.mp3，仅 size_try > 0 时取。
+    private func previewUrl(mid: String) async -> String {
+        guard let detail = await songDetail(mid: mid),
+              let file = detail["file"] as? [String: Any],
+              scInt(file, "size_try") > 0 else { return "" }
+        let mediaId = scStr(file, "media_mid")
+        guard mediaId.range(of: "^[A-Za-z0-9]{14}$", options: .regularExpression) != nil else { return "" }
+        let guid = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        guard let data = try? await vkeyRequest(mid: mid, filename: "RS02\(mediaId).mp3", guid: guid) else { return "" }
+        return urlFromVkey(data, mid: mid).url ?? ""
+    }
+
+    // MARK: - 归一化
+
+    private func qqCover(_ albumMid: String) -> String {
+        albumMid.isEmpty ? "" : "https://y.gtimg.cn/music/photo_new/T002R300x300M000\(albumMid).jpg"
+    }
+
+    private func qqFirstStr(_ d: [String: Any], _ keys: [String]) -> String {
+        for k in keys {
+            let s = scStr(d, k)
+            if !s.isEmpty { return s }
+        }
+        return ""
+    }
+
+    private func qqFirstInt(_ d: [String: Any], _ keys: [String]) -> Int {
+        for k in keys where d[k] != nil { return scInt(d, k) }
+        return 0
+    }
+
+    private func qqTrack(_ it: [String: Any]) -> [String: Any]? {
+        let mid = scStr(it, "mid")
+        guard !mid.isEmpty else { return nil }
+        let singers = scArr(it, "singer")
+        let artists = singers.map { scStr($0, "name") }.filter { !$0.isEmpty }.joined(separator: " / ")
+        let album = scDict(it, "album")
+        let pay = scDict(it, "pay")
+        return [
+            "id": mid, "source": "qq",
+            "name": qqFirstStr(it, ["name", "title"]),
+            "artists": artists.isEmpty ? "未知歌手" : artists,
+            "artistIds": singers.map { scStr($0, "mid") }.filter { !$0.isEmpty },
+            "album": qqFirstStr(album, ["name", "title"]),
+            "cover": qqCover(scStr(album, "mid")),
+            "duration": scInt(it, "interval") * 1000,
+            "fee": scInt(pay, "pay_play") > 0 ? 1 : 0,
+            "mid": mid,
+            "songId": scInt(it, "id") > 0 ? scInt(it, "id") : 0,
+        ]
+    }
+
+    private func qqPlaylist(_ it: [String: Any]) -> [String: Any]? {
+        let id = qqFirstStr(it, ["dirId", "dissid", "tid", "id"])
+        guard !id.isEmpty else { return nil }
+        let creator = scDict(it, "creator")
+        let nickname = qqFirstStr(it, ["nickname", "nick"])
+        let creatorNick = nickname.isEmpty ? qqFirstStr(creator, ["nickname", "nick"]) : nickname
+        return [
+            "id": id,
+            "name": qqFirstStr(it, ["dirName", "dissname", "title"]).isEmpty ? "未命名歌单" : qqFirstStr(it, ["dirName", "dissname", "title"]),
+            "cover": qqFirstStr(it, ["picUrl", "picurl", "cover", "logo", "pic"]),
+            "trackCount": qqFirstInt(it, ["songNum", "songnum", "song_cnt"]),
+            "playCount": qqFirstInt(it, ["listenCount", "play_cnt", "playCount"]),
+            "creator": ["nickname": creatorNick],
+            "source": "qq",
+        ]
+    }
+
+    private func qqUserAlbum(_ it: [String: Any]) -> [String: Any]? {
+        let mid = scStr(it, "albummid")
+        let id = !mid.isEmpty ? mid : scStrOrNum(it, "albumid")
+        guard !id.isEmpty else { return nil }
+        let singerName = scStr(it, "singername")
+        let singers = scArr(it, "singer")
+        let artistName = !singerName.isEmpty ? singerName
+            : singers.map { scStr($0, "name") }.filter { !$0.isEmpty }.joined(separator: " / ")
+        let cover = qqFirstStr(it, ["albumcover", "albumCover", "pic", "cover"])
+        let pub = it["pubtime"] ?? it["pubTime"] ?? it["publishTime"] ?? it["releaseTime"] ?? 0
+        return [
+            "id": id, "source": "qq",
+            "name": qqFirstStr(it, ["albumname", "albumName", "name", "title"]).isEmpty ? "未知专辑" : qqFirstStr(it, ["albumname", "albumName", "name", "title"]),
+            "artists": [["name": artistName.isEmpty ? "未知歌手" : artistName]],
+            "cover": cover.isEmpty ? qqCover(mid) : cover,
+            "publishTime": pub,
+            "trackCount": qqFirstInt(it, ["songnum", "songNum", "total", "count"]),
+        ]
+    }
+
+    // MARK: - 路由
+
+    private func health() -> HttpResponse {
+        .json(200, ["code": 200, "ok": true, "port": 0, "channels": qqChannels, "sessionMode": "stored"])
+    }
+
+    private func status() async -> HttpResponse {
+        guard await ensureCredential() != nil else {
+            return .json(200, ["code": 200, "loggedIn": false])
+        }
+        do {
+            let d = try await musicuAuth(module: "music.UserInfo.userInfoServer", method: "GetLoginUserInfo", param: [:])
+            let info = d["info"] as? [String: Any] ?? [:]
+            let cred = loadCredential() ?? [:]
+            var nickname = scStr(cred, "nick")
+            if nickname.isEmpty { nickname = scStr(cred, "nickname") }
+            if nickname.isEmpty { nickname = scStr(info, "nick") }
+            if nickname.isEmpty { nickname = "QQ 音乐用户" }
+            var avatar = qqProfileAvatar(cred, info: info)
+            if avatar.isEmpty { avatar = scStr(cred, "avatarUrl") }
+            return .json(200, ["code": 200, "loggedIn": true, "nickname": nickname,
+                                "avatar": avatar, "uin": credentialMusicId(cred)])
+        } catch {
+            // 上游 401：未登录，另带失效会话的头像（stale），不删登录态文件。
+            var out: [String: Any] = ["code": 200, "loggedIn": false]
+            let cached = await cachedProfile()
+            if let uid = cached["uid"] as? String, !uid.isEmpty {
+                out["stale"] = true
+                out["nickname"] = cached["nickname"] as? String ?? ""
+                out["avatar"] = cached["avatar"] as? String ?? ""
+                out["uin"] = uid
+            }
+            return .json(200, out)
+        }
+    }
+
+    private func loginQrKey(req: HttpRequest) async -> HttpResponse {
+        let raw = req.string("channel", "qqmusic")
+        let channel = qqChannels.contains(raw) ? raw : "qqmusic"
+        do {
+            let key = try await createSession(channel: channel)
+            do {
+                let img = try await createQr(key: key)
+                return .json(200, ["code": 200, "key": key, "qrimg": img, "channel": channel])
+            } catch let e as QQAuthError {
+                return .json(200, ["code": e.code, "key": key, "qrimg": "", "channel": channel,
+                                    "retryAfterMs": e.retryAfterMs.map { NSNumber(value: $0) } ?? NSNull(), "error": e.message])
+            } catch {
+                return .json(200, ["code": 502, "key": key, "qrimg": "", "channel": channel,
+                                    "retryAfterMs": NSNull(), "error": "二维码生成失败：\(error.localizedDescription)"])
+            }
+        } catch let e as QQAuthError {
+            return .json(200, ["code": e.code, "key": NSNull(), "channel": channel,
+                                "retryAfterMs": e.retryAfterMs ?? NSNull(), "error": e.message])
+        } catch {
+            return .json(200, ["code": 502, "key": NSNull(), "channel": channel,
+                                "retryAfterMs": NSNull(), "error": "拿不到二维码 key：\(error.localizedDescription)"])
+        }
+    }
+
+    private func loginQrCreate(req: HttpRequest) async -> HttpResponse {
+        let key = req.string("key")
+        guard !key.isEmpty else { return .json(400, ["code": 400, "error": "key required"]) }
+        do {
+            let img = try await createQr(key: key)
+            return .json(200, ["code": 200, "key": key, "qrimg": img])
+        } catch let e as QQAuthError {
+            return .json(200, ["code": e.code, "key": key, "qrimg": "", "error": e.message])
+        } catch {
+            return .json(200, ["code": 502, "key": key, "qrimg": "", "error": "二维码生成失败：\(error.localizedDescription)"])
+        }
+    }
+
+    private func loginQrCheck(req: HttpRequest) async -> HttpResponse {
+        let key = req.string("key")
+        guard !key.isEmpty else { return .json(400, ["code": 400, "error": "key required"]) }
+        return .json(200, await checkQr(key: key))
+    }
+
+    /// 网页登录导入（第 12 轮第 10 件）：原生 WKWebView 里用户已在 y.qq.com
+    /// 登完，点「同步登录状态」把整罐 cookie 发过来（或前端「粘贴 Cookie」
+    /// 面板直接贴）。流程只照 Moumusic QQMusicSessionStore 的形状，不搬代码：
+    ///  - uin 从 uin / p_uin / pt2gguin / qqmusic_uin / loginUin 派生，
+    ///    p_uin 开头的 "o" 去掉（Moumusic normalizedAccountID 同款规则）；
+    ///  - 凭证取第一个非空的 qqmusic_key / qm_keyst / musickey / music_key /
+    ///    p_skey / skey / psrf_access_token / psrf_qq_access_token；
+    ///  - 两样缺一不可，缺了就回中文原因（不要只报 400）；
+    ///  - 整罐 cookie 随凭证一起存（webCookie）：musicu 调用时整罐发，
+    ///    p_skey 之类的票据才不会在半路丢掉（Lulumusic02 教训）；
+    ///  - 画像只尽力取（signInFromWeb 同款：不把它当登录前提，取不到也算登录成功）。
+    private func webLoginImport(req: HttpRequest) async -> HttpResponse {
+        let raw = req.string("cookie").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else {
+            return .json(200, ["code": 400, "loggedIn": false, "error": "没有拿到 Cookie：请先在网页里登录 QQ 音乐，再点「同步登录状态」"])
+        }
+        var fields: [String: String] = [:]
+        /* 第 14 轮第 7 件：和酷我同一缺口——按行复制的 Cookie 是换行分隔的，
+           只按 ';' 切会把整段当成一个键值对，票据被吞进 uin 的值里判缺；
+           值做 percent-decode；键名本来已小写归一化。 */
+        for item in raw.components(separatedBy: CharacterSet(charactersIn: ";\n\r")) {
+            let pair = item.split(separator: "=", maxSplits: 1).map(String.init)
+            guard pair.count == 2 else { continue }
+            let k = pair[0].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let v = pair[1].trimmingCharacters(in: .whitespacesAndNewlines).removingPercentEncoding
+                ?? pair[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !k.isEmpty && !v.isEmpty { fields[k] = v }
+        }
+        var uin = ""
+        for key in ["uin", "p_uin", "pt2gguin", "qqmusic_uin", "loginuin"] {
+            guard let v = fields[key], !v.isEmpty else { continue }
+            let norm = v.hasPrefix("o") ? String(v.dropFirst()) : v
+            if norm != "0" && norm.lowercased() != "null" && !norm.isEmpty { uin = norm; break }
+        }
+        var credential = ""
+        for key in ["qqmusic_key", "qm_keyst", "musickey", "music_key", "p_skey", "skey",
+                    "psrf_access_token", "psrf_qq_access_token"] {
+            if let v = fields[key], !v.isEmpty { credential = v; break }
+        }
+        guard !uin.isEmpty else {
+            DiagLog.shared.recordLog(category: "qq", message: "网页登录导入失败：无可用 QQ 号",
+                                     fields: ["reason": "web-login-no-uin", "cookieKeys": fields.keys.sorted().joined(separator: ",")])
+            return .json(200, ["code": 400, "loggedIn": false, "error": "网页登录没拿到 QQ 号（缺 uin / p_uin）：请确认已在网页里登录，再点一次「同步登录状态」"])
+        }
+        guard !credential.isEmpty else {
+            DiagLog.shared.recordLog(category: "qq", message: "网页登录导入失败：无登录票据",
+                                     fields: ["reason": "web-login-no-credential", "cookieKeys": fields.keys.sorted().joined(separator: ",")])
+            return .json(200, ["code": 400, "loggedIn": false, "error": "网页登录没拿到登录票据（缺 qqmusic_key / p_skey）：请确认已在网页里登录，再点一次「同步登录状态」"])
+        }
+        let cred: [String: Any] = [
+            "musicid": uin, "str_musicid": uin, "musickey": credential,
+            "loginType": 6, "musickeyCreateTime": Date().timeIntervalSince1970,
+            "keyExpiresIn": 259200, "webCookie": raw,
+        ]
+        saveCredential(cred)
+        DiagLog.shared.recordLog(category: "qq", message: "网页登录已导入",
+                                 fields: ["reason": "web-login-imported", "cookieKeys": fields.keys.sorted().joined(separator: ",")])
+        var out: [String: Any] = ["code": 200, "loggedIn": true]
+        if let profile = await getLoginProfile() {
+            var c = cred
+            if let nick = profile["nickname"] as? String, !nick.isEmpty { c["nickname"] = nick }
+            if let av = profile["avatar"] as? String, !av.isEmpty { c["avatarUrl"] = av }
+            saveCredential(c)
+            out["nickname"] = profile["nickname"] as? String ?? ""
+            out["avatar"] = profile["avatar"] as? String ?? ""
+        }
+        return .json(200, out)
+    }
+
+    private func search(req: HttpRequest) async -> HttpResponse {
+        let s = (req.string("s").isEmpty ? req.string("keyword") : req.string("s"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else {
+            return .json(200, ["code": 200, "source": "qq", "tracks": [], "songCount": 0])
+        }
+        let limit = min(20, max(1, req.int("limit", 20)))
+        let page = max(1, req.int("page", 1))
+        // 2026-11-19 第 13 轮第 14 件：搜索永远走匿名 lite 请求，不跟登录态。
+        // 实测证据（VM curl 真上游）：lite comm（tmeAppID=qqmusiclight，cv=1003006，
+        // search_type=7）回 20 条、sum≈979；androidComm（tmeAppID=qqmusic，cv=14090008，
+        // 登录态 musicuAuth 那路）回 code 0 但 sum=0、0 条——DoSearchForQQMusicLite
+        // 只认 lite 客户端，登录用户走登录态反而搜不到。搜索本身不需要登录，匿名即可。
+        let cacheKey = "\(s)|\(limit)|\(page)"
+        if let hit = searchCache.first(where: { $0.key == cacheKey }),
+           Date().timeIntervalSince(hit.at) < 60 {
+            var data = hit.data
+            data["cached"] = true
+            return .json(200, data)
+        }
+        let typeStr = req.string("type", "song")
+        let typeCode = ["song": 0, "singer": 1, "album": 2, "playlist": 3][typeStr] ?? 0
+        // 搜歌送 search_type=7（送 0 会回 2001）；歌手/专辑/歌单按 typeCode 送。
+        let searchType = typeCode == 0 ? 7 : typeCode
+        let searchId = String(Int.random(in: 1...9)) + qqRandomDigits(17)
+        let comm: [String: Any] = ["ct": 11, "cv": "1003006", "v": "1003006",
+                                   "tmeAppID": "qqmusiclight", "nettype": "NETWORK_WIFI",
+                                   "udid": "0", "uid": "0"]
+        var lastCode = 502
+        var lastMessage = "QQ 搜索失败"
+        // 第 3 次重试把每页条数减半（20→10→5）。实测：未压缩的大响应（20 条 ≈ 67KB）
+        // 在传输中会被截断（IncompleteRead），小响应（5 条 ≈ 19KB）稳定通过；
+        // URLSession 默认要 gzip，压缩后 20 条只有 ≈15KB 本来就安全，减半是最后一道保险。
+        for (attempt, wait, n) in [(0, 0, limit), (1, 1200, limit), (2, 2500, max(5, limit / 2))] {
+            if attempt > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000)) }
+            do {
+                let param: [String: Any] = [
+                    "search_id": searchId, "remoteplace": "search.android.keyboard", "query": s,
+                    "search_type": searchType, "num_per_page": n, "page_num": page,
+                    "highlight": 0, "nqc_flag": 0, "page_id": 1, "grp": 1,
+                ]
+                let data = try await musicu(comm: comm, module: "music.search.SearchCgiService",
+                                            method: "DoSearchForQQMusicLite", param: param,
+                                            headers: ["Cookie": "tmeLoginType=-1", "User-Agent": qqLiteUA])
+                let body = data["body"] as? [String: Any] ?? [:]
+                let meta = data["meta"] as? [String: Any] ?? [:]
+                let items = qqSearchItems(body: body, type: typeStr)
+                let payload: [String: Any] = [
+                    "code": 200, "source": "qq",
+                    "tracks": items.compactMap { qqTrack($0) },
+                    "songCount": scInt(meta, "sum") == 0 ? items.count : scInt(meta, "sum"),
+                    "more": ((meta["nextpage"] as? NSNumber)?.intValue ?? 0) > 0,
+                ]
+                searchCache.append((key: cacheKey, at: Date(), data: payload))
+                if searchCache.count > 24 { searchCache.removeFirst() }
+                return .json(200, payload)
+            } catch let e as QQUpstreamError {
+                lastCode = e.code
+                lastMessage = e.message
+            } catch {
+                lastCode = 502
+                lastMessage = error.localizedDescription
+            }
+        }
+        return .json(200, ["code": lastCode, "source": "qq", "tracks": [],
+                            "error": lastMessage + (lastCode == 2001 ? "（上游 2001，稍后再试）" : ""),
+                            "upstream": ["code": lastCode]])
+    }
+
+    private func qqSearchItems(body: [String: Any], type: String) -> [[String: Any]] {
+        let key: String
+        switch type {
+        case "singer": key = "singer"
+        case "album": key = "item_album"
+        case "playlist": key = "item_songlist"
+        default: key = "item_song"
+        }
+        if let arr = body[key] as? [[String: Any]] { return arr }
+        if let d = body[key] as? [String: Any], let arr = d["list"] as? [[String: Any]] { return arr }
+        return []
+    }
+
+    /// LRCLIB 兜底（第 11 轮）：只在官方回空的兜底路径上查一次现成的
+    /// songDetail（get_song_detail_yqq，resolvePlayUrl/previewUrl 已在用，
+    /// 不新写接口），拿歌名/歌手/专辑/时长走 LRCLIB。
+    private func qqLrclibFallback(mid: String) async -> (lyric: String, yrc: String)? {
+        guard let detail = await songDetail(mid: mid), let t = qqTrack(detail) else { return nil }
+        let name = t["name"] as? String ?? ""
+        guard !name.isEmpty else { return nil }
+        return await Lrclib.fetch(artist: t["artists"] as? String ?? "", track: name,
+                                  album: t["album"] as? String ?? "",
+                                  duration: (t["duration"] as? Int ?? 0) / 1000)
+    }
+
+    private func lyric(req: HttpRequest) async throws -> HttpResponse {
+        let mid = req.string("mid").isEmpty ? req.string("id") : req.string("mid")
+        guard !mid.isEmpty else { return .json(400, ["code": 400, "error": "mid required"]) }
+        let data: [String: Any]
+        do {
+            data = try await cgi(path: "/lyric/fcgi-bin/fcg_query_lyric_new.fcg",
+                                 params: ["songmid": mid,
+                                          "pcachetime": String(Int(Date().timeIntervalSince1970 * 1000))])
+        } catch {
+            // 上游抛错也试一次兜底（LRCLIB 是另一个 host）；兜底失败再原样抛，
+            // handle 回 502，不改变原来的失败面。
+            if let fb = await qqLrclibFallback(mid: mid) {
+                return .json(200, ["code": 200, "lyric": fb.lyric, "tlyric": "", "yrc": "",
+                                    "format": "lrc"])
+            }
+            throw error
+        }
+        let lyricText = Data(base64Encoded: scStr(data, "lyric"))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        let tlyricText = Data(base64Encoded: scStr(data, "trans"))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        if lyricText.isEmpty, let fb = await qqLrclibFallback(mid: mid) {
+            return .json(200, ["code": 200, "lyric": fb.lyric, "tlyric": "", "yrc": "",
+                                "format": "lrc"])
+        }
+        return .json(200, ["code": 200, "lyric": lyricText, "tlyric": tlyricText, "yrc": "",
+                            "format": lyricText.isEmpty ? "none" : "lrc"])
+    }
+
+    private func songUrl(req: HttpRequest) async -> HttpResponse {
+        let mid = req.string("mid").isEmpty ? req.string("id") : req.string("mid")
+        guard !mid.isEmpty else { return .json(400, ["code": 400, "error": "mid required"]) }
+        let quality = req.string("quality", "128")
+        _ = await ensureCredential()
+        let (url, loginRequired, served) = await resolvePlayUrl(mid: mid, quality: quality)
+        if !url.isEmpty {
+            return .json(200, ["code": 200, "mid": mid, "url": url, "preview": false,
+                                "quality": served, "reason": NSNull(), "restriction": NSNull()])
+        }
+        let preview = await previewUrl(mid: mid)
+        if !preview.isEmpty {
+            return .json(200, ["code": 200, "mid": mid, "url": preview, "preview": true,
+                                "quality": "preview", "reason": NSNull(), "restriction": NSNull()])
+        }
+        return .json(200, ["code": 200, "mid": mid, "url": "", "preview": false,
+                            "quality": quality, "reason": loginRequired ? "login" : "unavailable",
+                            "restriction": NSNull()])
+    }
+
+    private func recommendPlaylists(req: HttpRequest) async -> HttpResponse {
+        let limit = min(20, max(3, req.int("limit", 9)))
+        do {
+            let authed = await ensureCredential() != nil
+            let param: [String: Any] = ["From": 0, "Size": limit]
+            let data = try await (authed
+                ? musicuAuth(module: "music.playlist.PlaylistSquare", method: "GetRecommendFeed", param: param)
+                : musicuAnon(module: "music.playlist.PlaylistSquare", method: "GetRecommendFeed", param: param))
+            let list = (data["List"] as? [[String: Any]] ?? []).compactMap {
+                ($0["Playlist"] as? [String: Any])?["basic"] as? [String: Any]
+            }
+            return .json(200, ["code": 200, "source": "qq", "playlists": list.compactMap { qqPlaylist($0) }])
+        } catch {
+            return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502, "source": "qq",
+                                "playlists": [], "error": (error as? QQUpstreamError)?.message ?? "QQ 推荐歌单失败"])
+        }
+    }
+
+    private func recommendNewSongs(req: HttpRequest) async -> HttpResponse {
+        let limit = min(60, max(1, req.int("limit", 30)))
+        let area = req.int("area", 5)
+        do {
+            let authed = await ensureCredential() != nil
+            let param: [String: Any] = ["type": area]
+            let data = try await (authed
+                ? musicuAuth(module: "newsong.NewSongServer", method: "get_new_song_info", param: param)
+                : musicuAnon(module: "newsong.NewSongServer", method: "get_new_song_info", param: param))
+            let songs = (data["songlist"] as? [[String: Any]] ?? [])
+            return .json(200, ["code": 200, "source": "qq",
+                                "tracks": Array(songs.prefix(limit)).compactMap { qqTrack($0) }])
+        } catch {
+            return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502, "source": "qq",
+                                "tracks": [], "error": (error as? QQUpstreamError)?.message ?? "QQ 新歌速递失败"])
+        }
+    }
+
+    private func playlistDetail(req: HttpRequest) async -> HttpResponse {
+        let id = req.string("id")
+        guard !id.isEmpty else { return .json(400, ["code": 400, "error": "id required"]) }
+        do {
+            let obj = try await cgi(path: "/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg",
+                                    params: ["disstid": id, "type": "1", "json": "1", "utf8": "1",
+                                             "onlysong": "0", "new_format": "1"])
+            let cdlist = obj["cdlist"] as? [[String: Any]] ?? []
+            guard let cd = cdlist.first else {
+                return .json(200, ["code": 502, "source": "qq", "name": "", "cover": "",
+                                    "tracks": [], "trackCount": 0, "error": "歌单不存在"])
+            }
+            let songs = cd["songlist"] as? [[String: Any]] ?? []
+            let tracks = songs.compactMap { qqTrack($0) }
+            return .json(200, ["code": 200, "source": "qq",
+                                "id": scStrOrNum(cd, "disstid").isEmpty ? id : scStrOrNum(cd, "disstid"),
+                                "name": scStr(cd, "dissname").isEmpty ? "QQ 歌单" : scStr(cd, "dissname"),
+                                "cover": scStr(cd, "logo"),
+                                "creator": ["nickname": qqFirstStr(cd, ["nickname", "nick"])],
+                                "tracks": tracks, "trackCount": tracks.count])
+        } catch let e as QQUpstreamError where e.code == 10 {
+            // 算法歌单：匿名 CGI 只回 code 10，带凭证重读 uniform_get_Dissinfo。
+            guard await ensureCredential() != nil else {
+                return .json(200, ["code": 80120, "source": "qq", "name": "", "cover": "",
+                                    "tracks": [], "trackCount": 0, "error": "歌单取不到（80120）"])
+            }
+            return await authenticatedPlaylistDetail(id: id)
+        } catch {
+            return .json(200, ["code": 502, "source": "qq", "name": "", "cover": "",
+                                "tracks": [], "trackCount": 0, "error": "歌单取不到"])
+        }
+    }
+
+    private func authenticatedPlaylistDetail(id: String) async -> HttpResponse {
+        do {
+            var allSongs: [[String: Any]] = []
+            var total = 0
+            var hasmore = 1
+            var begin = 0
+            var pages = 0
+            var firstData: [String: Any] = [:]
+            while hasmore == 1 && pages < 10 {
+                let d = try await musicuAuth(module: "music.srfDissInfo.aiDissInfo", method: "uniform_get_Dissinfo",
+                                             param: ["disstid": id, "userinfo": 1, "tag": 1, "orderlist": 1,
+                                                     "song_begin": begin, "song_num": 1000,
+                                                     "onlysonglist": 0, "enc_host_uin": ""])
+                if pages == 0 { firstData = d }
+                let songs = d["songlist"] as? [[String: Any]] ?? []
+                if songs.isEmpty { break }
+                allSongs.append(contentsOf: songs)
+                total = scInt(d, "total_song_num")
+                hasmore = scInt(d, "hasmore")
+                begin += songs.count
+                pages += 1
+                if total > 0 && allSongs.count >= total { break }
+            }
+            let tracks = allSongs.compactMap { qqTrack($0) }
+            return .json(200, ["code": 200, "source": "qq", "id": id,
+                                "name": scStr(firstData, "dissname").isEmpty ? "QQ 歌单" : scStr(firstData, "dissname"),
+                                "cover": scStr(firstData, "logo"),
+                                "creator": ["nickname": qqFirstStr(firstData, ["nickname", "nick"])],
+                                "tracks": tracks, "trackCount": tracks.count])
+        } catch {
+            return .json(200, ["code": 502, "source": "qq", "name": "", "cover": "",
+                                "tracks": [], "trackCount": 0, "error": "歌单取不到"])
+        }
+    }
+
+    private func userLikedSongs(req: HttpRequest) async -> HttpResponse {
+        let limit = min(100, max(1, req.int("limit", 100)))
+        guard let cred = await ensureCredential(), !scStr(cred, "encryptUin").isEmpty else {
+            return .json(200, ["code": 401, "source": "qq", "tracks": [], "error": "先在卡片上扫码登录 QQ 音乐"])
+        }
+        do {
+            let d = try await musicuAuth(module: "music.srfDissInfo.DissInfo", method: "CgiGetDiss",
+                                         param: ["disstid": 0, "dirid": 201, "tag": true, "song_begin": 0,
+                                                 "song_num": limit, "userinfo": true, "orderlist": true,
+                                                 "enc_host_uin": scStr(cred, "encryptUin")])
+            let songs = d["songlist"] as? [[String: Any]] ?? []
+            return .json(200, ["code": 200, "source": "qq", "tracks": songs.compactMap { qqTrack($0) },
+                                "total": scInt(d, "total_song_num")])
+        } catch {
+            if isCredentialRejection(error) {
+                return .json(200, ["code": 401, "source": "qq", "tracks": [], "error": "先在卡片上扫码登录 QQ 音乐"])
+            }
+            return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502, "source": "qq",
+                                "tracks": [], "error": (error as? QQUpstreamError)?.message ?? "QQ 音乐失败"])
+        }
+    }
+
+    private func userPlaylists() async -> HttpResponse {
+        guard let cred = await ensureCredential() else {
+            return .json(200, ["code": 401, "source": "qq", "playlists": [], "error": "先在卡片上扫码登录 QQ 音乐"])
+        }
+        do {
+            var playlists: [[String: Any]] = []
+            var seen = Set<String>()
+            func add(_ items: [[String: Any]]) {
+                for it in items {
+                    if let p = qqPlaylist(it), let pid = p["id"] as? String, !seen.contains(pid) {
+                        seen.insert(pid)
+                        playlists.append(p)
+                    }
+                }
+            }
+            let own = try await musicuAuth(module: "music.musicasset.PlaylistBaseRead", method: "GetPlaylistByUin",
+                                           param: ["uin": credentialMusicId(cred)])
+            add(own["v_playlist"] as? [[String: Any]] ?? [])
+            var offset = 0
+            var hasmore = true
+            var rounds = 0
+            let encryptUin = scStr(cred, "encryptUin")
+            if !encryptUin.isEmpty {
+                while hasmore && rounds < 20 {
+                    let fav = try await musicuAuth(module: "music.musicasset.PlaylistFavRead",
+                                                   method: "CgiGetPlaylistFavInfo",
+                                                   param: ["uin": encryptUin, "offset": offset, "size": 100])
+                    let items = fav["v_list"] as? [[String: Any]] ?? []
+                    if items.isEmpty { break }
+                    add(items)
+                    hasmore = (fav["hasmore"] as? NSNumber)?.boolValue ?? false
+                    let total = scInt(fav, "total")
+                    let next = offset + items.count
+                    if next <= offset { break }
+                    offset = next
+                    rounds += 1
+                    if total > 0 && offset >= min(total, 1000) { break }
+                }
+            }
+            return .json(200, ["code": 200, "source": "qq", "playlists": playlists])
+        } catch {
+            if isCredentialRejection(error) {
+                return .json(200, ["code": 401, "source": "qq", "playlists": [], "error": "先在卡片上扫码登录 QQ 音乐"])
+            }
+            return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502, "source": "qq",
+                                "playlists": [], "error": (error as? QQUpstreamError)?.message ?? "取我的歌单失败"])
+        }
+    }
+
+    private func userAlbums(req: HttpRequest) async -> HttpResponse {
+        let limit = min(100, max(1, req.int("limit", 100)))
+        let offset = max(0, req.int("offset", 0))
+        guard let cred = await ensureCredential() else {
+            return .json(200, ["code": 401, "source": "qq", "data": [], "error": "先在卡片上扫码登录 QQ 音乐"])
+        }
+        do {
+            let obj = try await cgi(path: "/fav/fcgi-bin/fcg_get_profile_order_asset.fcg",
+                                    params: ["ct": "20", "cid": "205360956", "userid": credentialMusicId(cred),
+                                             "reqtype": "2", "sin": String(offset), "ein": String(offset + limit - 1),
+                                             "format": "json"],
+                                    referer: "https://y.qq.com/",
+                                    headers: ["Cookie": credentialCookieHeader(cred)])
+            let d = obj["data"] as? [String: Any] ?? [:]
+            let albums = d["albumlist"] as? [[String: Any]] ?? []
+            let hasMore = (d["hasmore"] as? NSNumber)?.boolValue
+                ?? (d["has_more"] as? NSNumber)?.boolValue ?? false
+            return .json(200, ["code": 200, "source": "qq", "data": albums.compactMap { qqUserAlbum($0) },
+                                "hasMore": hasMore, "total": scInt(d, "totalalbum")])
+        } catch {
+            if isCredentialRejection(error) {
+                return .json(200, ["code": 401, "source": "qq", "data": [], "error": "先在卡片上扫码登录 QQ 音乐"])
+            }
+            return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502, "source": "qq",
+                                "data": [], "error": (error as? QQUpstreamError)?.message ?? "QQ 音乐失败"])
+        }
+    }
+
+    private func userDailySongs() async -> HttpResponse {
+        guard await ensureCredential() != nil else {
+            return .json(200, ["code": 401, "source": "qq", "tracks": [], "error": "登录 QQ 音乐后才有每日推荐"])
+        }
+        do {
+            let d = try await musicuAuth(module: "music.srfDissInfo.aiDissInfo", method: "uniform_get_Dissinfo",
+                                         param: ["dirid": 202, "optype": 3, "tag": 1, "userinfo": 0, "pic_dpi": 300])
+            let songs = d["songlist"] as? [[String: Any]] ?? []
+            return .json(200, ["code": 200, "source": "qq", "tracks": songs.compactMap { qqTrack($0) }])
+        } catch {
+            if isCredentialRejection(error) {
+                return .json(200, ["code": 401, "source": "qq", "tracks": [], "error": "登录 QQ 音乐后才有每日推荐"])
+            }
+            return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502, "source": "qq",
+                                "tracks": [], "error": (error as? QQUpstreamError)?.message ?? "QQ 每日推荐失败"])
+        }
+    }
+
+    private func recommendRadar(req: HttpRequest) async -> HttpResponse {
+        let page = min(100, max(1, req.int("page", 1)))
+        do {
+            let authed = await ensureCredential() != nil
+            let param: [String: Any] = ["Page": page, "ReqType": 0, "FavSongs": [], "EntranceSongs": []]
+            let d = try await (authed
+                ? musicuAuth(module: "music.recommend.TrackRelationServer", method: "GetRadarSong", param: param)
+                : musicuAnon(module: "music.recommend.TrackRelationServer", method: "GetRadarSong", param: param))
+            let songs = d["VecSongs"] as? [[String: Any]] ?? []
+            let tracks = songs.compactMap { ($0["Track"] as? [String: Any]).flatMap(qqTrack) }
+            return .json(200, ["code": 200, "source": "qq", "tracks": tracks])
+        } catch {
+            return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502, "source": "qq",
+                                "tracks": [], "error": (error as? QQUpstreamError)?.message ?? "QQ 雷达推荐失败"])
+        }
+    }
+
+    private func radioCategories() async -> HttpResponse {
+        do {
+            let d = try await musicuAnon(module: "pf.radiosvr", method: "GetRadiolist",
+                                         param: ["uin": "0"], withUin: true, readOnly: false)
+            let groups = (d["radio_list"] as? [[String: Any]]) ?? (d["groups"] as? [[String: Any]]) ?? []
+            var stations: [[String: Any]] = []
+            for g in groups {
+                let list = (g["list"] as? [[String: Any]]) ?? (g["radios"] as? [[String: Any]]) ?? []
+                for it in list {
+                    let name = qqFirstStr(it, ["title", "name"])
+                    stations.append([
+                        "id": scStrOrNum(it, "id"), "source": "qq",
+                        "name": name.isEmpty ? "未命名电台" : name,
+                        "cover": qqFirstStr(it, ["picurl", "picUrl", "pic"]),
+                        "trackCount": 0,
+                        "playCount": qqFirstInt(it, ["listenNum", "listenCount"]),
+                        "creator": ["nickname": scStr(g, "title")],
+                    ])
+                }
+            }
+            return .json(200, ["code": 200, "source": "qq", "stations": stations])
+        } catch {
+            return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502, "source": "qq",
+                                "stations": [], "error": (error as? QQUpstreamError)?.message ?? "QQ 电台分类失败"])
+        }
+    }
+
+    private func radioTracks(req: HttpRequest) async -> HttpResponse {
+        let idStr = req.string("id")
+        guard let id = Int(idStr), id > 0 else {
+            return .json(400, ["code": 400, "error": "id required"])
+        }
+        guard await ensureCredential() != nil else {
+            return .json(200, ["code": 401, "source": "qq", "tracks": [], "error": "QQ 电台收听需要登录（并可能需要会员）"])
+        }
+        do {
+            if id == 99 {
+                let d = try await musicuAuth(module: "music.radioProxy.MbTrackRadioSvr", method: "get_radio_track",
+                                             param: ["id": 99, "firstplay": 1, "num": 15])
+                let list = (d["tracks"] as? [[String: Any]] ?? [])
+                return .json(200, ["code": 200, "source": "qq", "tracks": list.compactMap { qqTrack($0) }])
+            }
+            let d = try await musicuAuth(module: "pf.radiosvr", method: "GetRadiosonglist",
+                                         param: ["id": id, "firstplay": 0, "num": 9])
+            let list = (d["track_list"] as? [[String: Any]])
+                ?? (d["tracks"] as? [[String: Any]])
+                ?? (d["songs"] as? [[String: Any]]) ?? []
+            return .json(200, ["code": 200, "source": "qq", "tracks": list.compactMap { qqTrack($0) }])
+        } catch {
+            if isCredentialRejection(error) {
+                return .json(200, ["code": 401, "source": "qq", "tracks": [], "error": "QQ 电台收听需要登录（并可能需要会员）"])
+            }
+            return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502, "source": "qq",
+                                "tracks": [], "error": (error as? QQUpstreamError)?.message ?? "QQ 电台失败"])
+        }
+    }
+
+    private func playlistCreate(req: HttpRequest) async -> HttpResponse {
+        guard await ensureCredential() != nil else {
+            return .json(200, ["code": 401, "error": "先在卡片上扫码登录 QQ 音乐"])
+        }
+        var name = String(req.string("name").unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) })
+        if name.count > 20 { name = String(name.prefix(20)) }
+        guard !name.isEmpty else { return .json(400, ["code": 400, "error": "name required"]) }
+        do {
+            let d = try await musicuAuth(module: "music.musicasset.PlaylistBaseWrite", method: "AddPlaylist",
+                                         param: ["dirName": name], readOnly: false)
+            let result = d["result"] as? [String: Any] ?? [:]
+            let retCode = d["retCode"] != nil ? scInt(d, "retCode") : scInt(result, "retCode")
+            guard retCode == 0,
+                  let tid = (result["tid"] as? NSNumber)?.intValue,
+                  let dirId = (result["dirId"] as? NSNumber)?.intValue, dirId < 200 else {
+                return .json(200, ["code": 502, "error": "QQ 建歌单失败"])
+            }
+            _ = try? await musicuAuth(module: "music.musicasset.PlaylistBaseRead", method: "GetPlaylistByUin",
+                                      param: ["uin": credentialMusicId()])
+            return .json(200, ["code": 200, "tid": String(tid), "dirId": String(dirId),
+                                "playlist": ["id": String(tid), "dirId": String(dirId), "name": name]])
+        } catch {
+            if isCredentialRejection(error) {
+                return .json(200, ["code": 401, "error": "登录态已失效，重新扫码登录 QQ 音乐"])
+            }
+            return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502,
+                                "error": (error as? QQUpstreamError)?.message ?? "QQ 建歌单失败"])
+        }
+    }
+
+    /// 批量查歌（内部用，也供 /song/batch）：每首一个 RPC，匿名 comm {ct:24, cv:0}。
+    private func songBatchInternal(songs: [[String: Any]]) async throws -> [[String: Any]] {
+        let calls = songs.map { s -> (module: String, method: String, param: [String: Any]) in
+            var param: [String: Any] = ["song_type": 0, "song_mid": scStr(s, "mid")]
+            if scInt(s, "id") > 0 { param["song_id"] = scInt(s, "id") }
+            return (module: "music.pf_song_detail_svr", method: "get_song_detail_yqq", param: param)
+        }
+        let datas = try await musicuMulti(comm: ["ct": 24, "cv": 0], calls: calls)
+        return datas.enumerated().map { (i, d) in
+            let track = d["track_info"] as? [String: Any] ?? [:]
+            let valid = scStr(track, "mid") == scStr(songs[i], "mid") && scInt(track, "id") > 0
+            return ["index": i, "code": 200, "song": valid ? track : [:], "info": d]
+        }
+    }
+
+    private func playlistTracks(req: HttpRequest) async -> HttpResponse {
+        guard await ensureCredential() != nil else {
+            return .json(200, ["code": 401, "error": "先在卡片上扫码登录 QQ 音乐"])
+        }
+        let body = req.jsonBody()
+        var tid = 0
+        if let n = Int(req.string("tid").isEmpty ? req.string("pid") : req.string("tid")), n > 0 { tid = n }
+        if tid == 0, let n = (body["tid"] as? NSNumber)?.intValue, n > 0 { tid = n }
+        if tid == 0, let n = (body["pid"] as? NSNumber)?.intValue, n > 0 { tid = n }
+        guard tid > 0 else { return .json(400, ["code": 400, "error": "tid required"]) }
+        var songs: [[String: Any]] = []
+        if let arr = body["songs"] as? [[String: Any]] { songs = arr }
+        else if let arr = body["picks"] as? [[String: Any]] { songs = arr }
+        guard !songs.isEmpty else { return .json(400, ["code": 400, "error": "songs required"]) }
+        var ids: [Int] = []
+        var mids: [String] = []
+        for s in songs {
+            if let n = (s["id"] as? NSNumber)?.intValue, n > 0 { ids.append(n); mids.append("") }
+            else if let n = (s["songId"] as? NSNumber)?.intValue, n > 0 { ids.append(n); mids.append("") }
+            else if let m = s["mid"] as? String, !m.isEmpty { ids.append(0); mids.append(m) }
+            else { ids.append(0); mids.append("") }
+        }
+        do {
+            // 补数字 id：每批 20 首调 song/batch。
+            var missing = ids.indices.filter { ids[$0] == 0 && !mids[$0].isEmpty }
+            while !missing.isEmpty {
+                let batch = Array(missing.prefix(20))
+                let results = try await songBatchInternal(songs: batch.map { ["mid": mids[$0]] })
+                for (j, idx) in batch.enumerated() where j < results.count {
+                    if let song = results[j]["song"] as? [String: Any], scInt(song, "id") > 0 {
+                        ids[idx] = scInt(song, "id")
+                    }
+                }
+                let next = ids.indices.filter { ids[$0] == 0 && !mids[$0].isEmpty }
+                if next.count == missing.count { break }
+                missing = next
+            }
+            if ids.contains(0) {
+                return .json(400, ["code": 400, "error": "有些曲目没有数字 songid，无法写入 QQ 歌单"])
+            }
+            let own = try await musicuAuth(module: "music.musicasset.PlaylistBaseRead",
+                                           method: "GetPlaylistByUin",
+                                           param: ["uin": credentialMusicId()])
+            guard let vlist = own["v_playlist"] as? [[String: Any]],
+                  let entry = vlist.first(where: { scStrOrNum($0, "tid") == String(tid) }),
+                  let dirId = (entry["dirId"] as? NSNumber)?.intValue,
+                  dirId < 200, scInt(entry, "dirType") == 0 else {
+                return .json(200, ["code": 502, "error": "QQ 歌单不存在或不是自建歌单"])
+            }
+            var added = 0
+            var idx = 0
+            while idx < ids.count {
+                let chunk = Array(ids[idx..<min(idx + 100, ids.count)])
+                let vSongInfo = chunk.map { ["songId": $0, "songType": 0] }
+                do {
+                    let d = try await musicuAuth(module: "music.musicasset.PlaylistDetailWrite",
+                                                 method: "AddSonglist",
+                                                 param: ["dirId": dirId, "v_songInfo": vSongInfo],
+                                                 readOnly: false)
+                    let result = d["result"] as? [String: Any] ?? [:]
+                    let retCode = d["retCode"] != nil ? scInt(d, "retCode") : scInt(result, "retCode")
+                    guard retCode == 0 else {
+                        return .json(200, ["code": 502, "added": added, "error": "QQ 写歌单失败"])
+                    }
+                    added += chunk.count
+                } catch {
+                    return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502, "added": added,
+                                        "error": "QQ 写歌单失败" + (added > 0 ? "（前 \(added) 首已写入）" : "")])
+                }
+                idx += chunk.count
+            }
+            return .json(200, ["code": 200, "tid": tid, "added": added])
+        } catch {
+            if isCredentialRejection(error) {
+                return .json(200, ["code": 401, "error": "登录态已失效，重新扫码登录 QQ 音乐"])
+            }
+            return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502,
+                                "error": (error as? QQUpstreamError)?.message ?? "QQ 写歌单失败"])
+        }
+    }
+
+    // MARK: - 分发
+
+    func handle(_ req: HttpRequest) async -> HttpResponse {
+        let part = String(req.path.dropFirst("/api/qq/".count))
+        do {
+            switch part {
+            case "", "health":
+                return health()
+            case "status", "login/status":
+                return await status()
+            case "cached-profile":
+                return .json(200, await cachedProfile())
+            case "login/qr/key":
+                return await loginQrKey(req: req)
+            case "login/qr/create":
+                return await loginQrCreate(req: req)
+            case "login/qr/check":
+                return await loginQrCheck(req: req)
+            case "login/web":
+                return await webLoginImport(req: req)
+            case "login/qr/cancel":
+                cancelQrSession(key: req.string("key"))
+                return .json(200, ["code": 200])
+            case "logout":
+                saveCredential(nil)
+                for s in qrSessions.values { s.wsTask?.cancel(); s.driverTask?.cancel() }
+                qrSessions.removeAll()
+                return .json(200, ["code": 200, "loggedIn": false])
+            case "search":
+                return await search(req: req)
+            case "lyric":
+                return try await lyric(req: req)
+            case "song/url":
+                return await songUrl(req: req)
+            case "recommend/playlists":
+                return await recommendPlaylists(req: req)
+            case "recommend/new-songs":
+                return await recommendNewSongs(req: req)
+            case "playlist/detail":
+                return await playlistDetail(req: req)
+            case "user/liked-songs":
+                return await userLikedSongs(req: req)
+            case "user/playlists":
+                return await userPlaylists()
+            case "user/albums":
+                return await userAlbums(req: req)
+            case "user/daily-songs":
+                return await userDailySongs()
+            case "recommend/radar":
+                return await recommendRadar(req: req)
+            case "radio/categories":
+                return await radioCategories()
+            case "radio/tracks":
+                return await radioTracks(req: req)
+            case "playlist/create":
+                return await playlistCreate(req: req)
+            case "playlist/tracks", "playlist/tracks/add":
+                return await playlistTracks(req: req)
+            default:
+                return .json(404, ["code": 404, "error": "unknown qq api: \(part)"])
+            }
+        } catch {
+            let msg = (error as? QQUpstreamError)?.message ?? error.localizedDescription
+            return .json(502, ["code": 502, "error": msg])
+        }
+    }
+}
+
+/// Range 探测（CDN 兜底用）：GET Range bytes=0-0，200/206 算通。
+private func qqProbeURL(_ urlString: String) async -> Bool {
+    guard let url = URL(string: urlString) else { return false }
+    do {
+        let (_, resp) = try await Upstream.fetch(url, headers: ["Range": "bytes=0-0"], timeout: 5)
+        return (200...299).contains(resp.statusCode) || resp.statusCode == 206
+    } catch {
+        return false
+    }
+}

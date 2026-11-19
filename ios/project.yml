@@ -1,0 +1,95 @@
+name: Lizi
+
+options:
+  bundleIdPrefix: com.lty5201
+  deploymentTarget:
+    iOS: "16.2"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.2"
+    MARKETING_VERSION: "1.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  Lizi:
+    type: application
+    platform: iOS
+    sources:
+      - Sources/Lizi
+      # 岛上控制 Intent（LiziIslandIntents.swift）同时编进 App target：
+      # perform() 在 App 进程内跑，系统要从 App 包里发现它；扩展 target
+      # 本来就编 Sources/LiziLiveActivity，同一份文件，别复制两份。
+      - Sources/LiziLiveActivity/LiziIslandIntents.swift
+    # public/ 是上游原封不动的前端：XcodeGen 2.46 对 Xcode 16+ 工程把
+    # type: folder 的 resources 当同步组处理，../public 在工程目录外
+    # 会被静默丢弃（run 43956308629 证实：archive 成功但 .app 里无 public/）。
+    # 改用 post-build 脚本直接拷进 .app，Bundle 里路径保持 public/...。
+    postBuildScripts:
+      - name: Copy public frontend
+        basedOnDependencyAnalysis: false
+        script: |
+          set -e
+          rm -rf "$TARGET_BUILD_DIR/$PRODUCT_NAME.app/public"
+          cp -R "$SRCROOT/../public" "$TARGET_BUILD_DIR/$PRODUCT_NAME.app/public"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lty5201.lizi
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies:
+      - target: LiziLiveActivity
+    info:
+      path: Sources/Lizi/Info.plist
+      properties:
+        CFBundleDisplayName: LIZI 粒子播放器
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - audio
+        UILaunchScreen: {}
+        ITSAppUsesNonExemptEncryption: false
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          # 注意：这里不能再加 NSAllowsArbitraryLoads——Apple 规则（iOS 10+）：
+          # NSAllowsLocalNetworking / NSAllowsArbitraryLoadsForMedia /
+          # NSAllowsArbitraryLoadsInWebContent 任一在场，NSAllowsArbitraryLoads
+          # 都会被系统静默忽略、按 NO 处理。build 22 就是这么死的：plist 看着
+          # 放行，实际生效的 ATS 只有默认（仅 https）+ 本地联网例外，http 上游
+          # 全被 -1022 拦掉。删掉这个被忽略的键，免得后人再被它骗。
+          # 音频直链的放行不靠 plist 靠 https 升级：public/api.js 的
+          # upgradeAudioUrl 与 Swift Upstream.upgradedAudioURL 共用同一张
+          # 实测支持 https 的域名后缀表；实测过的音频域全部支持 https，
+          # 所以不需要 NSExceptionDomains。127.0.0.1 本地服务靠上面这行。
+        CFBundleURLTypes:
+          - CFBundleURLName: com.lty5201.lizi
+            CFBundleURLSchemes:
+              - lizi
+
+  # 歌词灵动岛扩展（Live Activity）：配置按 Beans/kun 的成功做法——
+  # NSExtension 只写在 project.yml 的 info.properties 里（XcodeGen 每次
+  # 生成工程都会重写 Info.plist 文件，手改 plist 活不到构建）；绝不写
+  # NSExtensionPrincipalClass（岛上歌词项目曾因此装不上）。
+  LiziLiveActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Sources/LiziLiveActivity
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lty5201.lizi.LiziLiveActivity
+        PRODUCT_NAME: LiziLiveActivity
+    info:
+      path: Sources/LiziLiveActivity/Info.plist
+      properties:
+        CFBundleDisplayName: 歌词灵动岛
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension

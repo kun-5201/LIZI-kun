@@ -1,0 +1,96 @@
+{
+  "name": "lyric-glass-player",
+  "productName": "LIZI",
+  "version": "1.0.5",
+  "description": "粒子播放器",
+  "author": "LIZI",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/woshi32s/liziair.git"
+  },
+  "main": "desktop/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --x64 --publish never",
+    "release": "node release.mjs"
+  },
+  "build": {
+    "appId": "app.lizi.player",
+    "productName": "LIZI",
+    "asar": false,
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "woshi32s",
+        "repo": "liziair",
+        "releaseType": "release",
+        "channel": "latest"
+      }
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "desktop/**",
+      "public/**",
+      "!public/**/*.bak*",
+      "!public/site/download/**",
+      "!public/m/**",
+      "server.mjs",
+      "wallpaper-api.mjs",
+      "package.json",
+      "build/**"
+    ],
+    "extraResources": [
+      {
+        "from": "services",
+        "to": "app/services",
+        "filter": [
+          "**/*",
+          "!**/.log",
+          "!**/.log.1",
+          "!**/.port",
+          "!**/.cache/**",
+          "!**/node_modules/.bin/**",
+          "!**/.auth-*",
+          "!**/.auth-state/**",
+          "!**/.session.json",
+          "!**/.netease-device.json",
+          "!**/.client.json",
+          "!**/cookie*.txt",
+          "!**/*.cookie"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "include": "build/installer.nsh",
+      "artifactName": "LIZI-Setup-${version}.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "LIZI"
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  }
+}

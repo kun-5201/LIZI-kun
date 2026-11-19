@@ -193,6 +193,25 @@ targets:
       # 目录进包后原生侧按 Bundle 子目录 LXSponsored 找。目录本地只有
       # .gitkeep 占位（构建机上拉取步骤会写入 linglan.js）；secret 未配
       # 时目录为空，原生侧静默不注册该源。
+    # 资源目录按结构进包（r19 验包发现）：XcodeGen 2.46 把 resources 里的目录
+    # 逐文件平拷进包根——run 44570863360 的包里 stages/GalleryHTML/assets/
+    # LXSponsored 全是平的，StageBridge 的 subdirectory:"stages" 查不到、
+    # GalleryHTML 的 ../../stages/ 与 ../vendor/ 全断、linglan.js 因不在
+    # LXSponsored/ 子目录下注册不上。照抄壳版「Copy public frontend」的做法，
+    # 用 post-build 脚本把 4 个目录按结构拷进 .app。平拷的冗余文件留着无害
+    #（Fraunces 还要靠包根的平拷进 UIAppFonts；其余平拷文件只是占体积）。
+    postBuildScripts:
+      - name: Copy structured resources
+        basedOnDependencyAnalysis: false
+        script: |
+          set -e
+          APP="$TARGET_BUILD_DIR/$PRODUCT_NAME.app"
+          SRC="$SRCROOT/Sources/LiziNative/Resources"
+          rm -rf "$APP/stages" "$APP/GalleryHTML" "$APP/assets" "$APP/LXSponsored"
+          cp -R "$SRC/stages" "$APP/stages"
+          cp -R "$SRC/GalleryHTML" "$APP/GalleryHTML"
+          cp -R "$SRC/assets" "$APP/assets"
+          cp -R "$SRC/LXSponsored" "$APP/LXSponsored"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lty5201.lizi-native

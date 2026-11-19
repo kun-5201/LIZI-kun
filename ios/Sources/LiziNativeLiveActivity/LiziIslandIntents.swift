@@ -14,7 +14,7 @@ import Foundation
 ///
 /// AirPlay 不走这里：第三方 Live Activity 里放不了 AVRoutePickerView
 /// （UIKit 视图，Widget 只支持纯 SwiftUI），也没有公开 API 能在岛上
-/// 原地弹出系统路由面板；展开页的 AirPlay 用 Link 到 lizi://airplay，
+/// 原地弹出系统路由面板；展开页的 AirPlay 用 Link 到 lizinative://airplay，
 /// 打开 App 并直接弹出系统路由选择页（见 ContentView.AirPlayPickerSheet）。
 /// 锁屏系统播放器自带的 AirPlay 按钮是系统画的，不用 App 管。
 

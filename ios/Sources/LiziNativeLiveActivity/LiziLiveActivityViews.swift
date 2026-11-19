@@ -13,10 +13,10 @@ import WidgetKit
 ///   iOS 17.2+；16.2–17.1 上只显示图标、点不了）。
 /// - AirPlay：第三方 Live Activity 里放不了 AVRoutePickerView（UIKit 视图，
 ///   Widget 只支持纯 SwiftUI），也没有公开 API 能在岛上原地弹出系统路由面板；
-///   所以 AirPlay 是 Link 到 lizi://airplay——打开 App 并直接弹出系统路由选择页
+///   所以 AirPlay 是 Link 到 lizinative://airplay——打开 App 并直接弹出系统路由选择页
 ///   （AVRoutePickerView，点它出系统设备列表 + 音量条），不是点着没反应的图标。
 ///   锁屏系统播放器自带的 AirPlay 按钮是系统画的，不用 App 管。
-/// - 点胶囊非按钮区：widgetURL lizi://now，打开 App 落到正在播放的那首歌的
+/// - 点胶囊非按钮区：widgetURL lizinative://now，打开 App 落到正在播放的那首歌的
 ///   播放页（按上次的形态进）；点展开页里的控制按钮是各自的功能，不跳 App。
 /// - minimal: ♪。
 /// - lock screen：与展开页同款（封面 + 歌名/歌手 + 进度条 + 五个控制），
@@ -80,7 +80,7 @@ struct LiziLiveActivity: Widget {
 
     /// 控制行：星标（喜欢）、上一首、暂停/播放、下一首、AirPlay。
     /// 前四个走 LiveActivityIntent（iOS 17.2+，不打开 App）；AirPlay 是
-    /// Link 到 lizi://airplay（见文件头注释：原地弹系统面板没有公开 API）。
+    /// Link 到 lizinative://airplay（见文件头注释：原地弹系统面板没有公开 API）。
     @ViewBuilder
     private func controlButtons(context: ActivityViewContext<LiziLyricsAttributes>) -> some View {
         HStack(spacing: 30) {
@@ -111,7 +111,7 @@ struct LiziLiveActivity: Widget {
                 Image(systemName: "forward.fill")
                     .font(.system(size: 20))
             }
-            Link(destination: URL(string: "lizi://airplay")!) {
+            Link(destination: URL(string: "lizinative://airplay")!) {
                 Image(systemName: "airplayaudio")
                     .font(.system(size: 20))
             }
@@ -125,7 +125,7 @@ struct LiziLiveActivity: Widget {
     /// DynamicIsland 链上（编包会报 ActivityConfiguration 没有 widgetURL 成员），
     /// 只能挂在岛的各个区域视图与锁屏卡片的根视图上；控制按钮（Intent/Link）
     /// 自带点按行为，不受它影响。
-    private var nowURL: URL { URL(string: "lizi://now")! }
+    private var nowURL: URL { URL(string: "lizinative://now")! }
 
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: LiziLyricsAttributes.self) { context in

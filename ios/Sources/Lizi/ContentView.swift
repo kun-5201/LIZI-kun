@@ -58,12 +58,31 @@ struct ContentView: View {
 
 // MARK: - WebView 宿主
 
+/// JS → 原生诊断直通桥（第 16 轮第 3 件）：播放启动链上的关键步骤
+/// （取链返回 / play() 调用 / 播放开始）原来只走 postDiagAudio 的
+/// HTTP POST——内容进程在 POST 落地前死掉，这一步就丢了，诊断页上
+/// 最后一步还停在「取链开始」（19:16 五次 url=OK 后零 JS 日志就是这么丢的）。
+/// postMessage 是直通 App 进程的 IPC，原生收到立刻记文件落盘的面包屑，
+/// 内容进程死也不丢。只记步骤文本，不记地址/密钥。
+final class DiagStepBridge: NSObject, WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "liziDiag",
+              let step = message.body as? String,
+              !step.isEmpty else { return }
+        // 截断 + 去换行，防页面塞长串撑爆面包屑（cap 30 条在 DiagLog 里）。
+        let clean = step.replacingOccurrences(of: "\n", with: " ").prefix(200)
+        DiagLog.shared.recordPlaybackStep("js: \(clean)")
+    }
+}
+
 final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDelegate {
     private var server: LocalHttpServer?
     private var router = LiziRouter()
     let webView: WKWebView
     /// 歌词灵动岛：网页播放状态 → Live Activity。
     private let islandCoordinator = LiziIslandCoordinator()
+    /// JS 诊断直通桥（第 16 轮第 3 件）：播放启动关键步骤 postMessage 到原生记面包屑。
+    private let diagBridge = DiagStepBridge()
     /// 本地音乐导入：前端 liziNative.postMessage({type:'importLocal'}) → 文件选择器。
     private let localBridge = LocalFilesBridge()
     /// QQ 网页登录：前端 liziQQLogin.postMessage({type:'qqWebLogin'}) → 弹 y.qq.com。
@@ -109,6 +128,9 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
         config.mediaTypesRequiringUserActionForPlayback = []
         // 歌词灵动岛桥：注入 JS 每秒把播放状态 postMessage 到原生端。
         config.userContentController.add(islandCoordinator.bridge, name: "liziBridge")
+        // 诊断直通桥（第 16 轮第 3 件）：播放启动关键步骤直接记原生面包屑，
+        // 不走 HTTP POST，内容进程死了也不丢。
+        config.userContentController.add(diagBridge, name: "liziDiag")
         // 本地音乐导入桥：前端点「导入本地音乐」时 postMessage 到原生端弹文件选择器。
         config.userContentController.add(localBridge, name: "liziNative")
         // QQ 网页登录桥：前端点「网页登录」时 postMessage 到原生端弹 y.qq.com。
@@ -271,8 +293,12 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
                   let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
             switch type {
             case .began:
+                // 第 16 轮第 3 件：中断/前后台是酷狗闪退链路上的原生步骤，
+                // 崩在切后台/被抢时诊断里要有最后一步（之前全是静默）。
+                DiagLog.shared.recordPlaybackStep("audio interruption began")
                 self.webView.evaluateJavaScript("window.__liziAudioInterruptionBegan && window.__liziAudioInterruptionBegan()")
             case .ended:
+                DiagLog.shared.recordPlaybackStep("audio interruption ended")
                 self.reactivateAudioSession()
                 self.webView.evaluateJavaScript("window.__liziAudioInterruptionEnded && window.__liziAudioInterruptionEnded()")
             @unknown default:
@@ -282,11 +308,17 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
         NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
+            // 第 16 轮第 3 件：只在播过时记（没播时回前台是常态，不占面包屑位）。
+            if self?.lastPlaying == true {
+                DiagLog.shared.recordPlaybackStep("app foreground (was playing)")
+            }
             self?.reactivateAudioSession()
         }
         NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
+            // 第 16 轮第 3 件：切后台点——崩在后台续播/影子接管时最后一步在这里。
+            DiagLog.shared.recordPlaybackStep("app background")
             self?.webView.evaluateJavaScript("window.__liziEnterBackground && window.__liziEnterBackground()")
         }
     }
@@ -298,6 +330,8 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
             do {
                 try AVAudioSession.sharedInstance().setActive(true)
             } catch {
+                // 第 16 轮第 3 件：重激活失败记一步（之前静默吞掉）。
+                DiagLog.shared.recordPlaybackStep("audiosession reactivate FAIL: \(error.localizedDescription)")
                 // 激活失败也不拦着；页面侧的 resume 仍会尝试。
             }
         }
@@ -523,6 +557,9 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
             let durationChanged = abs(duration - lastDuration) > 0.5
             let stale = playing && Date().timeIntervalSince(lastNowPlayingWrite) >= 2.0
             guard title != lastTitle || playing != lastPlaying || durationChanged || stale else { return }
+            // 第 16 轮第 3 件：锁屏更新点——只在切歌时记一步（每 2 秒的进度
+            // 刷新不记，不占面包屑位）。
+            let trackChanged = title != lastTitle
             lastTitle = title
             lastPlaying = playing
             // 第 13 轮第 1 件：第一次真正播放时才激活音频会话（启动时只设了
@@ -532,11 +569,19 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
                 audioSessionActivated = true
                 do {
                     try AVAudioSession.sharedInstance().setActive(true)
-                } catch { /* 激活失败也不拦着；媒体播放时系统自己也会激活 */ }
+                    // 第 16 轮第 3 件：会话激活点——酷狗点播链路上的原生步骤。
+                    DiagLog.shared.recordPlaybackStep("audiosession activate ok (first play)")
+                } catch {
+                    DiagLog.shared.recordPlaybackStep("audiosession activate FAIL (first play): \(error.localizedDescription)")
+                    /* 激活失败也不拦着；媒体播放时系统自己也会激活 */
+                }
             }
             lastElapsed = elapsed
             lastDuration = duration
             writeNowPlayingInfo(title: track, artist: artist)
+            if trackChanged {
+                DiagLog.shared.recordPlaybackStep("now-playing track=\(String(title.prefix(20))) playing=\(playing)")
+            }
         }
     }
 

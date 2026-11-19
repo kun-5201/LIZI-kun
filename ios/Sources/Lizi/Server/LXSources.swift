@@ -385,7 +385,10 @@ final class LXSourceRegistry {
                         lastError = error
                     }
                 }
-                throw lastError ?? NSError(domain: "LXSources", code: 2, userInfo: [NSLocalizedDescriptionKey: "全部音源均失败"])
+                // 无可用候选（一个自定义源都没加，或加了的都没启用/没覆盖该平台）：
+                // 不是「音源坏了」，是根本没配 LX——文案必须说清是跳过、不是故障，
+                // 否则诊断里那句失败原因会让人以为是 bug（第 16 轮第 2 件）。
+                throw lastError ?? NSError(domain: "LXSources", code: 2, userInfo: [NSLocalizedDescriptionKey: "无可用的自定义落雪音源（未添加，或未覆盖该平台），LX 跳过，走平台备用"])
             }
             group.addTask {
                 try await Task.sleep(nanoseconds: 30_000_000_000)

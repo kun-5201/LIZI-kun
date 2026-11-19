@@ -6211,7 +6211,8 @@ body.is-hero-flying .view--now .now__transport { opacity: 0; }
   letter-spacing: .01em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   transition: font-size 180ms var(--ease-out),
-              letter-spacing 180ms var(--ease-out);
+              letter-spacing 180ms var(--ease-out),
+              transform 180ms var(--ease-out);
 }
 /* 滚轮宿主的锚：包住根段标签，给绝对定位的「下一项」模糊提示一个定位参照。
    高度只由标签本身决定，提示不参与布局，长条高度不变。 */
@@ -6261,7 +6262,8 @@ body.is-hero-flying .view--now .now__transport { opacity: 0; }
   letter-spacing: .01em;
   line-height: 1.1;
   transition: font-size 180ms var(--ease-out),
-              letter-spacing 180ms var(--ease-out);
+              letter-spacing 180ms var(--ease-out),
+              transform 180ms var(--ease-out);
 }
 .pstrip__crumb-seg {
   flex: 0 1 auto;
@@ -6288,11 +6290,15 @@ span.pstrip__crumb-seg { cursor: default; }
 }
 
 /* 标题 / 来源这一行本身被按住时临时放大到两倍；松手、取消或拖出即恢复。
-   触发只看这一行，不碰右侧图标，也不碰跑马带拖拽。 */
+   触发只看这一行，不碰右侧图标，也不碰跑马带拖拽。
+   第 16 轮第 3 件：旧写法改 font-size（13px→26px）会重排整条长条——实测
+   按住标签时标签宽 69px→119px，全部 7 个图标整体右移 50px，手指下的目标
+   在按住的瞬间移走。改成 transform: scale(2)（只改绘制，不改布局），
+   放大视觉不变，图标和标签位置一动不动。 */
 .hall-plat__bar.is-title-press .pstrip__name,
 .hall-plat__bar.is-title-press .pstrip__crumb {
-  font-size: calc(26px * var(--plat-scale, 1));
-  letter-spacing: -.01em;
+  transform: scale(2);
+  transform-origin: left center;
 }
 
 /* 2026-11-08：根段（默认是「每日推荐」）同时是来源浮层的触发点。
@@ -6336,8 +6342,15 @@ span.pstrip__crumb-seg { cursor: default; }
   user-select: none;
   -webkit-user-select: none;
 }
-.psrc.is-open { opacity: 1; pointer-events: auto; cursor: grab; }
+/* 第 16 轮第 3 件：浮层 170×160 的矩形展开时盖住左上角 3 个平台图标和
+   跑马带左端（实测盖住网易/QQ/酷狗图标 1024/1024/736px²，图标中心点按
+   命中 .psrc 而不是图标）。容器本身不吃点按，只有文字行吃：空处点按
+   漏给下面的图标/跑马带，文字行照常点选/拖拽。收起逻辑看 app.js 的
+   srcCloseSoon（容器 :hover 外补了一项 .ow__item:hover 判断）。 */
+.psrc.is-open { opacity: 1; cursor: grab; }
+.psrc.is-open .ow__item { pointer-events: auto; cursor: grab; }
 .psrc.is-open.is-dragging { cursor: grabbing; }
+.psrc.is-open.is-dragging .ow__item { cursor: grabbing; }
 .psrc[hidden] { display: none; }
 /* ReactBits 原版：每项绝对居中，transform-origin 在左缘，逐帧写 transform */
 .ow__item {

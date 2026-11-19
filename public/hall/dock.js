@@ -23,11 +23,17 @@
 
   const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 
-  /** 当前铺色面板的等比系数；读不到（还没进铺色态 / 老环境）就按 1 兜底。 */
+  /** 当前铺色面板的等比系数；读不到（还没进铺色态 / 老环境）就按 1 兜底。
+      第 16 轮第 3 件：还要乘 --plat-bar-scale——fitPlatBar 在窄屏上把图标
+      收小（390px 下 32→28px）后，dock 之前按原尺寸又放大回 48px，末尾图标
+      被推出面板右边缘 9px 且全部图标位置乱移；按收过的比例放大才不超预算。 */
   function dockScale(el) {
     try {
-      const v = parseFloat(getComputedStyle(el).getPropertyValue('--plat-scale'));
-      return Number.isFinite(v) && v > 0 ? v : 1;
+      const cs = getComputedStyle(el);
+      const v = parseFloat(cs.getPropertyValue('--plat-scale'));
+      const b = parseFloat(cs.getPropertyValue('--plat-bar-scale'));
+      const s = (Number.isFinite(v) && v > 0 ? v : 1) * (Number.isFinite(b) && b > 0 ? b : 1);
+      return s;
     } catch {
       return 1;
     }

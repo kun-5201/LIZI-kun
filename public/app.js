@@ -11135,6 +11135,11 @@
     }
     let SRC_ITEMS = srcItemsFor(platMode || 'netease');
     let srcOpen = false, srcHi = -1, srcCloseT = 0, srcHideT = 0, srcFadeT = 0;
+    /* 第 16 轮第 3 件：滚轮高亮 ≠ 立刻切换。滚轮拖动/滚动时 onChange 每过一项
+       就调一次（实测一次 72px 拖动连过 4 项 → 4 次全量切换 + 5 次取数 + 8 次
+       跑马带重建），主线程被反复重画堵住，切换就卡。改成「预览 + 落稳提交」：
+       onChange 只改高亮，停稳 160ms 后才提交一次切换；拖回原项再松手 = 不切。 */
+    let srcCommitT = 0, srcCommitIdx = -1, srcCommitItems = null, srcCommitPlat = '';
     let srcWheel = null;
     /* 滚轮上次定位所依据的来源 kind。只有 railRootKind() 和它不一致（外部重置 /
        换平台）时才重新归位；重画长条造成的 transient close→reopen 不再覆盖滚轮
@@ -11159,7 +11164,8 @@
         spacing: 1.4,
         selected: 0,
         reduceMotion: () => reduceMotion,
-        onChange: (i) => { srcPick(i); },
+        onChange: (i) => { srcPreview(i); },
+        onSettle: () => { srcCommitPending(); },
       });
       return srcWheel;
     }
@@ -11170,6 +11176,10 @@
       SRC_ITEMS = srcItemsFor(platMode || 'netease');
       srcHi = -1;
       srcWheelRoot = '';
+      /* 滚轮项已换成新台的：上一台没提交完的切换直接作废，别用旧下标点新台的项 */
+      clearTimeout(srcCommitT);
+      srcCommitIdx = -1;
+      srcCommitItems = null;
       if (srcWheel && srcWheel.destroy) { try { srcWheel.destroy(); } catch { /* 忽略 */ } srcWheel = null; }
       if (srcOpen) ensureSrcWheel();
       syncSrcMenu();
@@ -11261,22 +11271,80 @@
       syncSrcMenu();
     }
 
-    function srcCloseSoon() {
-      /* 指针还在滚轮里（或正按住拖）就别收：换来源会重画标签，可能误触发 pointerout */
+    function srcCloseSoon(e) {
+      /* 指针还在滚轮里（或正按住拖）就别收：换来源会重画标签，可能误触发 pointerout。
+         第 16 轮第 3 件：滚轮容器改成 pointer-events:none（空处点按漏给图标/跑马带），
+         容器本身的 :hover 可能跟不上，补一项「正悬停在某个滚轮项上」的判断。
+         还要补「指针仍在浮层矩形内」的判断：行与行之间的空隙不属于任何一项，
+         穿过空隙去点另一行时会触发 pointerleave——没这句，120ms 后浮层就
+         关了，点按落到下面的标签上，本次选择直接丢掉（VM 复现：行间移动
+         后点 daily，10 秒等不到标签变）。矩形外才是真的离开。 */
+      if (e && H.srcMenu && srcOpen && Number.isFinite(e.clientX) && Number.isFinite(e.clientY)) {
+        const r = H.srcMenu.getBoundingClientRect();
+        const m = 4;
+        if (e.clientX >= r.left - m && e.clientX <= r.right + m
+          && e.clientY >= r.top - m && e.clientY <= r.bottom + m) return;
+      }
       if (H.srcMenu && srcOpen
-        && (H.srcMenu.matches(':hover') || H.srcMenu.classList.contains('is-dragging'))) return;
+        && (H.srcMenu.matches(':hover') || H.srcMenu.classList.contains('is-dragging')
+          || !!H.srcMenu.querySelector('.ow__item:hover'))) return;
+      /* 指针离开滚轮区 = 本次选择结束：有没提交的切换立刻提交，不用再等 160ms */
+      if (srcCommitIdx >= 0) srcCommitPending();
       clearTimeout(srcCloseT);
       srcCloseT = setTimeout(srcCloseMenu, 120);
     }
 
-    /** 高亮换一项 = 立刻切跑马带（内容轨复用 railGoSource，不重写数据层）。 */
+    /** 滚轮高亮预览：只改高亮，不切跑马带；停稳 160ms 后 srcCommitPending 再切。
+        快速连划/连按方向键只提交最后停的那一项，中间项一次都不切。
+        拖动中不设 160ms 定时器：慢速拖动两次预览之间也可能超过 160ms，
+        定时器会在拖动中途误提交；拖动中的提交只走 onSettle（松手那一下），
+        800ms 是松手回调万一丢了的兜底（此时提交当前高亮项也合理）。 */
+    function srcPreview(i) {
+      const n = SRC_ITEMS.length;
+      if (!n || !platMode) return;
+      i = ((i % n) + n) % n;
+      if (i === srcHi && srcCommitIdx < 0) return;
+      srcHi = i;
+      srcCommitIdx = i;
+      srcCommitItems = SRC_ITEMS;
+      srcCommitPlat = platMode;
+      syncSrcMenu();
+      clearTimeout(srcCommitT);
+      const dragging = !!(H.srcMenu && H.srcMenu.classList.contains('is-dragging'));
+      srcCommitT = setTimeout(srcCommitPending, dragging ? 800 : 160);
+    }
+
+    /** 落稳提交：滚轮停下 160ms 或指针离开滚轮区时才真正切一次。
+        期间换了台 / 换了滚轮项表 / 离开了大厅，说明这次预览已经过时，直接丢弃。 */
+    function srcCommitPending() {
+      clearTimeout(srcCommitT);
+      if (srcCommitIdx < 0) return;
+      const i = srcCommitIdx;
+      srcCommitIdx = -1;
+      if (srcCommitItems !== SRC_ITEMS || srcCommitPlat !== platMode
+        || !platMode || document.body.dataset.view !== 'hall') return;
+      srcCommitItems = null;
+      srcPick(i);
+    }
+
+    /** 高亮换一项 = 切跑马带（内容轨复用 railGoSource，不重写数据层）。
+        第 16 轮第 3 件：这个函数现在只由 srcCommitPending 在落稳后调一次，
+        不再由滚轮 onChange 每过一项调一次。已经在根层（没下钻）又选回同一项
+        = 不切；下钻在里面时选根项 = 回到根层，仍要切。 */
     function srcPick(i) {
       const n = SRC_ITEMS.length;
       if (!n || !platMode) return;
       i = ((i % n) + n) % n;
-      if (i === srcHi) return;
-      srcHi = i;
       const c = SRC_ITEMS[i];
+      const rootKind = railRootKind();
+      const rootFeed = (railPath[0] && railPath[0].feed) || '';
+      const rootKey = rootKind === 'featured' && rootFeed ? 'featured:' + rootFeed : rootKind;
+      if (railPath.length <= 1 && srcKeyOf(c) === rootKey) {
+        srcHi = i;
+        syncSrcMenu();
+        return;
+      }
+      srcHi = i;
       /* 先记下滚轮依据的 kind，再改 railPath：两者始终同步，
          重画长条后再展开也不会用旧路径把滚轮打回根。
          精选用 feed 区分（推荐歌单 / 新歌首发是两项）。 */
@@ -12422,15 +12490,21 @@
         return;
       }
 
-      /* 没缓存：先给一句「正在取」，拿到再填（失败就退成空态，原因写在第二行） */
-      H.marq.classList.add('is-empty');
-      H.marq.innerHTML = `<div class="marq__seg"><span class="marq__empty">
+      /* 没缓存：先留着旧跑马带（250ms 内回来了就直接填，不闪白）；慢了才给
+         一句「正在取」，拿到再填（失败就退成空态，原因写在第二行）。
+         第 16 轮第 3 件：切换时先把带子整块清成空白是卡顿感的一半来源。 */
+      const loadT = setTimeout(() => {
+        if (platMode !== pid || seq !== marqSeq) return;
+        H.marq.classList.add('is-empty');
+        H.marq.innerHTML = `<div class="marq__seg"><span class="marq__empty">
         <b>${esc(platName)} · 正在取每日推荐…</b>
         <span class="marq__note">${esc(MARQ_NOTE[pid] || '')}</span>
       </span></div>`;
-      marqHalf = 0;
+        marqHalf = 0;
+      }, 250);
 
       marqSource(pid).then((tracks) => {
+        clearTimeout(loadT);
         if (platMode !== pid || seq !== marqSeq) return;   // 期间换台/退出/下钻：不再动 DOM
         marqCache[pid] = tracks || [];
         if (!tracks || !tracks.length) {
@@ -12440,6 +12514,7 @@
         }
         paintMarq(tracks, 'tracks', false);
       }).catch((e) => {
+        clearTimeout(loadT);
         if (platMode !== pid || seq !== marqSeq) return;
         H.marq.classList.add('is-empty');
         const why = (e && e.message) ? String(e.message) : '';
@@ -12447,7 +12522,10 @@
       });
     }
 
-    function railCacheKey(pid, node) { return `${pid}|${node.kind}|${node.id || ''}`; }
+    /* 第 16 轮第 3 件：缓存键必须带 feed——精选下两个 feed（QQ 的推荐歌单 /
+       新歌首发、酷狗的新歌速递 / 精选歌单、酷我的排行榜 / 推荐歌单）之前共用
+       一个键，先切哪个就把哪个的结果钉死，后切的 feed 直接命中错内容。 */
+    function railCacheKey(pid, node) { return `${pid}|${node.kind}|${node.id || ''}|${node.feed || ''}`; }
 
     function renderRailNode(pid, node, platName, seq) {
       const key = railCacheKey(pid, node);
@@ -12459,15 +12537,21 @@
       const hit = useCache ? railCache[key] : undefined;
       if (hit) { paintRailResult(hit, node); return; }
 
-      H.marq.classList.add('is-empty');
-      H.marq.innerHTML = marqEmptyHtml(platName, '正在取这一层的内容…', `${node.name} · 正在载入…`);
-      marqHalf = 0;
+      /* 第 16 轮第 3 件：同每日推荐，先留旧带子，250ms 没回来才显示载入态。 */
+      const loadT = setTimeout(() => {
+        if (platMode !== pid || seq !== marqSeq) return;
+        H.marq.classList.add('is-empty');
+        H.marq.innerHTML = marqEmptyHtml(platName, '正在取这一层的内容…', `${node.name} · 正在载入…`);
+        marqHalf = 0;
+      }, 250);
 
       railFetch(pid, node).then((res) => {
+        clearTimeout(loadT);
         if (platMode !== pid || seq !== marqSeq) return;
         if (useCache) railCache[key] = res;               // 缓存完整数组；歌单层渲染按上限截断，曲目层分批画
         paintRailResult(res, node);
       }).catch((e) => {
+        clearTimeout(loadT);
         if (platMode !== pid || seq !== marqSeq) return;
         H.marq.classList.add('is-empty');
         const why = (e && e.message) ? String(e.message) : '';
@@ -13519,7 +13603,7 @@
         const to = e.relatedTarget;
         if (to && ((to.closest && to.closest('[data-src-root]'))
           || (H.srcMenu && H.srcMenu.contains(to)))) return;
-        srcCloseSoon();
+        srcCloseSoon(e);
       });
       H.platBar.addEventListener('pointerleave', srcCloseSoon);
       /* 标题 / 来源这一行本身按住时放大到 26px，松手 / 取消才恢复。

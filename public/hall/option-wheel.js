@@ -61,6 +61,10 @@
       ? !!options.reduceMotion()
       : !!options.reduceMotion;
     var onChange = typeof options.onChange === 'function' ? options.onChange : null;
+    /* 第 16 轮第 3 件：落稳回调。拖动结束 / 点选后调一次，让宿主立刻提交
+       当前项，不用等去抖定时器；慢速拖动（两次预览之间超过去抖间隔）也不
+       会在拖动中途误提交——拖动中的预览本来就不该起提交定时器（见 app.js）。 */
+    var onSettle = typeof options.onSettle === 'function' ? options.onSettle : null;
 
     var pos = 0;
     var target = 0;
@@ -214,19 +218,30 @@
       var wasDrag = drag.captured;
       drag = null;
       root.classList.remove('is-dragging');
-      if (wasDrag) applyTarget(target, true);
+      if (wasDrag) {
+        applyTarget(target, true);
+        /* 拖动结束 = 本次选择落稳：立刻提交，不用等去抖定时器 */
+        if (onSettle) onSettle();
+      }
     }
 
+    /* 点选：按手指落点的纵坐标选离得最近的那一行，不按 e.target 的元素盒子。
+       第 16 轮第 3 件：各行带旋转（±6°/行），相邻行的盒子互相重叠 300–600px²，
+       点第 N 行的文字可能命中第 N±1 行的元素，点按就切到隔壁模式。
+       纵坐标换算和拖拽是同一把尺（rowH），点哪行就是哪行。 */
     function onClick(e) {
       if (dragMoved) {
         dragMoved = false;
         return;
       }
-      var el = e.target && e.target.closest ? e.target.closest('.ow__item') : null;
-      if (!el) return;
-      var index = +el.dataset.i;
-      var cur = target;
-      applyTarget(cur + (index - cur), true);
+      if (!count) return;
+      var rect = root.getBoundingClientRect();
+      if (!rect.height) return;
+      var centerY = rect.top + rect.height / 2;
+      var index = clamp(Math.round(pos + (e.clientY - centerY) / rowH), 0, count - 1);
+      applyTarget(index, true);
+      /* 点选落稳：立刻提交，不用等去抖定时器 */
+      if (onSettle) onSettle();
     }
 
     function onKeyDown(e) {

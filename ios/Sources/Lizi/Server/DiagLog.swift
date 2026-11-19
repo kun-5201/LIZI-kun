@@ -9,8 +9,9 @@ import Foundation
 /// 第 14 轮（诊断是空的）：logs / requests / events / lastSearch 原来只放
 /// 内存 —— 进程一死（闪退/被杀/升级重装不丢 UserDefaults 但丢内存）就全
 /// 丢，重启后设置页只能看到「诊断日志（0 条）」。现在全部落盘到
-/// UserDefaults（和 playbackBreadcrumb 同一级持久化，崩溃也还在），cap
-/// 不变（logs 100 / requests 20 / events 20）。写失败只丢这次持久化，
+/// UserDefaults（崩溃也还在），cap 不变（logs 100 / requests 20 / events 20）。
+/// playbackBreadcrumb 更进一步：第 16 轮改成文件原子写（见 recordPlaybackStep），
+/// UserDefaults 只留镜像。写失败只丢这次持久化，
 /// 内存里的那份照常工作；读坏了就从空开始，不拦启动。
 final class DiagLog {
     static let shared = DiagLog()
@@ -38,6 +39,7 @@ final class DiagLog {
     }
 
     private func loadPersisted() {
+        loadBreadcrumb()
         let ud = UserDefaults.standard
         if let data = ud.data(forKey: PersistKey.logs),
            let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
@@ -131,18 +133,50 @@ final class DiagLog {
 
     /// 播放链面包屑（第 10 轮）：进程被杀后仍在，下次启动可从 /api/diag/search 看到崩前最后一步。
     /// 只记步骤与结果（OK/EMPTY/主机名），不记完整直链（LX 直链可能含 key）。
+    ///
+    /// 第 16 轮第 3 件（落盘核实结果）：原来只写 UserDefaults.set——
+    /// set 只改内存 + 通知 cfprefsd 异步刷盘，App 在刷盘窗口内闪退/
+    /// 被杀时最后一步可能没上盘，重启后诊断页看到的是旧的最后一步。
+    /// 现在双写：内存数组 + Application Support 下的 JSON 文件（.atomic
+    /// 原子写，同步落盘），UserDefaults 只留作兼容镜像；读端以文件为准。
+    /// 下次用户复现闪退重开 App，诊断页直接看到崩溃前最后一步。
+    private var breadcrumbSteps: [String] = []
+    private static let breadcrumbFileName = "lizi.playbackBreadcrumb.json"
+    private static func breadcrumbFileURL() -> URL? {
+        let fm = FileManager.default
+        guard let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent(breadcrumbFileName)
+    }
+    private func loadBreadcrumb() {
+        if let url = Self.breadcrumbFileURL(),
+           let data = try? Data(contentsOf: url),
+           let arr = try? JSONSerialization.jsonObject(with: data) as? [String] {
+            breadcrumbSteps = Array(arr.suffix(30))
+            return
+        }
+        breadcrumbSteps = UserDefaults.standard.stringArray(forKey: "lizi.playbackBreadcrumb") ?? []
+    }
+    private func persistBreadcrumb() {
+        if let url = Self.breadcrumbFileURL(),
+           let data = try? JSONSerialization.data(withJSONObject: breadcrumbSteps) {
+            try? data.write(to: url, options: [.atomic])
+        }
+        // 兼容镜像：旧版只读 UserDefaults，文件坏了还能从这里兜底。
+        UserDefaults.standard.set(breadcrumbSteps, forKey: "lizi.playbackBreadcrumb")
+    }
+
     func recordPlaybackStep(_ step: String) {
         lock.lock(); defer { lock.unlock() }
-        var steps = UserDefaults.standard.stringArray(forKey: "lizi.playbackBreadcrumb") ?? []
-        steps.append("\(Int(Date().timeIntervalSince1970)) \(step)")
-        if steps.count > 30 { steps.removeFirst(steps.count - 30) }
-        UserDefaults.standard.set(steps, forKey: "lizi.playbackBreadcrumb")
+        breadcrumbSteps.append("\(Int(Date().timeIntervalSince1970)) \(step)")
+        if breadcrumbSteps.count > 30 { breadcrumbSteps.removeFirst(breadcrumbSteps.count - 30) }
+        persistBreadcrumb()
     }
 
     func json() -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
         return ["lastSearch": lastSearch, "requests": requests, "events": events, "logs": logs,
-                "playbackBreadcrumb": UserDefaults.standard.stringArray(forKey: "lizi.playbackBreadcrumb") ?? [],
+                "playbackBreadcrumb": breadcrumbSteps,
                 // 第 15 轮第 4 件：挂起的 LX 取链任务数（>0 且一直不回零
                 // 就是有脚本 Promise 不 settle、任务泄漏了）。
                 "lxPendingCalls": LXScriptInstance.pendingMusicUrlCalls,

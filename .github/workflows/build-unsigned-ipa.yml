@@ -78,6 +78,9 @@ jobs:
           test -d "$APP_PATH/PlugIns/LiziLiveActivity.appex" || { echo "::error::LiziLiveActivity.appex missing in app bundle"; exit 1; }
           /usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$APP_PATH/PlugIns/LiziLiveActivity.appex/Info.plist"
           /usr/libexec/PlistBuddy -c "Print NSExtension:NSExtensionPointIdentifier" "$APP_PATH/PlugIns/LiziLiveActivity.appex/Info.plist"
+          echo "--- Live Activities must be declared on the main app (r16: r15 shipped without these keys, island never started) ---"
+          test "$(/usr/libexec/PlistBuddy -c "Print NSSupportsLiveActivities" "$APP_PATH/Info.plist")" = "true" || { echo "::error::NSSupportsLiveActivities missing/false in app Info.plist"; exit 1; }
+          test "$(/usr/libexec/PlistBuddy -c "Print NSSupportsLiveActivitiesFrequentUpdates" "$APP_PATH/Info.plist")" = "true" || { echo "::error::NSSupportsLiveActivitiesFrequentUpdates missing/false in app Info.plist"; exit 1; }
 
       - name: Package the IPA
         run: |

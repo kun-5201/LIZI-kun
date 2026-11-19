@@ -1520,6 +1520,19 @@ const Player = (() => {
     } catch { /* 诊断不上报不能影响播放 */ }
   }
 
+  /** 第 16 轮第 3 件：关键播放步骤直通原生面包屑（liziDiag 桥）。
+   *  postDiagAudio 走 HTTP POST，内容进程在 POST 落地前死掉这一步就丢
+   *  （19:16 五次 url=OK 后零 JS 日志）；postMessage 是直通 App 进程的
+   *  IPC，原生收到立刻文件落盘，死也不丢。只用于播放启动链上的关键步骤
+   *  （取链返回 / play() 调用 / 播放开始 / 超时 / 被拒 / 播放失败），
+   *  不替代 postDiagAudio（诊断页的 logs 仍走 POST）。桥不在时静默跳过。 */
+  function postNativeStep(step) {
+    try {
+      const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.liziDiag;
+      if (h) h.postMessage(String(step || '').slice(0, 200));
+    } catch { /* 桥不在也不影响播放 */ }
+  }
+
   /** 第 15 轮第 5 件：play() 8–10 秒超时——直链字符串 OK 不等于媒体字节能到，
    *  CDN stall 时 play() 既不 resolve 也不 reject；超时按播放失败走兜底链，
    *  不再静默等死。返回原 play() 的 promise，超时抛 {name:'PlayTimeoutError'}。 */
@@ -1637,6 +1650,14 @@ const Player = (() => {
 
     const data = await fetchTrackUrl(track);
 
+    // 第 16 轮第 3 件：取链返回记一步（之前只有取链开始和 play() resolve
+    // 后的「播放开始」——崩在「地址已回、play() 未调」这段时分不清；
+    // 只记 via，不记地址）。
+    if (data.url && !data.demo) {
+      postDiagAudio(`取链返回：source=${track.source || 'netease'} id=${track.id ?? track.mid ?? track.hash ?? ''} via=${data.via}`);
+      postNativeStep(`取链返回 source=${track.source || 'netease'} id=${track.id ?? track.mid ?? track.hash ?? ''} via=${data.via}`);
+    }
+
     if (token !== state.token) {         // 期间又切歌了
       if (data.demo) URL.revokeObjectURL(data.url);
       // 第 15 轮第 5 件：token 抢占丢弃点记一条轻量诊断——连点/切歌时
@@ -1665,10 +1686,15 @@ const Player = (() => {
 
     if (autoplay) {
       try {
+        // 第 16 轮第 3 件：play() 调用前记一步——「播放开始」只在 resolve
+        // 后记，崩在 play() 里时最后一步还是取链返回，分不清有没有调 play()。
+        postDiagAudio(`play() 调用：source=${track.source || 'netease'} id=${track.id ?? track.mid ?? track.hash ?? ''} via=${data.via}`);
+        postNativeStep(`play() 调用 source=${track.source || 'netease'} id=${track.id ?? track.mid ?? track.hash ?? ''} via=${data.via}`);
         await playWithTimeout(sounding());
         // 第 10 轮诊断：audio.play() 已 resolve，记下这首走的是哪一档。
         // 真机崩溃后看 /api/diag/search，能确认崩的那首是 platform 还是 demo。
         postDiagAudio(`播放开始：source=${track.source || 'netease'} id=${track.id ?? track.mid ?? track.hash ?? ''} via=${data.via} demo=${data.demo}`);
+        postNativeStep(`播放开始 source=${track.source || 'netease'} id=${track.id ?? track.mid ?? track.hash ?? ''} via=${data.via} demo=${data.demo}`);
         // 音频上下文要等用户手势后才能跑，放歌时顺手续上；后台影子出声不走图，不碰它。
         if (!bgActive) { Beat.resume(); Beat.start(); }
         state.playing = true;
@@ -1683,8 +1709,10 @@ const Player = (() => {
         const errName = (e && e.name) || '';
         if (timedOut) {
           postDiagAudio(`播放开始超时：source=${track.source || 'netease'} id=${track.id ?? track.mid ?? track.hash ?? ''} via=${data.via}（play() 9 秒未回，走兜底链）`);
+          postNativeStep(`播放开始超时 source=${track.source || 'netease'} id=${track.id ?? track.mid ?? track.hash ?? ''} via=${data.via}`);
         } else if (e && errName !== 'NotAllowedError' && !audio.error) {
           postDiagAudio(`play() 被拒但 audio.error 为空：name=${errName} source=${track.source || 'netease'} id=${track.id ?? track.mid ?? track.hash ?? ''} via=${data.via}`);
+          postNativeStep(`play() 被拒 source=${track.source || 'netease'} id=${track.id ?? track.mid ?? track.hash ?? ''} via=${data.via} name=${errName}`);
         }
         const failed = timedOut || !!audio.error;
         // 手势拦截（NotAllowedError）不是地址问题，不重试；地址问题（error 已挂上
@@ -1915,6 +1943,7 @@ const Player = (() => {
       }
       console.warn('[player] 播放失败：', detail);
       postDiagAudio(`播放失败：code=${detail.code} host=${detail.host} ns=${detail.networkState} rs=${detail.readyState} via=${(state.lastFetch && state.lastFetch.via) || ''}`);
+      postNativeStep(`播放失败 source=${(state.lastFetch && state.lastFetch.track && state.lastFetch.track.source) || ''} code=${detail.code} host=${detail.host} via=${(state.lastFetch && state.lastFetch.via) || ''}`);
       emit('sourceerror', detail);
     });
   }

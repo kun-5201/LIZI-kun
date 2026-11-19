@@ -71,6 +71,8 @@ final class LiveActivityManager {
         }
         guard authorization != .notAllowed else {
             lastError = "系统未允许 Live Activities，请在 iOS 设置中开启"
+            // 第 16 轮第 3 件：岛启动/结束点进面包屑——崩在起岛时最后一步在这里。
+            DiagLog.shared.recordPlaybackStep("island start blocked (notAllowed)")
             DiagLog.shared.recordLog(category: "island",
                 message: "灵动岛启动失败：系统未允许 Live Activities（auth=\(authDesc)）",
                 fields: ["reason": "island-not-allowed", "lane": "island"])
@@ -92,9 +94,12 @@ final class LiveActivityManager {
                 self.activity = newActivity
                 self.isRunning = true
                 self.lastError = nil
+                // 第 16 轮第 3 件：岛启动成功记一步（扩展更新点）。
+                DiagLog.shared.recordPlaybackStep("island start ok")
             } catch {
                 self.lastError = "启动灵动岛失败：\(error.localizedDescription)"
                 self.isRunning = false
+                DiagLog.shared.recordPlaybackStep("island start FAIL: \(error.localizedDescription)")
                 DiagLog.shared.recordLog(category: "island",
                     message: "灵动岛 Activity.request 抛错（auth=\(authDesc)）：\(error.localizedDescription)",
                     fields: ["reason": "island-request-failed", "lane": "island"])
@@ -118,6 +123,8 @@ final class LiveActivityManager {
         guard let activity else { return }
         self.activity = nil
         isRunning = false
+        // 第 16 轮第 3 件：岛结束点（停歌/切歌重起时）。
+        DiagLog.shared.recordPlaybackStep("island end")
         Task { @MainActor in
             await activity.end(nil, dismissalPolicy: .immediate)
         }
@@ -132,6 +139,8 @@ final class LiveActivityManager {
     static func endAllActivitiesSynchronously(timeout: TimeInterval = 2) {
         let activities = Activity<LiziLyricsAttributes>.activities
         guard !activities.isEmpty else { return }
+        // 第 16 轮第 3 件：终止路径点——App 被关前最后一步，文件落盘后还在。
+        DiagLog.shared.recordPlaybackStep("island end-all (terminate)")
         let group = DispatchGroup()
         for activity in activities {
             group.enter()

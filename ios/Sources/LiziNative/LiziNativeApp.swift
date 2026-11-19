@@ -28,17 +28,17 @@ struct LiziNativeApp: App {
         // NativeIslandCoordinator / NowPlayingCoordinator 都是 @MainActor，
         // 在非隔离的 App.init 里只能用 MainActor.assumeIsolated 创建
         //（启动本来就在主线程，安全；Swift 5 语言模式下这是编译要求）。
-        // r22l 编译修：闭包里不能给 let 赋值（assumeIsolated 的闭包捕获
-        // let 后赋值是硬错），三个局部量改 var；创建方式与隔离都不变，
-        // 仍在 MainActor.assumeIsolated 里建（启动本来就在主线程）。
-        var store: PlaybackStore
-        var island: NativeIslandCoordinator
-        var nowPlaying: NowPlayingCoordinator
-        MainActor.assumeIsolated {
-            store = PlaybackStore()
-            island = NativeIslandCoordinator(store: store)
-            nowPlaying = NowPlayingCoordinator()
+        // r22l 编译修（第 2 推）：上一轮 let→var 是错的——var 未初始化就被
+        // 闭包捕获、闭包之后又被使用，编译器定性初始化分析过不了。
+        // 改用 assumeIsolated 的返回值形式，一次性把三个对象带出来，
+        // 不再用外层未初始化变量接；创建方式与隔离都不变，仍在
+        // MainActor.assumeIsolated 里建（启动本来就在主线程）。
+        let (store, island, nowPlaying) = MainActor.assumeIsolated {
+            let store = PlaybackStore()
+            let island = NativeIslandCoordinator(store: store)
+            let nowPlaying = NowPlayingCoordinator()
             nowPlaying.bind(store: store)
+            return (store, island, nowPlaying)
         }
         _playback = StateObject(wrappedValue: store)
         self.islandCoordinator = island

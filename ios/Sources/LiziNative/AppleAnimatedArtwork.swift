@@ -142,6 +142,7 @@ final class AppleAnimatedArtworkProvider {
     /// 尝试耗尽时记入。resolve 据此把“查不到”与“没查成”分开——没查成记
     /// route-b-download-failed，不记否定（瞬时问题，下次还查）；只有确定
     /// “无匹配 / 无 editorialVideo”才记否定（r20 补）。
+    private var ampFailedKeys: Set<String> = []
 
     private init() {}
 

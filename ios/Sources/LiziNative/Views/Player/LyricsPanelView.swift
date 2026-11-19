@@ -167,7 +167,9 @@ struct LyricsZoneView: View {
                     // r21b：显式给区宽——ScrollView 内容的布局宽由它定，不由最长
                     // 单行歌词的理想宽定（否则理想宽会沿 GeometryReader → ZStack
                     // → VStack 一路顶上去，见 PlayerView 文件底「r21b 根因」）。
-                    .frame(width: zoneWidth, minHeight: zoneHeight, alignment: .bottom)
+                    // SwiftUI 没有 frame(width:minHeight:alignment:) 这一重载，
+                    // 用 minWidth/maxWidth 夹住宽度，语义与固定宽相同。
+                    .frame(minWidth: zoneWidth, maxWidth: zoneWidth, minHeight: zoneHeight, alignment: .bottom)
                 }
                 // 禁手动滚动：自动跟随独占滚动，手指只点行跳转 / 点空白处展开。
                 .scrollDisabled(true)

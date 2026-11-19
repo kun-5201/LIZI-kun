@@ -313,8 +313,11 @@ struct PlayerView: View {
                 QueuePanelView(onClose: { showQueue = false })
             }
         }
+        // SwiftUI 没有 frame(width:minHeight:maxHeight:) 这一重载，
+        // 用 minWidth/maxWidth 夹住宽度，语义与固定宽相同。
         .frame(
-            width: width,
+            minWidth: width,
+            maxWidth: width,
             minHeight: PlayerTokens.lyricsZoneHeight(tier),
             maxHeight: .infinity
         )

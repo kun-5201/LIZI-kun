@@ -29,7 +29,7 @@ final class SettingsStore: ObservableObject {
 
     /// 动画插图（壳版第 12 轮第 20 件）：开 = 锁屏专辑封面动态（本地生成，
     /// 每首歌都有）；关 = 整个动态封面关掉，锁屏回静态专辑图。默认开。
-    @Published var animatedArtwork: Bool = Self.boolDefaultOn(key: "lizi.animatedArtwork") {
+    @Published var animatedArtwork: Bool = SettingsStore.boolDefaultOn(key: "lizi.animatedArtwork") {
         didSet { UserDefaults.standard.set(animatedArtwork, forKey: "lizi.animatedArtwork") }
     }
 
@@ -40,24 +40,24 @@ final class SettingsStore: ObservableObject {
     }
 
     /// 平台头像（壳版）：关时大厅平台方块只显示平台图标，不显示账号头像。默认关。
-    @Published var platformAvatar: Bool = Self.boolDefaultOff(key: "lizi.hall.platAvatar") {
+    @Published var platformAvatar: Bool = SettingsStore.boolDefaultOff(key: "lizi.hall.platAvatar") {
         didSet { UserDefaults.standard.set(platformAvatar, forKey: "lizi.hall.platAvatar") }
     }
 
     /// 用平台颜色铺色（壳版）：关时大厅铺色态取当前专辑封面颜色；开时回平台品牌色。默认关。
-    @Published var platformColor: Bool = Self.boolDefaultOff(key: "lizi.hall.platColor") {
+    @Published var platformColor: Bool = SettingsStore.boolDefaultOff(key: "lizi.hall.platColor") {
         didSet { UserDefaults.standard.set(platformColor, forKey: "lizi.hall.platColor") }
     }
 
     /// 大厅内容轨（壳版）：开 = 精选/喜欢/收藏直接在跑马带里切换；
     /// 关 = 恢复点卡片跳浏览页的旧交互。默认开。
-    @Published var hallRail: Bool = Self.boolDefaultOn(key: "lizi.hall.rail") {
+    @Published var hallRail: Bool = SettingsStore.boolDefaultOn(key: "lizi.hall.rail") {
         didSet { UserDefaults.standard.set(hallRail, forKey: "lizi.hall.rail") }
     }
 
     /// 本地音乐在首页显示（壳版第 11 轮）：关后首页整块消失、不留占位；
     /// 只管显示/隐藏，不管导入。默认开。
-    @Published var localMusicShown: Bool = Self.boolDefaultOn(key: "lizi.local.show") {
+    @Published var localMusicShown: Bool = SettingsStore.boolDefaultOn(key: "lizi.local.show") {
         didSet { UserDefaults.standard.set(localMusicShown, forKey: "lizi.local.show") }
     }
 
@@ -65,7 +65,7 @@ final class SettingsStore: ObservableObject {
 
     /// 播放页版式 id：`""` = 默认（现在的两栏）、`"02"` = 左右对半、
     /// `"04"` = 上下分屏、`"06"` = 极小封面。非法值回落默认。
-    @Published var nowLayout: String = Self.readNowLayout() {
+    @Published var nowLayout: String = SettingsStore.readNowLayout() {
         didSet {
             let v = Self.normalizeLayout(nowLayout)
             if v != nowLayout { nowLayout = v; return }
@@ -124,7 +124,7 @@ final class SettingsStore: ObservableObject {
     /// 大厅「我的」和顶部平台条里显示的平台。没存 = 全部；全选 = 删键
     /// （照抄壳版 platSave）。注意：原生首页平台条本轮尚未消费这把键，
     /// 选择只做持久化，接线在 P3 打磨项；登录、播放不受影响。
-    @Published var visiblePlatforms: Set<String> = Self.readVisiblePlatforms() {
+    @Published var visiblePlatforms: Set<String> = SettingsStore.readVisiblePlatforms() {
         didSet { Self.writeVisiblePlatforms(visiblePlatforms) }
     }
 

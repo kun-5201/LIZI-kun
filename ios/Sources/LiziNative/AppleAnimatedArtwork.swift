@@ -358,7 +358,7 @@ final class AppleAnimatedArtworkProvider {
               let masterURLString = variant["video"] as? String,
               let masterURL = URL(string: masterURLString),
               let masterText = try? await fetchText(url: masterURL),
-              let mp4URLString = pickMP4URL(fromMaster: masterText, targetWidth: aspect.targetWidth),
+              let mp4URLString = Self.pickMP4URL(fromMaster: masterText, targetWidth: aspect.targetWidth),
               let mp4URL = URL(string: mp4URLString) else { return false }
         // 预览图尽力而为：失败不影响视频。
         if let preview = variant["previewFrame"] as? [String: Any],
@@ -447,7 +447,8 @@ final class AppleAnimatedArtworkProvider {
                     // 用户 token 被拒：换网页 token（下一轮）；网页 token 被拒：重抠一次再试。
                     if attempt.refreshWeb, index == attempts.count - 1 {
                         refreshWebTokenCache()
-                        if let fresh = await webTokenForRequest(forceRefresh: true), !fresh.isEmpty {
+                        let fresh = await webTokenForRequest(forceRefresh: true)
+                        if !fresh.isEmpty {
                             let (data2, resp2) = try await fetchDataWithHeaders(
                                 url: url, headers: ["Authorization": "Bearer \(fresh)"])
                             if (resp2 as? HTTPURLResponse)?.statusCode == 200 { return data2 }

@@ -9,10 +9,16 @@ import SwiftUI
 /// 3. 平台条（PlatformStripView）：7 家平台横排，点按切台。
 /// 4. 来源 chips（SourceChipsView）：每日推荐 / 精选 / 喜欢（标题按平台取真名） /
 ///    我收藏的歌单 / 电台——P1 用横向 chips，球面滚轮是 P3 打磨项。
-/// 4.5 3D 封面环（HomeCoverRingView，r20）：壳版首页下半区 `.ringsec` 的原生版，
-///    位置与壳版一致——Hero 大卡 → 平台条 → 来源 chips 之后、每日推荐 / rails 之前。
-///    内容是播放队列（非空时）或每日推荐（队列为空时），两份都空时不显示。
-/// 5. 内容区：每日推荐 = 跑马带；其余来源 = rail 行（P2：标题 + 横向卡片 +
+/// 4.5 3D 封面环（HomeCoverRingView，r21）：平面跑马带常态 + 上滑展开全屏
+///    3D 圆环（视频逐帧复刻，见 HomeCoverRingView 文件头）。位置与壳版一致——
+///    Hero 大卡 → 平台条 → 来源 chips 之后、rails 之前。内容是播放队列
+///    （非空时）或每日推荐（队列为空时），两份都空时不显示。
+///    r21 起环的平面态就是每日跑马带，HomeView 不再单独挂 DailyMarqueeView
+///    （两处并存会叠两条一样的带）。环覆盖层挂在根 VStack 的 `.overlay` 上
+///    （ScrollView 之外，全屏变暗才能盖住 Hero/顶栏/平台条），状态机由
+///    ringModel 持有，平面带与覆盖层共用。
+/// 5. 内容区：每日推荐 = 环的平面跑马带（见 4.5，不再单独挂跑马带）；
+///    其余来源 = rail 行（P2：标题 + 横向卡片 +
 ///    点开展开，见 RailRowView；点卡片 / 点展开都进 RailDetailView）。
 /// 6. 本地音乐区占位（P4 的活，只留行，不放假列表）。
 ///
@@ -22,6 +28,8 @@ struct HomeView: View {
     @EnvironmentObject var playback: PlaybackStore
     @EnvironmentObject var nav: AppNavigation
     @StateObject private var viewModel = HomeViewModel()
+    /// 首页环状态机（r21）：平面带与全屏环覆盖层共用（见 HomeCoverRingView 文件头）。
+    @StateObject private var ringModel = HomeCoverRingModel()
 
     var body: some View {
         GeometryReader { outer in
@@ -47,30 +55,23 @@ struct HomeView: View {
 
                         SourceChipsView(viewModel: viewModel)
 
-                        // r20：首页 3D 封面环（壳版位置：Hero → 平台条 → 来源 chips
-                        // 之后、每日推荐之前；见 HomeCoverRingView 文件头证据）。
+                        // r21：首页 3D 封面环（平面跑马带常态 + 上滑展开全屏圆环；
+                        // 见 HomeCoverRingView 文件头视频逐帧规格）。
                         // 独立区块：只加这一处接入点，不动 hero / 平台条 /
-                        // 来源 chips / 每日推荐 / rails / 本地音乐任何一行。
+                        // 来源 chips / rails / 本地音乐任何一行。
                         // 尺寸档按实测屏宽分（topInset 不参与分档，见 PlayerTokens）。
+                        // 平面态就是每日跑马带：不再单独挂 DailyMarqueeView。
                         HomeCoverRingView(
+                            model: ringModel,
                             dailyTracks: viewModel.daily.map { $0.track },
+                            isLoadingDaily: viewModel.isLoadingDaily,
+                            dailyEmptyReason: viewModel.dailyEmptyReason,
+                            marqueeSpeed: viewModel.marqSpeedPxPerSecond,
                             tier: PlayerTokens.sizeTier(for: outer.size, topInset: outer.safeAreaInsets.top)
                         )
                         .padding(.horizontal, 16)
 
-                        if viewModel.selectedSource == .daily {
-                            DailyMarqueeView(
-                                tracks: viewModel.daily,
-                                isLoading: viewModel.isLoadingDaily,
-                                emptyReason: viewModel.dailyEmptyReason,
-                                speedPxPerSecond: viewModel.marqSpeedPxPerSecond,
-                                onPlay: { index in
-                                    // 点一首直接播：整份每日推荐进队列，从该首起播。
-                                    playback.setQueue(viewModel.daily.map { $0.track }, startAt: index)
-                                }
-                            )
-                            .padding(.horizontal, 16)
-                        } else if let kind = viewModel.selectedSource.railKind {
+                        if let kind = viewModel.selectedSource.railKind {
                             // P2：四条 rails 各一行（标题 + 横向卡片 + 点开展开）。
                             // 点卡片进详情（RailDetailView），不在行里直接播。
                             // 喜欢 rail 的标题按当前平台取真名（displayTitle），
@@ -101,6 +102,15 @@ struct HomeView: View {
                     .padding(.bottom, 32)
                 }
                 .background(LiziTokens.paper)
+            }
+            // r21：环的纵向锚点用这个坐标空间量（平面带把自己的 frame 报到
+            // "liziHome" 里，覆盖层按同一坐标系把环摆到带原来的位置）。
+            .coordinateSpace(name: "liziHome")
+            // r21：全屏环覆盖层（展开态；ScrollView 之外，变暗盖住整页）。
+            .overlay {
+                if ringModel.ringPhase != .closed {
+                    HomeRingOverlayView(model: ringModel)
+                }
             }
             .background(LiziTokens.paper)
         }

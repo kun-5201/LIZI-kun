@@ -495,6 +495,9 @@ final class LXSourceRegistry {
             }
             group.addTask {
                 try await Task.sleep(nanoseconds: 30_000_000_000)
+                // 第 21 轮第 1 件：30 秒总超时原来只抛错、Router 才记失败原因；
+                // 这一笔直接点名是注册表层的超时，和引擎层 25 秒、桥层 25 秒分开。
+                DiagLog.shared.recordPlaybackStep("lx registry timeout 30s source=\(source)")
                 throw NSError(domain: "LXSources", code: -1, userInfo: [NSLocalizedDescriptionKey: "落雪解析超时（30 秒）"])
             }
             guard let r = try await group.next() else {
@@ -714,8 +717,14 @@ final class LXSourceRegistry {
         guard let script = try? String(contentsOf: LXSourceStore.scriptURL(id: meta.id), encoding: .utf8) else {
             throw NSError(domain: "LXSources", code: 404, userInfo: [NSLocalizedDescriptionKey: "源脚本文件不存在"])
         }
+        // 第 21 轮第 1 件：实例一般已在启动时由 validate() 加载并缓存，
+        // 这里是缓存未命中才走（用户后导入的源、或启动时注册失败）；
+        // load() 里有最长 5 秒的等 handler（Thread.sleep 轮询），若它
+        // 卡在取链窗口里，这两笔能分清“卡在加载”还是“卡在脚本执行”。
+        DiagLog.shared.recordPlaybackStep("lx instance load id=\(meta.id)")
         let inst = LXScriptInstance(script: script)
         try inst.load()
+        DiagLog.shared.recordPlaybackStep("lx instance ready id=\(meta.id)")
         replaceInstance(id: meta.id, instance: inst)
         return inst
     }

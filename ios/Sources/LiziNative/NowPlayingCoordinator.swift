@@ -51,6 +51,16 @@ final class NowPlayingCoordinator: ObservableObject {
     /// 不再为它重拉（lastArtwork == nil 时每 5 秒进度复写都会触发重拉，
     /// 会无限重试）；切走再切回（lastTrackId 变化）仍会重拉。
     private var coverFailedTrackId: String?
+    /// 第 21 轮第 3 件：动态封面准备（Route A 编码 + Route B token 抓取）
+    /// 是崩溃窗口里最重的两件并发工作，原来切歌就并行启动、和挂死的 LX
+    /// kg 挤在同一个窗口里。改成等 startedTrackId（startItem 里 player.play()
+    /// 之后才置）再启动：没声之前只挂静态封面，动效晚到几秒、不丢；
+    /// LX 挂死时 A/B 根本不启动，窗口里只剩取链本身。以下三件为此服务：
+    /// 已对哪首歌启动过准备（每首只启动一次）、到货的封面图暂存（启动时用）、
+    /// 启动入口 kickAnimatedPrepares / maybeKickAnimatedPrepares。
+    private var artworkPrepareKickedTrackId: String?
+    private var lastCoverImage: UIImage?
+    private var lastCoverImageTrackId: String?
 
     func bind(store: PlaybackStore) {
         self.store = store
@@ -71,6 +81,16 @@ final class NowPlayingCoordinator: ObservableObject {
             .sink { [weak self] _ in
                 guard let self else { return }
                 Task { @MainActor in self.syncLikeCommand() }
+            }
+            .store(in: &cancellables)
+        // 第 21 轮第 3 件：真正开始播放才启动动态封面准备（见
+        // artworkPrepareKickedTrackId 注释）。startedTrackId 只在 startItem
+        // 里 player.play() 之后置，LX 挂死时它永远不置，A/B 就不启动。
+        store.$startedTrackId
+            .sink { [weak self] id in
+                guard let self, let id,
+                      let track = self.store?.currentTrack, track.id == id else { return }
+                Task { @MainActor in self.kickAnimatedPrepares(for: track) }
             }
             .store(in: &cancellables)
         // 进度：Now Playing 的已播时间最多每 5 秒刷新一次（太密系统会节流）。
@@ -201,17 +221,12 @@ final class NowPlayingCoordinator: ObservableObject {
     private func fetchArtwork(for track: Track) async {
         // 换歌了，上一首的失败标记清掉（重试只针对同一首歌耗尽时守门）。
         if coverFailedTrackId != track.id { coverFailedTrackId = nil }
-        // 路线 B 不依赖封面（匹配只用歌手+专辑名）：一进来就并行准备真视频，
-        // 别让它等封面下载——r20 之前 B 的 prepare 排在封面下载之后，封面
-        // 下载慢/失败时 B 连尝试的机会都没有。就绪后回调里重写一次
-        // Now Playing 挂上；无素材什么都不做（本歌继续用路线 A）。
-        // prepare 内部有同 key 去重 + 7 天否定缓存（只记“无匹配 / 专辑根本
-        // 无 editorialVideo”两种确定性结论；视频下载失败不记否定，见
-        // AppleAnimatedArtwork.resolveAndDownload），重复调不会重复拉。
-        AppleAnimatedArtworkProvider.shared.prepare(for: track) { [weak self] ready in
-            guard let self, ready else { return }
-            Task { @MainActor in self.writeNowPlaying() }
-        }
+        // 第 21 轮第 3 件：路线 B 的 prepare 不再这里启动——它要抓苹果网页
+        // token（2.4MB 首页 + 3.3MB JS + 正则），和挂死的 LX kg 挤在同一个
+        // 窗口里。改成等 startedTrackId 再由 kickAnimatedPrepares 启动
+        // （见 artworkPrepareKickedTrackId 注释）；匹配只用歌手+专辑名，
+        // 不依赖封面，所以启动时机挪后不影响匹配结果。
+        DiagLog.shared.recordPlaybackStep("cover fetch start id=\(track.id) platform=\(track.platform)")
         guard let url = track.coverURL, !url.absoluteString.isEmpty else {
             // 没封面的歌也动起来：用默认图（纯白，符合「无封面用白色」偏好）
             // 生成动态视频（AnimatedArtworkManager.defaultKey，所有没封面的歌共用）。
@@ -226,19 +241,14 @@ final class NowPlayingCoordinator: ObservableObject {
             lastArtwork = MPMediaItemArtwork(boundsSize: defaultSized.size) { _ in defaultSized }
             lastArtworkTrackId = track.id
             lastCoverKey = AnimatedArtworkManager.defaultKey
-            let key = AnimatedArtworkManager.defaultKey
-            if !AnimatedArtworkManager.shared.isReady(key: key) {
-                AnimatedArtworkManager.shared.prepare(cover: defaultImage, key: key) { [weak self] in
-                    guard let self else { return }
-                    Task { @MainActor in
-                        guard self.lastCoverKey == key else { return }
-                        self.writeNowPlaying()
-                    }
-                }
-            }
+            lastCoverImage = defaultImage
+            lastCoverImageTrackId = track.id
+            // 第 21 轮第 3 件：默认视频的 prepare 也不在这里启动，等
+            // startedTrackId 再由 kickAnimatedPrepares 启动（同文件头注释）。
             // default 视频已就绪时上面没有 onReady 会再补写：这里直接重挂一次，
             // 否则暂停态（无 5 秒进度复写）的无封面歌会一直挂着上一首的视频。
             writeNowPlaying()
+            maybeKickAnimatedPrepares(for: track)
             return
         }
         let urlString = url.absoluteString
@@ -261,6 +271,14 @@ final class NowPlayingCoordinator: ObservableObject {
                 image = nil
             }
         }
+        // 第 21 轮第 3 件：零尺寸图（坏数据解出来 0x0）按下载失败处理，
+        // 不进 lockScreenSized / prepare（见 AnimatedArtwork 的注释）。
+        if let img = image, img.size.width <= 0 || img.size.height <= 0 {
+            DiagLog.shared.recordLog(category: "animated-artwork",
+                message: "cover zero-size image track=\(track.title) platform=\(track.platform) host=\(url.host ?? "")",
+                fields: ["lane": "cover-zero-size", "host": url.host ?? "", "platform": track.platform])
+            image = nil
+        }
         guard let image else {
             // 歌已经切走了：旧下载丢弃，新歌那轮自己会拉。
             guard lastCoverURL == urlString else { return }
@@ -282,17 +300,13 @@ final class NowPlayingCoordinator: ObservableObject {
             lastArtwork = nil
             lastArtworkTrackId = nil
             lastCoverKey = AnimatedArtworkManager.defaultKey
-            let defaultKey = AnimatedArtworkManager.defaultKey
+            lastCoverImage = nil
+            lastCoverImageTrackId = track.id
+            DiagLog.shared.recordPlaybackStep("cover fetch fail id=\(track.id) platform=\(track.platform) host=\(url.host ?? "")")
             writeNowPlaying()
-            if !AnimatedArtworkManager.shared.isReady(key: defaultKey) {
-                AnimatedArtworkManager.shared.prepare(cover: defaultCoverImage(), key: defaultKey) { [weak self] in
-                    guard let self else { return }
-                    Task { @MainActor in
-                        guard self.lastCoverKey == defaultKey else { return }
-                        self.writeNowPlaying()
-                    }
-                }
-            }
+            // 第 21 轮第 3 件：默认视频的 prepare 也不在这里启动，等
+            // startedTrackId 再由 kickAnimatedPrepares 启动（无图时它用默认白图）。
+            maybeKickAnimatedPrepares(for: track)
             if shouldRetry {
                 Task.detached {
                     try? await Task.sleep(nanoseconds: 10_000_000_000)
@@ -310,14 +324,59 @@ final class NowPlayingCoordinator: ObservableObject {
         let sized = Self.lockScreenSized(image)
         lastArtwork = MPMediaItemArtwork(boundsSize: sized.size) { _ in sized }
         lastArtworkTrackId = track.id
+        lastCoverImage = image
+        lastCoverImageTrackId = track.id
+        DiagLog.shared.recordPlaybackStep("cover ready id=\(track.id) platform=\(track.platform) host=\(url.host ?? "")")
         writeNowPlaying()
-        // 动态视频：后台渲染，完了在主线程回调补写（渲染失败也回调，调用方用上一首缓存兜底）。
-        AnimatedArtworkManager.shared.prepare(cover: image, key: key) { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in
-                guard self.lastCoverKey == key else { return }
-                self.writeNowPlaying()
+        // 第 21 轮第 3 件：动态视频的 prepare 不再这里启动，等 startedTrackId
+        // 再由 kickAnimatedPrepares 启动（图已暂存到 lastCoverImage）。
+        maybeKickAnimatedPrepares(for: track)
+    }
+
+    /// 封面到货后补启动动态准备：只有已经真正起播（startedTrackId 是这首）
+    /// 才启动；还没起播时什么都不做，等 startedTrackId 的订阅来启动。
+    private func maybeKickAnimatedPrepares(for track: Track) {
+        guard store?.startedTrackId == track.id else { return }
+        kickAnimatedPrepares(for: track)
+    }
+
+    /// 动态封面准备的唯一启动点（第 21 轮第 3 件，见
+    /// artworkPrepareKickedTrackId 注释）：Route B（不依赖封面，先启动；
+    /// prepare 内部有去重 + 否定缓存）+ Route A（要图：有现成图就用，
+    /// 无封面/下载失败的歌用默认白图；有封面但图还没到的歌这次跳过、
+    /// 不记 kicked，等图到了 fetchArtwork 再调 maybeKick 补启动）。
+    /// 每首只启动一次；失败也只启动一次（Route A 内部有重试一次，
+    /// Route B 的否定缓存管重复查；重启动不会把视频变回来，只会多烧一轮）。
+    private func kickAnimatedPrepares(for track: Track) {
+        guard artworkPrepareKickedTrackId != track.id else { return }
+        guard store?.startedTrackId == track.id else { return }
+        guard let animKey = lastCoverKey else { return }
+        let image: UIImage?
+        if animKey == AnimatedArtworkManager.defaultKey {
+            image = defaultCoverImage()
+        } else if lastCoverImageTrackId == track.id {
+            image = lastCoverImage
+        } else {
+            return
+        }
+        guard let coverImage = image else { return }
+        artworkPrepareKickedTrackId = track.id
+        DiagLog.shared.recordPlaybackStep("animated prepare kick id=\(track.id) platform=\(track.platform) key=\(animKey)")
+        AppleAnimatedArtworkProvider.shared.prepare(for: track) { [weak self] ready in
+            guard let self, ready else { return }
+            Task { @MainActor in self.writeNowPlaying() }
+        }
+        if !AnimatedArtworkManager.shared.isReady(key: animKey) {
+            AnimatedArtworkManager.shared.prepare(cover: coverImage, key: animKey) { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in
+                    guard self.lastCoverKey == animKey else { return }
+                    self.writeNowPlaying()
+                }
             }
+        } else {
+            // 视频已就绪：直接重挂一次（没有 onReady 回调会再补写）。
+            writeNowPlaying()
         }
     }
 

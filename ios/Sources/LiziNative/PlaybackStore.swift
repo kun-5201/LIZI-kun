@@ -77,6 +77,21 @@ final class PlaybackStore: ObservableObject {
     /// `resolve superseded` 面包屑。next()/previous() 都走 play()，
     /// 所以这里是唯一的取消点）。
     private var playTask: Task<Void, Never>?
+    /// 第 21 轮第 1 件：`playTask` 本身分不清“已完成”和“还在飞”
+    /// （完成的 Task 的 isCancelled 也是 false），旧代码重按一首已播完的歌
+    /// 也会记一条假的 `resolve superseded`。用代际数认：在飞 = playCurrent
+    /// 正在跑的那一代；play() 只在真正在飞时才记 superseded，`play tap`
+    /// 每次都记（带 priorInFlight）——下次诊断一眼分清“新进程重按”
+    /// （无 play tap 前序、无 superseded）还是“同进程内重按”。
+    private var playGeneration = 0
+    /// playTask 引用的那一代（defer 里只清自己这一代，不清新任务）。
+    private var playTaskGen = 0
+    /// 当前这代 playCurrent 是否正在跑（defer 里按代际清）。
+    private var playCurrentActive = false
+    /// 真正开始播放的那首歌（startItem 里 player.play() 之后才置；锁屏动态
+    /// 封面只认它，不认“切歌了”——第 21 轮第 3 件：Route A/B 的准备工作
+    /// 等它置起才启动，不再和挂死的 LX 取链挤在同一个窗口里）。
+    @Published private(set) var startedTrackId: String?
     private var lastFetchVia: String = ""
     private var lastFetchReason: String = ""
     private var proxyTried = false
@@ -85,6 +100,9 @@ final class PlaybackStore: ObservableObject {
     private var currentAssetURL: URL?
     private var audioSessionActivated = false
     private var wasPlayingBeforeInterruption = false
+    /// 首次进度回调是否已记过面包屑（每首歌在 startItem 里清零；它是
+    /// “声音真的出来了”的唯一落盘证据——play called 只证明调了 play）。
+    private var didRecordFirstTimeUpdate = false
 
     private static let likedKey = "lizi.native.likedTrackIds"
     /// P2：星标完整曲目（[Track] JSON；liked rail 用）。旧的 id 集合键不动，
@@ -225,11 +243,22 @@ final class PlaybackStore: ObservableObject {
         }
         // r20 集成 L①：新点播先取消旧的在飞任务（旧 resolve 被取消后
         // 立刻向上抛 CancellationError，不再挂死），再起新任务。
+        // r21a：superseded 只在旧任务真正在飞时才记（见 playCurrentActive
+        // 注释）；`play tap` 每次都记——下次诊断里 5 次尝试若全是
+        // “play tap priorInFlight=false 且无 superseded”，就是每次都是
+        // 新进程（崩了重进），不是同进程重按。
+        playGeneration += 1
+        let gen = playGeneration
+        let wasInFlight = playCurrentActive
         if let old = playTask, !old.isCancelled {
             old.cancel()
-            DiagLog.shared.recordPlaybackStep("resolve superseded source=\(track.platform) id=\(track.id)")
+            if wasInFlight {
+                DiagLog.shared.recordPlaybackStep("resolve superseded source=\(track.platform) id=\(track.id)")
+            }
         }
-        playTask = Task { @MainActor in await playCurrent() }
+        playTaskGen = gen
+        DiagLog.shared.recordPlaybackStep("play tap source=\(track.platform) id=\(track.id) priorInFlight=\(wasInFlight)")
+        playTask = Task { @MainActor in await playCurrent(gen: gen) }
     }
 
     /// 恢复播放。
@@ -365,8 +394,18 @@ final class PlaybackStore: ObservableObject {
 
     // MARK: - 播放主流程（第 16 轮教训：全程无强制解包）
 
-    private func playCurrent() async {
+    private func playCurrent(gen: Int) async {
         guard let track = currentQueueTrack else { return }
+        playCurrentActive = true
+        defer {
+            // 只清自己这一代：旧任务被取消后 unwind 时，新任务的引用已就位，
+            // 不能把新任务的 playTask 也清掉（否则下次重按取消不到它，
+            // superseded 面包屑也丢了——正是 02:54 诊断要分清的那种情况）。
+            if playTaskGen == gen {
+                playCurrentActive = false
+                playTask = nil
+            }
+        }
         playToken += 1
         let token = playToken
         proxyTried = false
@@ -416,8 +455,23 @@ final class PlaybackStore: ObservableObject {
     }
 
     /// 把地址交给 AVPlayer 并起播（token 抢占丢弃点 + 状态观察都落在这里）。
+    /// 第 21 轮第 3 件：取链成功之后、真正开始播放那一刻的每一步都有落盘
+    /// 面包屑（startItem begin / set src / play called / item ready /
+    /// item failed / 首次进度），崩在播放启动段时下次诊断直接定位到步；
+    /// 非 http(s)/代理/file 的地址直接拒掉（LX 只回 http(s)，平台只回
+    /// http(s)，演示音是 file——别的 scheme 进 AVPlayer 没有意义，
+    /// 只会把失败推迟到 item failed，还不如在这里明说）。
     private func startItem(url: URL, track: Track, token: Int) async {
         guard token == playToken else { return }
+        DiagLog.shared.recordPlaybackStep("startItem begin source=\(track.platform) id=\(track.id) via=\(lastFetchVia) scheme=\(url.scheme ?? "-")")
+        guard url.scheme == "http" || url.scheme == "https"
+                || url.scheme == AudioProxyLoader.scheme || url.isFileURL else {
+            DiagLog.shared.recordPlaybackStep("startItem bad scheme source=\(track.platform) id=\(track.id) scheme=\(url.scheme ?? "-")")
+            isLoading = false
+            isPlaying = false
+            errorMessage = "unavailable"
+            return
+        }
         currentAssetURL = url
         let asset: AVURLAsset
         if url.scheme == AudioProxyLoader.scheme {
@@ -432,25 +486,37 @@ final class PlaybackStore: ObservableObject {
         player.replaceCurrentItem(with: item)
         player.play()
         DiagLog.shared.recordPlaybackStep("play called source=\(track.platform) id=\(track.id)")
+        // 真正起播的信号：锁屏动态封面只认它（见 startedTrackId 注释）。
+        startedTrackId = track.id
+        didRecordFirstTimeUpdate = false
         isLoading = false
         isPlaying = true
     }
 
     /// 监听当前 item 的状态与结束事件（每次换 item 都重建观察，避免旧观察串台）。
+    /// 第 21 轮第 1 件：ready/failed 都落盘——之前只有失败重试链记步，
+    /// item 进了播放器后是 ready 还是 failed、失败原因是什么，诊断里看不到。
     private func observe(item: AVPlayerItem, token: Int) {
         itemStatusObservation?.invalidate()
         for o in itemObservers { NotificationCenter.default.removeObserver(o) }
         itemObservers = []
+        var readyRecorded = false
         itemStatusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             guard let self else { return }
             Task { @MainActor in
                 guard token == self.playToken else { return }
                 if item.status == .failed {
+                    let reason = item.error?.localizedDescription ?? "-"
+                    DiagLog.shared.recordPlaybackStep("item failed source=\(self.currentTrack?.platform ?? "-") id=\(self.currentTrack?.id ?? "-") error=\(reason)")
                     await self.handlePlaybackFailure()
                 } else if item.status == .readyToPlay {
                     let d = item.asset.duration.seconds
                     if d.isFinite, d > 0 { self.duration = d }
                     self.isLoading = false
+                    if !readyRecorded {
+                        readyRecorded = true
+                        DiagLog.shared.recordPlaybackStep("item ready source=\(self.currentTrack?.platform ?? "-") id=\(self.currentTrack?.id ?? "-")")
+                    }
                 }
             }
         }
@@ -591,6 +657,10 @@ final class PlaybackStore: ObservableObject {
         guard let item = player.currentItem, item.status == .readyToPlay else { return }
         let seconds = time.seconds
         guard seconds.isFinite else { return }
+        if !didRecordFirstTimeUpdate, seconds > 0 {
+            didRecordFirstTimeUpdate = true
+            DiagLog.shared.recordPlaybackStep("playback time update first source=\(currentTrack?.platform ?? "-") id=\(currentTrack?.id ?? "-")")
+        }
         progress = seconds
         if duration <= 0 {
             let d = item.asset.duration.seconds

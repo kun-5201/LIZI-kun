@@ -9,10 +9,11 @@ import SwiftUI
 /// - 尺寸走分档（r20）：单张边长 `PlayerTokens.coverItem(tier)`、轨道高
 ///   `PlayerTokens.coverTrackHeight(tier)`；轨道高含倒影（单张 + 间距 8 +
 ///   倒影 单张 × 0.3，见 `PlayerTokens` 总账注释）。
-/// - r20 删掉了歌词面板拉起收小那套（旧 `coverFlowItemSizeCompact` /
-///   `coverFlowTrackHeightCompact` 已随旧常量删除）：封面流尺寸只由 tier
-///   决定，不再随面板展开态变化。`isCompact` 参数仅作兼容保留（默认值
-///   false），调用方不要再传它；它不参与任何尺寸计算。
+/// - `isCompact`（r21b 恢复使用）：收小档 = r19 的固定收小尺寸按 tier 等比
+///   （单张 × 148/188、轨道 × 198/254；standard 档正好是 r19 的 148/198）。
+///   r20 曾把它置为空操作（歌词面板拉起收小改由调用方 scaleEffect 做）；
+///   r21b 横屏左列总高只有 306，封面必须用收小档（再 ×0.8），所以恢复。
+///   竖屏调用方不传（默认 false），竖屏尺寸与 r20 一字不改。
 /// - 滑动方向照抄壳版第 13 轮第 16 件（和首页大卡同一方向）：左滑上一首、
 ///   右滑下一首；阈值 56px。上一首直接按队列下标（不走 `previous()` 的
 ///   “进度 > 3 秒先回开头”分支）；下一首走 `next()`（顺序到底停住、循环回首，
@@ -27,8 +28,8 @@ struct CoverFlowView: View {
 
     /// 尺寸档（调用方按实测屏宽经 `PlayerTokens.sizeTier(for:topInset:)` 传入）。
     var tier: PlayerTokens.PlayerSizeTier = .standard
-    /// 兼容保留：r20 起不再参与尺寸计算（歌词面板拉起收小的逻辑已删），
-    /// 调用方不要再传它；留着只为不断旧调用点的编译。
+    /// 收小档（r21b 恢复使用，见文件头）：true 时单张 × 148/188、轨道 × 198/254
+    ///（standard 档 = r19 的 148/198）；横屏左列用它。竖屏默认 false。
     var isCompact: Bool = false
     /// 点队列行切歌以外的切歌回调（默认直接调 store；调用方一般不用传）。
     var onSelectIndex: ((Int) -> Void)? = nil
@@ -39,11 +40,11 @@ struct CoverFlowView: View {
     private static let swipeThreshold: CGFloat = 56
 
     private var itemSize: CGFloat {
-        PlayerTokens.coverItem(tier)
+        isCompact ? PlayerTokens.coverItem(tier) * 148 / 188 : PlayerTokens.coverItem(tier)
     }
 
     private var trackHeight: CGFloat {
-        PlayerTokens.coverTrackHeight(tier)
+        isCompact ? PlayerTokens.coverTrackHeight(tier) * 198 / 254 : PlayerTokens.coverTrackHeight(tier)
     }
 
     /// 显示的 5 个位置：相对当前下标的偏移 -2…+2（队首/队尾处自然变少，不补假数据）。

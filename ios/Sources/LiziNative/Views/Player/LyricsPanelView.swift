@@ -2,8 +2,8 @@ import SwiftUI
 
 /// 歌词区（r20 播放页改版，按 01:14 播放页截图）。
 ///
-/// 位置：封面流下方、歌名上方（放进页面由 PlayerView 负责：`lyricsZone(tier:)`
-/// 里 `LyricsZoneView(isExpanded: $lyricsExpanded)`，展开态经 @Binding 接回
+/// 位置：封面流下方、歌名上方（放进页面由 PlayerView 负责：`lyricsZone(tier:width:)`
+/// 里 `LyricsZoneView(tier:isExpanded:)`，展开态经 @Binding 接回
 /// PlayerView、展开时封面流收小；不传绑定时用内部 state，无参调用仍能用）。
 /// 父容器已保证最小高 = `lyricsZoneHeight(tier)`，剩余空间全归歌词区，所以本组件
 /// 不再定死高度，只按实得高度底对齐内容；分档只定字号与最小高。
@@ -104,8 +104,11 @@ struct LyricsZoneView: View {
         // 根 GeometryReader 只量父容器实际给的高度（弹性段实得高），
         // 不拿它做分档：分档用屏幕宽（见 tier），区宽比屏宽窄 32，
         // 拿区宽去分档会在 390/430 屏上错档。
+        // r21b：内容同时拿区宽锚定 ScrollView 内容宽（见 content 注释）——
+        // 折叠态 ScrollView 里的单行歌词行不得报出比区宽更大的理想宽，
+        // 否则会一路顶大父级 VStack（r20 竖屏右移的嫌疑链）。
         GeometryReader { geo in
-            content(zoneHeight: geo.size.height)
+            content(zoneWidth: geo.size.width, zoneHeight: geo.size.height)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: store.lyrics.isEmpty) { empty in
@@ -115,13 +118,13 @@ struct LyricsZoneView: View {
     }
 
     @ViewBuilder
-    private func content(zoneHeight: CGFloat) -> some View {
+    private func content(zoneWidth: CGFloat, zoneHeight: CGFloat) -> some View {
         if store.lyrics.isEmpty {
             emptyState
         } else if isExpanded {
-            expandedState
+            expandedState(zoneWidth: zoneWidth)
         } else {
-            collapsedState(zoneHeight: zoneHeight)
+            collapsedState(zoneWidth: zoneWidth, zoneHeight: zoneHeight)
         }
     }
 
@@ -136,7 +139,7 @@ struct LyricsZoneView: View {
 
     // MARK: - 折叠态：底对齐多行 + 渐隐 + 平滑滚动
 
-    private func collapsedState(zoneHeight: CGFloat) -> some View {
+    private func collapsedState(zoneWidth: CGFloat, zoneHeight: CGFloat) -> some View {
         ZStack(alignment: .top) {
             ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: false) {
@@ -161,7 +164,10 @@ struct LyricsZoneView: View {
                         }
                     }
                     // 内容不足一屏时也撑满区高、底对齐：当前行永远贴底、完整可见。
-                    .frame(minHeight: zoneHeight, alignment: .bottom)
+                    // r21b：显式给区宽——ScrollView 内容的布局宽由它定，不由最长
+                    // 单行歌词的理想宽定（否则理想宽会沿 GeometryReader → ZStack
+                    // → VStack 一路顶上去，见 PlayerView 文件底「r21b 根因」）。
+                    .frame(width: zoneWidth, minHeight: zoneHeight, alignment: .bottom)
                 }
                 // 禁手动滚动：自动跟随独占滚动，手指只点行跳转 / 点空白处展开。
                 .scrollDisabled(true)
@@ -225,7 +231,7 @@ struct LyricsZoneView: View {
 
     // MARK: - 展开态：复用完整歌词面板
 
-    private var expandedState: some View {
+    private func expandedState(zoneWidth: CGFloat) -> some View {
         VStack(spacing: 0) {
             HStack {
                 Text("完整歌词")
@@ -258,7 +264,10 @@ struct LyricsZoneView: View {
             .accessibilityLabel("收起完整歌词")
             // FullLyricsView 自己可滚动、自动跟随当前行、点行跳转；
             // 当前行来自 store，展开/收起不丢当前行。字号按 tier 分档。
+            // r21b：显式给区宽，与折叠态同理——完整歌词的长行也不得报出
+            // 比区宽更大的理想宽。
             FullLyricsView(tier: tier)
+                .frame(width: zoneWidth)
         }
     }
 

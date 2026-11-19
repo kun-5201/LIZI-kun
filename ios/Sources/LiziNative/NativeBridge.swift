@@ -309,11 +309,24 @@ d = try await withTimeout(seconds: lxTimeout) {
 await call(path: "/api/lx/song/url", query: query)
 }
 } catch {
+// 第 21 轮第 1 件：取消 ≠ 超时——旧代码两条路都记同一句
+// "lx song/url timeout"，重按取消的旧调用也被算成超时，下次诊断分不清
+// “25 秒真超时”还是“用户 5 秒重按取消”。分开记。
+if error is CancellationError {
+DiagLog.shared.recordPlaybackStep("lx song/url cancelled source=\(track.platform) id=\(track.id)")
+} else {
 DiagLog.shared.recordPlaybackStep("lx song/url timeout source=\(track.platform) id=\(track.id)")
+}
 return nil
 }
 guard let d, (d["code"] as? NSNumber)?.intValue == 0,
-let urlString = d["url"] as? String,!urlString.isEmpty else { return nil}
+let urlString = d["url"] as? String,!urlString.isEmpty else {
+// 第 21 轮第 1 件：LX 回来了但没给地址（code != 0 / 空地址）原来是静默
+// nil，调用方继续往平台走，诊断里看不出 LX 到底回没回。现在记一笔，
+// 和“根本没回来”（上面两句）分开。
+DiagLog.shared.recordPlaybackStep("lx song/url empty source=\(track.platform) id=\(track.id)")
+return nil
+}
 let served = (d["quality"] as? String) ?? ""
 return SongURLResult(url: URL(string: urlString),
 actualQuality: AudioQuality.canon(platform: "lx", served: served),

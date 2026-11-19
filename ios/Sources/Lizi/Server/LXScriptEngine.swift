@@ -722,6 +722,11 @@ final class LXScriptInstance {
             group.addTask {
                 var lastError: Error?
                 for tier in Self.tiersFrom(quality) {
+                    // 第 21 轮第 1 件：每档开始/失败/取消都落盘——02:54 诊断只
+                    // 有“lx song/url start”，分不清是卡在 flac24bit 这一档、
+                    // 还是档位循环本身没跑。取消单独记（见 NativeBridge 的
+                    // cancelled/timeout 分流），不要和档位失败混在一起。
+                    DiagLog.shared.recordPlaybackStep("lx tier start source=\(source) tier=\(tier)")
                     do {
                         let url = try await self.callScriptMusicUrl(source: source, songId: songId, quality: tier, songName: songName)
                         return (url, tier)
@@ -730,7 +735,11 @@ final class LXScriptInstance {
                         // 旧代码把它当普通档位失败吞掉、继续试下一档，超时后还要把
                         // 剩下几档各跑一遍才返回，25 秒超时形同虚设。立刻向上传，
                         // 让外层的超时错误原样返回、调用方走平台兜底。
-                        if error is CancellationError { throw error }
+                        if error is CancellationError {
+                            DiagLog.shared.recordPlaybackStep("lx tier cancelled source=\(source) tier=\(tier)")
+                            throw error
+                        }
+                        DiagLog.shared.recordPlaybackStep("lx tier fail source=\(source) tier=\(tier) reason=\(error.localizedDescription)")
                         lastError = error
                     }
                 }
@@ -838,6 +847,11 @@ final class LXScriptInstance {
                     guard let payloadValue = JSValue(object: payload, in: ctx) else {
                         throw NSError(domain: "LXScript", code: -1, userInfo: [NSLocalizedDescriptionKey: "请求构造失败"])
                     }
+                    // 第 21 轮第 1 件：调进脚本的那一刻落盘——“lx song/url start”
+                    // 只证明进了 Router，这一笔证明 handler 真被调了；下一笔
+                    // （fulfilled/rejected）证明脚本的 Promise 到底 settle 没。
+                    // 两笔之间断了 = 脚本的 musicUrl 处理挂在 JS 里没回来。
+                    DiagLog.shared.recordPlaybackStep("lx js call source=\(source) tier=\(quality)")
                     guard let promise = handler.call(withArguments: [payloadValue]), !promise.isUndefined else {
                         throw NSError(domain: "LXScript", code: -1, userInfo: [NSLocalizedDescriptionKey: "落雪脚本异常：\(ctx.exception?.toString() ?? "未知")"])
                     }
@@ -845,6 +859,7 @@ final class LXScriptInstance {
                         throw NSError(domain: "LXScript", code: -1, userInfo: [NSLocalizedDescriptionKey: "落雪脚本未返回 Promise"])
                     }
                     let fulfilled: @convention(block) (JSValue?) -> Void = { value in
+                        DiagLog.shared.recordPlaybackStep("lx promise fulfilled source=\(source) tier=\(quality)")
                         let url = value?.toString() ?? ""
                         if url.hasPrefix("http://") || url.hasPrefix("https://") {
                             box.resume(returning: url)
@@ -853,6 +868,7 @@ final class LXScriptInstance {
                         }
                     }
                     let rejected: @convention(block) (JSValue?) -> Void = { value in
+                        DiagLog.shared.recordPlaybackStep("lx promise rejected source=\(source) tier=\(quality)")
                         box.resume(throwing: NSError(domain: "LXScript", code: 2, userInfo: [NSLocalizedDescriptionKey: value?.toString() ?? "落雪脚本取歌失败"]))
                     }
                     guard let f = JSValue(object: fulfilled, in: ctx),

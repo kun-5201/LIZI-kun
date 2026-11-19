@@ -60,7 +60,18 @@ final class AnimatedArtworkManager {
     private let encodeQueue = DispatchQueue(label: "lizi.animated-artwork.encode", qos: .utility)
     /// 主线程读写：最近一次请求的封面键。后台渲染开工前先确认还是它——
     /// 切歌快时旧歌的渲染直接跳过，不白烧 CPU，也不挡新歌的视频。
+    /// 第 21 轮第 3 件：原来后台读它要 `DispatchQueue.main.sync`——主线程
+    /// 一旦被别的活占住（等 handler、解封面），编码回调每 24 帧就卡一次，
+    /// 整个渲染跟着卡。改成 NSLock 读，任何线程直接读，不跳主线程；
+    /// 写仍在 prepare（主线程调）里走同一把锁。
     private var currentKey: String?
+    private let keyLock = NSLock()
+    private func currentKeySnapshot() -> String? {
+        keyLock.lock(); defer { keyLock.unlock() }; return currentKey
+    }
+    private func setCurrentKey(_ key: String?) {
+        keyLock.lock(); currentKey = key; keyLock.unlock()
+    }
     /// 主线程读写：最近一个渲染成功（视频已就绪）的键。当前歌的视频失败时，
     /// 锁屏挂它兜底——不要静默变回静态（第 12 轮第 20 件 03:33 要求）。
     private var lastGoodKey: String?
@@ -126,6 +137,17 @@ final class AnimatedArtworkManager {
     /// 注意：只做渲染与文件管理，不碰任何 iOS 26 的符号，26 以下调了也没事
     /// （调用方在 #available 里把关，这里不重复判断）。
     func prepare(cover: UIImage, key: String, onReady: @escaping () -> Void) {
+        // 第 21 轮第 3 件：零尺寸图直接拒掉——0 宽/高进 normalizedOrientation
+        // 的 UIGraphicsImageRenderer、再进 render 的 fit 除法（除零得 inf，
+        // 矩形变 NaN），Core Graphics 拿到 NaN 矩形没有定义良好的行为，
+        // 不能拿它赌锁屏不崩。记一笔就回静态兜底。
+        guard cover.size.width > 0, cover.size.height > 0 else {
+            DiagLog.shared.recordLog(category: "animated-artwork",
+                message: "route A invalid image (zero size) key=\(key)",
+                fields: ["lane": "route-a-invalid-image"])
+            onReady()
+            return
+        }
         // 存归一化后的图：后面裁 preview 与渲染都按它算，EXIF 方向不会捣乱。
         let image = cover.normalizedOrientation()
         previewLock.withLock {
@@ -134,12 +156,13 @@ final class AnimatedArtworkManager {
             previewCache.removeValue(forKey: key + Aspect.portrait.suffix)
             previewCache.removeValue(forKey: key + Aspect.square.suffix)
         }
-        currentKey = key
+        setCurrentKey(key)
+        DiagLog.shared.recordPlaybackStep("routeA prepare start key=\(key)")
         if isReady(key: key) { lastGoodKey = key; onReady(); return }
         workQueue.async { [weak self] in
             guard let self else { return }
             // 开工前再确认一次：切歌快时旧歌的渲染直接跳过。
-            let stillCurrent = DispatchQueue.main.sync { self.currentKey == key }
+            let stillCurrent = self.currentKeySnapshot() == key
             guard stillCurrent else { return }
             let start = Date()
             // 竖版：已在磁盘就直接认，没在就渲染（最多两次）；失败记一条诊断——
@@ -147,6 +170,7 @@ final class AnimatedArtworkManager {
             var portraitOK = self.isReady(key: key, aspect: .portrait)
             if !portraitOK {
                 portraitOK = self.renderWithRetry(image: image, key: key, aspect: .portrait)
+                DiagLog.shared.recordPlaybackStep("routeA render \(portraitOK ? "ok" : "fail") key=\(key) aspect=portrait ms=\(Int(Date().timeIntervalSince(start) * 1000))")
                 if !portraitOK {
                     DiagLog.shared.recordLog(category: "animated-artwork",
                         message: "route A portrait render failed key=\(key)",
@@ -167,15 +191,18 @@ final class AnimatedArtworkManager {
                 DispatchQueue.main.async { onReady() }
             }
             // 切歌了就别再烧方形：方形只是 1x1 备用，当前歌已经不是这首了。
-            let stillCurrentAfterPortrait = DispatchQueue.main.sync { self.currentKey == key }
+            let stillCurrentAfterPortrait = self.currentKeySnapshot() == key
             guard stillCurrentAfterPortrait else { return }
             // 方形尽力而为：失败只记日志，不影响已挂上的竖版；成功再回调一次
             // （调用方补挂 1x1 键），顺带清缓存。
             if !self.isReady(key: key, aspect: .square) {
+                let squareStart = Date()
                 if self.renderWithRetry(image: image, key: key, aspect: .square) {
+                    DiagLog.shared.recordPlaybackStep("routeA render ok key=\(key) aspect=square ms=\(Int(Date().timeIntervalSince(squareStart) * 1000))")
                     self.pruneCache(keeping: key)
                     DispatchQueue.main.async { onReady() }
                 } else {
+                    DiagLog.shared.recordPlaybackStep("routeA render fail key=\(key) aspect=square ms=\(Int(Date().timeIntervalSince(squareStart) * 1000))")
                     DiagLog.shared.recordLog(category: "animated-artwork",
                         message: "route A square render failed key=\(key)",
                         fields: ["lane": "route-a-render-failed", "aspect": "square"])
@@ -327,7 +354,12 @@ final class AnimatedArtworkManager {
         writer.add(input)
         guard let cgImage = image.cgImage else { throw RenderError.noCGImage }
         // cover-fit：封面铺满画面，居中裁掉多余边。
+        // 第 21 轮第 3 件：fit 除零得 inf、矩形变 NaN 再画进像素缓冲是没有
+        // 定义良好的行为的；零尺寸图在 prepare 里已拒，这里再守一道
+        // （prepare 之后 image 不可能变，但 render 是独立入口，别信上游）。
+        guard image.size.width > 0, image.size.height > 0 else { throw RenderError.noCGImage }
         let fit = max(size.width / image.size.width, size.height / image.size.height)
+        guard fit.isFinite, fit > 0 else { throw RenderError.failed }
         let drawW = image.size.width * fit, drawH = image.size.height * fit
         let baseRect = CGRect(x: (size.width - drawW) / 2, y: (size.height - drawH) / 2,
                               width: drawW, height: drawH)
@@ -343,10 +375,11 @@ final class AnimatedArtworkManager {
                 // 各 240 帧），旧歌的渲染跑满全程才会轮到新歌，锁屏就一直
                 // 挂着上一首的视频。每 24 帧（约 1 秒）看一次 currentKey，
                 // 歌已经切走了就地取消，不等跑完、也不重试（见 renderWithRetry）。
-                // main.sync 读 currentKey（与 workQueue 里既有的 stillCurrent
-                // 检查同一路）；主线程从不等 encodeQueue，不会死锁。
+                // r21a：读 currentKey 走 NSLock（currentKeySnapshot），不再
+                // DispatchQueue.main.sync——主线程被别的活占住时编码回调
+                // 不再跟着卡（见 currentKey 注释）。
                 if frameIndex % 24 == 0, frameIndex > 0,
-                   DispatchQueue.main.sync(execute: { self.currentKey != key }) {
+                   self.currentKeySnapshot() != key {
                     writer.cancelWriting()
                     done.signal()
                     return

@@ -17,6 +17,9 @@ struct LiziNativeApp: App {
     private let nowPlayingCoordinator: NowPlayingCoordinator
 
     init() {
+        // 第 21 轮第 1 件：先上报上次死在哪一步（读干净退出旗标 + 快照面包屑
+        // 最后一步），再干别的——DiagLog.shared 的 init 只读盘，不报死亡。
+        DiagLog.shared.markLaunched()
         // 赞助版内置源：包内有 Resources/LXSponsored/linglan.js 时注册为
         //「聆澜音源（赞助版）」（默认启用、可关不可删）；包内没有时静默
         // 不出现。壳版包里没有该文件，调用是空操作。
@@ -72,6 +75,9 @@ struct LiziNativeApp: App {
 final class LiziNativeAppDelegate: NSObject, UIApplicationDelegate {
     func applicationWillTerminate(_ application: UIApplication) {
         LiveActivityManager.endAllActivitiesSynchronously(timeout: 2)
+        // 第 21 轮第 1 件：干净退出记一笔，下次启动不再报死亡
+        // （iOS 很少走这里，见 DiagLog.markLaunched 注释）。
+        DiagLog.shared.markCleanExit()
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "lizi.island.terminatedAt")
     }
 }

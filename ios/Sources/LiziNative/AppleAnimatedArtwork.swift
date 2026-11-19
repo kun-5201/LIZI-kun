@@ -258,7 +258,11 @@ final class AppleAnimatedArtworkProvider {
     }
 
     /// 解析专辑并下载两版视频。返回 true = 竖版已就绪（方形尽力而为）。
+    /// 第 21 轮第 1 件：入口与出口都落盘——Route B 的 token 抓取（2.4MB 首页
+    /// + 3.3MB JS + 正则）是崩溃窗口里最重的单件活之一，它开始/结束在
+    /// 哪一步，下次诊断要能直接看到。
     private func resolveAndDownload(track: Track, key: String) async -> Bool {
+        DiagLog.shared.recordPlaybackStep("routeB resolve start key=\(key) track=\(track.title)")
         // 否定结果在有效期内：直接认栽，不重复查——但结论要重记一笔（r20 补）：
         // 否则 7 天内再播这首歌，诊断里看不到路线 B 的任何结论。
         lock.lock()
@@ -346,6 +350,7 @@ final class AppleAnimatedArtworkProvider {
         if portraitOK {
             pruneCache(keeping: key)
             lock.lock(); lastConclusion[key] = "route-b-ready"; lock.unlock()
+            DiagLog.shared.recordPlaybackStep("routeB ready key=\(key) track=\(track.title)")
             DiagLog.shared.recordLog(category: "apple-animated-artwork",
                 message: "route B ready albumId=\(album.id) storefront=\(album.storefront) track=\(track.title)",
                 fields: ["lane": "route-b-ready", "albumId": album.id, "storefront": album.storefront, "platform": track.platform])
@@ -355,6 +360,7 @@ final class AppleAnimatedArtworkProvider {
             // 下次 prepare 直接认栽、连重试的机会都没有；只有“无匹配 /
             // 专辑根本无 editorialVideo”这两种确定性结论才记否定（见上）。
             lock.lock(); lastConclusion[key] = "route-b-download-failed"; lock.unlock()
+            DiagLog.shared.recordPlaybackStep("routeB fail key=\(key) track=\(track.title)")
             DiagLog.shared.recordLog(category: "apple-animated-artwork",
                 message: "route B video download failed albumId=\(album.id) storefront=\(album.storefront) track=\(track.title)",
                 fields: ["lane": "route-b-download-failed", "albumId": album.id, "storefront": album.storefront, "platform": track.platform])
@@ -616,9 +622,14 @@ final class AppleAnimatedArtworkProvider {
     /// iss=AMPWebPlay 的 JWT。注意头是 `eyJ0` 开头不是 `eyJh`，按 payload 前缀定位。
     /// 返回 (token, exp)。token 是网页播放器公开自带的，不是用户私密凭证。
     private func scrapeWebToken() async -> (String, Date)? {
+        // 第 21 轮第 3 件：首页 2.4MB + bundle 3.3MB 全下下来转 String 再正则，
+        // 是崩溃窗口里最重的单件活之一。加一道 8MB 上限（苹果改版导致 bundle
+        // 膨胀时直接放弃、不把几十 MB 的字符串塞进内存），入口记一笔面包屑。
+        DiagLog.shared.recordPlaybackStep("routeB token scrape start")
         let ua = Self.browserUserAgent
         guard let homeURL = URL(string: "https://music.apple.com"),
               let homeData = try? await fetchData(url: homeURL, userAgent: ua),
+              homeData.count < 8_000_000,
               let home = String(data: homeData, encoding: .utf8) else { return nil }
         let bundlePattern = "/assets/index~[^\"'\\s]*\\.js"
         guard let bundleRegex = try? NSRegularExpression(pattern: bundlePattern),
@@ -627,6 +638,7 @@ final class AppleAnimatedArtworkProvider {
         let bundlePath = String(home[bundleRange])
         guard let bundleURL = URL(string: "https://music.apple.com" + bundlePath),
               let jsData = try? await fetchData(url: bundleURL, userAgent: ua),
+              jsData.count < 8_000_000,
               let js = String(data: jsData, encoding: .utf8) else { return nil }
         // JWT = header.payload.signature；payload 以 {"iss":"AMPWebPlay" 开头，
         // base64url 后是 eyJpc3MiOiJBTVBXZWJQbGF5。

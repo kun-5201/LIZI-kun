@@ -1,4 +1,5 @@
 import Foundation
+import MachO
 
 /// 服务端诊断（给设置页 / 真机排障用，不含任何隐私内容）：
 ///  - lastSearch：最近一次网易搜索的上游端点、耗时、HTTP 状态、条数、错误；
@@ -140,6 +141,15 @@ final class DiagLog {
     /// 现在双写：内存数组 + Application Support 下的 JSON 文件（.atomic
     /// 原子写，同步落盘），UserDefaults 只留作兼容镜像；读端以文件为准。
     /// 下次用户复现闪退重开 App，诊断页直接看到崩溃前最后一步。
+    ///
+    /// 第 21 轮第 1 件（上次死亡上报）：光有面包屑还不够——下次启动要直接
+    /// 回答「上次死在哪一步」。markLaunched()/markCleanExit() 记一个干净退出
+    /// 旗标：启动时先读上次的旗标，不干净就把当时的面包屑最后一步 + 内存占用
+    /// 快照成 lastDeathStep/lastDeathAt/lastDeathMemoryMB，进 /api/diag/search
+    /// 的 json()。注意：iOS 很少走 applicationWillTerminate（挂起后被 SIGKILL
+    /// 是常态），所以 previousRunClean==false 单独看 ≠ 闪退实锤，必须和
+    /// lastDeathStep + 用户当时正在操作（而非后台挂起）一起读；它回答的是
+    /// 「进程没走正常退出、死在某一步」，不是「崩溃堆栈」。
     private var breadcrumbSteps: [String] = []
     private static let breadcrumbFileName = "lizi.playbackBreadcrumb.json"
     private static func breadcrumbFileURL() -> URL? {
@@ -173,6 +183,71 @@ final class DiagLog {
         persistBreadcrumb()
     }
 
+    // MARK: - 上次死亡上报（第 21 轮第 1 件）
+
+    /// 上次启动是否干净退出（false = 上次没走 applicationWillTerminate；
+    /// 见文件头注释：单独看不是闪退实锤，要和 lastDeathStep 一起读）。
+    private(set) var previousRunClean: Bool = true
+    /// 上次不干净退出时面包屑的最后一步（干净退出时保留上一次的快照）。
+    private(set) var lastDeathStep: String = ""
+    /// 上次不干净退出的发现时间（启动时刻，秒）。
+    private(set) var lastDeathAt: Double = 0
+    /// 发现上次不干净退出时本进程的常驻内存（MB；-1 = 读不到，仅作参考，
+    /// 判断是不是内存被杀的旁证，不是定论）。
+    private(set) var lastDeathMemoryMB: Int = -1
+
+    private enum RunKey {
+        static let hadRun = "lizi.runHadRun"
+        static let cleanExit = "lizi.runCleanExit"
+        static let lastDeathStep = "lizi.lastDeathStep"
+        static let lastDeathAt = "lizi.lastDeathAt"
+        static let lastDeathMemoryMB = "lizi.lastDeathMemoryMB"
+    }
+
+    /// App 启动第一时间调（LiziNativeApp.init 首行）：读上次的干净退出旗标，
+    /// 不干净就把面包屑最后一步快照下来，再把旗标翻回 false（活着就先算
+    /// “不干净”，只有真正走完 applicationWillTerminate 才算干净）。
+    func markLaunched() {
+        lock.lock(); defer { lock.unlock() }
+        let ud = UserDefaults.standard
+        let hadRun = ud.bool(forKey: RunKey.hadRun)
+        let wasClean = ud.bool(forKey: RunKey.cleanExit)
+        if hadRun && !wasClean {
+            previousRunClean = false
+            lastDeathStep = breadcrumbSteps.last ?? ""
+            lastDeathAt = Date().timeIntervalSince1970
+            lastDeathMemoryMB = Self.memoryFootprintMB()
+            ud.set(lastDeathStep, forKey: RunKey.lastDeathStep)
+            ud.set(lastDeathAt, forKey: RunKey.lastDeathAt)
+            ud.set(lastDeathMemoryMB, forKey: RunKey.lastDeathMemoryMB)
+        } else {
+            previousRunClean = true
+            lastDeathStep = ud.string(forKey: RunKey.lastDeathStep) ?? ""
+            lastDeathAt = ud.double(forKey: RunKey.lastDeathAt)
+            lastDeathMemoryMB = ud.integer(forKey: RunKey.lastDeathMemoryMB)
+        }
+        ud.set(true, forKey: RunKey.hadRun)
+        ud.set(false, forKey: RunKey.cleanExit)
+    }
+
+    /// 正常退出时调（applicationWillTerminate）：下次启动不再报死亡。
+    func markCleanExit() {
+        UserDefaults.standard.set(true, forKey: RunKey.cleanExit)
+    }
+
+    /// 本进程常驻内存（MB；task_info 读数，失败回 -1，不抛错）。
+    static func memoryFootprintMB() -> Int {
+        var info = task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<task_basic_info>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return -1 }
+        return Int(info.resident_size) / 1024 / 1024
+    }
+
     func json() -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
         return ["lastSearch": lastSearch, "requests": requests, "events": events, "logs": logs,
@@ -182,6 +257,11 @@ final class DiagLog {
                 "lxPendingCalls": LXScriptInstance.pendingMusicUrlCalls,
                 // 第 15 轮第 6 件：服务端收到的诊断 POST 数（和 JS 侧
                 // window.__liziDiagCounts().sent 对账）。
-                "diagLogReceived": diagLogReceived]
+                "diagLogReceived": diagLogReceived,
+                // 第 21 轮第 1 件：上次死亡上报（见 markLaunched 注释）。
+                "previousRunClean": previousRunClean,
+                "lastDeathStep": lastDeathStep,
+                "lastDeathAt": lastDeathAt,
+                "lastDeathMemoryMB": lastDeathMemoryMB]
     }
 }

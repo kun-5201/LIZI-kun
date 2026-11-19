@@ -49,6 +49,19 @@ final class AppNavigation: ObservableObject {
         current = view
     }
 
+    /// 进传统播放器（r20 首页大卡片单击 / 双击共用）。
+    ///
+    /// 就是 `show(.player)`：RootView 的 `.player` 分支永远渲染传统
+    /// PlayerView，从不读 `lizi.native.playerMode`，所以进传统不需要、也
+    /// 不应该改持久化键——写 "classic" 反而坏事（`StageCatalog.isAvailable`
+    /// 对 classic 恒为 false，`savedFormId()` 会回落到默认 "001"，下次点
+    /// 舞台就丢了用户上次的形态）。舞台页里点「形态」仍走 `.stage()` 读保存的
+    /// 形态，页内切换的持久化不受影响（播放页顶栏已无舞台入口）。
+    /// 单独成一个方法，只为让“强制传统”这个意图在代码里可 grep、可验。
+    func showClassicPlayer() {
+        show(.player)
+    }
+
     func goHome() {
         current = .home
     }

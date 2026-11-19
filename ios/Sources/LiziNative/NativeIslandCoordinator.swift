@@ -186,7 +186,9 @@ final class NativeIslandCoordinator: ObservableObject {
         guard let image = UIImage(data: data) else { return nil }
         let targetWidth: CGFloat = 120
         guard image.size.width > targetWidth else {
-            return image.jpegData(compressionQuality: 0.8)
+            // 第 20 轮：0.8 → 0.7（120px 实拍封面 q0.8 编后约 5.4KB 必超 4KB
+            // 上限；最终预算由 LiveActivityManager.fittedState 强制执行）。
+            return image.jpegData(compressionQuality: 0.7)
         }
         let scale = targetWidth / image.size.width
         let size = CGSize(width: targetWidth, height: image.size.height * scale)
@@ -194,6 +196,6 @@ final class NativeIslandCoordinator: ObservableObject {
         let resized = renderer.image { _ in
             image.draw(in: CGRect(origin: .zero, size: size))
         }
-        return resized.jpegData(compressionQuality: 0.8)
+        return resized.jpegData(compressionQuality: 0.7)
     }
 }

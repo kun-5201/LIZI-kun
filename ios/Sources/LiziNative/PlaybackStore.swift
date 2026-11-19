@@ -71,6 +71,12 @@ final class PlaybackStore: ObservableObject {
     private var itemStatusObservation: NSKeyValueObservation?
     private var itemObservers: [NSObjectProtocol] = []
     private var playToken = 0
+    /// 在飞的点播任务（r20 集成 L①：`playCurrent` 的 resolve 段包进可存取的
+    /// Task；新点播先取消旧的，旧任务的 resolve 被取消后立刻向上抛
+    /// CancellationError，不再攒出多个无返回的挂死调用；取消时记一条
+    /// `resolve superseded` 面包屑。next()/previous() 都走 play()，
+    /// 所以这里是唯一的取消点）。
+    private var playTask: Task<Void, Never>?
     private var lastFetchVia: String = ""
     private var lastFetchReason: String = ""
     private var proxyTried = false
@@ -217,7 +223,13 @@ final class PlaybackStore: ObservableObject {
             queue = [QueueItem(track: track)]
             currentIndex = 0
         }
-        Task { @MainActor in await playCurrent() }
+        // r20 集成 L①：新点播先取消旧的在飞任务（旧 resolve 被取消后
+        // 立刻向上抛 CancellationError，不再挂死），再起新任务。
+        if let old = playTask, !old.isCancelled {
+            old.cancel()
+            DiagLog.shared.recordPlaybackStep("resolve superseded source=\(track.platform) id=\(track.id)")
+        }
+        playTask = Task { @MainActor in await playCurrent() }
     }
 
     /// 恢复播放。

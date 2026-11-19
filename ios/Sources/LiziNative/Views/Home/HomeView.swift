@@ -9,10 +9,9 @@ import SwiftUI
 /// 3. 平台条（PlatformStripView）：7 家平台横排，点按切台。
 /// 4. 来源 chips（SourceChipsView）：每日推荐 / 精选 / 喜欢（标题按平台取真名） /
 ///    我收藏的歌单 / 电台——P1 用横向 chips，球面滚轮是 P3 打磨项。
-/// 4b. 大厅工具区（P3 r19 集成）：形态长廊入口卡，进 .forms 整页；
-///    球面画廊入口在长廊页内（FormsGalleryView 右下角悬浮按钮），
-///    不在首页重复占位；壳版其余三张卡（我的专辑 / 音乐实验室 / 工具箱）
-///    里我的专辑已有 MyAlbumsEntryView，另两项是 P4 的活，不放死入口。
+/// 4.5 3D 封面环（HomeCoverRingView，r20）：壳版首页下半区 `.ringsec` 的原生版，
+///    位置与壳版一致——Hero 大卡 → 平台条 → 来源 chips 之后、每日推荐 / rails 之前。
+///    内容是播放队列（非空时）或每日推荐（队列为空时），两份都空时不显示。
 /// 5. 内容区：每日推荐 = 跑马带；其余来源 = rail 行（P2：标题 + 横向卡片 +
 ///    点开展开，见 RailRowView；点卡片 / 点展开都进 RailDetailView）。
 /// 6. 本地音乐区占位（P4 的活，只留行，不放假列表）。
@@ -26,60 +25,82 @@ struct HomeView: View {
 
     var body: some View {
         GeometryReader { outer in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    topBar
-                    HeroCardView(
-                        width: outer.size.width - 32,
-                        viewHeight: outer.size.height,
-                        viewModel: viewModel
-                    )
-                    .padding(.horizontal, 16)
-
-                    PlatformStripView(viewModel: viewModel)
-
-                    SourceChipsView(viewModel: viewModel)
-
-                    toolsRow
-
-                    if viewModel.selectedSource == .daily {
-                        DailyMarqueeView(
-                            tracks: viewModel.daily,
-                            isLoading: viewModel.isLoadingDaily,
-                            emptyReason: viewModel.dailyEmptyReason,
-                            speedPxPerSecond: viewModel.marqSpeedPxPerSecond,
-                            onPlay: { index in
-                                // 点一首直接播：整份每日推荐进队列，从该首起播。
-                                playback.setQueue(viewModel.daily.map { $0.track }, startAt: index)
-                            }
+            // r20 顶栏修复：topBar 原来是 ScrollView 里的第一行，往下滚就滚出
+            // 屏幕——QQ/酷狗每日推荐有真内容可翻，用户一翻搜索/设置就不见了；
+            // 其它平台每日为空、没东西可翻，所以显得只有 QQ/酷狗出问题。
+            // 根因与平台切换逻辑无关（selectPlatform 对 7 家同一套），所以
+            // 不修 ViewModel、不加平台分支：只把 topBar 固定在滚动区之外，
+            // 7 个平台同一套固定顶栏。logo 那几行不动（工人 J 在改）。
+            VStack(spacing: 0) {
+                topBar
+                    .padding(.top, 8)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        HeroCardView(
+                            width: outer.size.width - 32,
+                            viewHeight: outer.size.height,
+                            viewModel: viewModel
                         )
                         .padding(.horizontal, 16)
-                    } else if let kind = viewModel.selectedSource.railKind {
-                        // P2：四条 rails 各一行（标题 + 横向卡片 + 点开展开）。
-                        // 点卡片进详情（RailDetailView），不在行里直接播。
-                        // 喜欢 rail 的标题按当前平台取真名（displayTitle），
-                        // 与来源 chip、空态文案、详情页标题同一份事实来源。
-                        RailRowView(
-                            kind: kind,
-                            platform: viewModel.selectedPlatform,
-                            result: viewModel.rails[kind],
-                            isLoading: viewModel.railLoading[kind] ?? false,
-                            onExpand: { viewModel.openRail(kind) },
-                            onRetry: {
-                                Task { await viewModel.loadRail(kind) }
-                            }
+
+                        PlatformStripView(viewModel: viewModel)
+
+                        SourceChipsView(viewModel: viewModel)
+
+                        // r20：首页 3D 封面环（壳版位置：Hero → 平台条 → 来源 chips
+                        // 之后、每日推荐之前；见 HomeCoverRingView 文件头证据）。
+                        // 独立区块：只加这一处接入点，不动 hero / 平台条 /
+                        // 来源 chips / 每日推荐 / rails / 本地音乐任何一行。
+                        // 尺寸档按实测屏宽分（topInset 不参与分档，见 PlayerTokens）。
+                        HomeCoverRingView(
+                            dailyTracks: viewModel.daily.map { $0.track },
+                            tier: PlayerTokens.sizeTier(for: outer.size, topInset: outer.safeAreaInsets.top)
                         )
                         .padding(.horizontal, 16)
-                        if viewModel.selectedSource == .playlists {
-                            MyAlbumsEntryView()
-                                .padding(.horizontal, 16)
+
+                        if viewModel.selectedSource == .daily {
+                            DailyMarqueeView(
+                                tracks: viewModel.daily,
+                                isLoading: viewModel.isLoadingDaily,
+                                emptyReason: viewModel.dailyEmptyReason,
+                                speedPxPerSecond: viewModel.marqSpeedPxPerSecond,
+                                onPlay: { index in
+                                    // 点一首直接播：整份每日推荐进队列，从该首起播。
+                                    playback.setQueue(viewModel.daily.map { $0.track }, startAt: index)
+                                }
+                            )
+                            .padding(.horizontal, 16)
+                        } else if let kind = viewModel.selectedSource.railKind {
+                            // P2：四条 rails 各一行（标题 + 横向卡片 + 点开展开）。
+                            // 点卡片进详情（RailDetailView），不在行里直接播。
+                            // 喜欢 rail 的标题按当前平台取真名（displayTitle），
+                            // 与来源 chip、空态文案、详情页标题同一份事实来源。
+                            RailRowView(
+                                kind: kind,
+                                platform: viewModel.selectedPlatform,
+                                result: viewModel.rails[kind],
+                                isLoading: viewModel.railLoading[kind] ?? false,
+                                onExpand: { viewModel.openRail(kind) },
+                                onRetry: {
+                                    Task { await viewModel.loadRail(kind) }
+                                }
+                            )
+                            .padding(.horizontal, 16)
+                            if viewModel.selectedSource == .playlists {
+                                MyAlbumsEntryView()
+                                    .padding(.horizontal, 16)
+                            }
                         }
-                    }
 
-                    LocalMusicPlaceholderView()
+                        LocalMusicPlaceholderView()
+                    }
+                    // 原来 VStack 的 .padding(.top, 8) 是顶栏上方的 8pt；顶栏移出后
+                    // 这里改成 20pt：48（顶栏区 8+40）+ 20 = 原来 Hero 顶到安全区
+                    // 顶的 68pt，Hero 位置/尺寸一丝不动（outer 仍是全屏尺寸）。
+                    .padding(.top, 20)
+                    .padding(.bottom, 32)
                 }
-                .padding(.top, 8)
-                .padding(.bottom, 32)
+                .background(LiziTokens.paper)
             }
             .background(LiziTokens.paper)
         }
@@ -108,50 +129,11 @@ struct HomeView: View {
         }
     }
 
-    // MARK: - 大厅工具区（P3 r19 集成）
-
-    /// 壳版大厅底部四张入口卡（形态长廊 / 我的专辑 / 音乐实验室 / 工具箱）；
-    /// 原生版 P3 只建成了形态长廊（.forms 整页）与球面画廊（.gallery），
-    /// 我的专辑已有 MyAlbumsEntryView（收藏歌单 rail 区），其余两项是 P4 的活。
-    /// 首页工具区只放形态长廊一张卡，不放死入口；球面画廊入口在长廊页内
-    /// （FormsGalleryView 右下角悬浮按钮）。
-    private var toolsRow: some View {
-        Button(action: { nav.show(.forms) }) {
-            HStack(spacing: 12) {
-                Image(systemName: "square.grid.3x3")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundColor(LiziTokens.accent)
-                    .frame(width: 44, height: 44)
-                    .background(LiziTokens.paper2)
-                    .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("形态长廊")
-                        .font(.liziBody(size: LiziTokens.size16, weight: .semibold))
-                        .foregroundColor(LiziTokens.ink)
-                    Text("\(StageCatalog.menuList(includeClassic: false, releaseOnly: false).count) 种形态 · 点进舞台")
-                        .font(.liziBody(size: LiziTokens.size13))
-                        .foregroundColor(LiziTokens.ink3)
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(LiziTokens.ink3)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(LiziTokens.paper2)
-            .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("形态长廊")
-        .padding(.horizontal, 16)
-    }
-
     // MARK: - 顶栏
 
     private var topBar: some View {
         HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text("LIZI")
                     .font(.liziDisplay(size: LiziTokens.size25))
                     .foregroundColor(LiziTokens.ink)

@@ -2,11 +2,17 @@ import SwiftUI
 
 /// 3D 封面流（播放页上半部分），数值照抄壳版 `app.css` 的 `.cf` 一套：
 ///
-/// - 轨道高 254px、透视 1100；单张 188×188、圆角 14、下方倒影（`below 8px`）。
-/// - 当前张居中放大 1.04；两侧 ±128px / ±224px、rotateY ±40°/±50°、
-///   translateZ -110/-200、透明度 0.88/0.5，共显示 5 张。
-/// - 歌词面板拉起时收小一档（壳版 `.is-lyrics-open`）：轨道 198px、单张 148px、
-///   两侧 ±104px/±182px、纵深 -90/-160。
+/// - 透视 1100；单张圆角 14、下方倒影（`below 8px`，沿用 `CoverReflectionView`）。
+/// - 当前张居中放大 1.04；两侧按单张边长等比偏移（标准档 ±128px / ±224px，
+///   即边长 × 128/188、× 224/188）、rotateY ±40°/±50°、translateZ -110/-200、
+///   透明度 0.88/0.5，共显示 5 张。
+/// - 尺寸走分档（r20）：单张边长 `PlayerTokens.coverItem(tier)`、轨道高
+///   `PlayerTokens.coverTrackHeight(tier)`；轨道高含倒影（单张 + 间距 8 +
+///   倒影 单张 × 0.3，见 `PlayerTokens` 总账注释）。
+/// - r20 删掉了歌词面板拉起收小那套（旧 `coverFlowItemSizeCompact` /
+///   `coverFlowTrackHeightCompact` 已随旧常量删除）：封面流尺寸只由 tier
+///   决定，不再随面板展开态变化。`isCompact` 参数仅作兼容保留（默认值
+///   false），调用方不要再传它；它不参与任何尺寸计算。
 /// - 滑动方向照抄壳版第 13 轮第 16 件（和首页大卡同一方向）：左滑上一首、
 ///   右滑下一首；阈值 56px。上一首直接按队列下标（不走 `previous()` 的
 ///   “进度 > 3 秒先回开头”分支）；下一首走 `next()`（顺序到底停住、循环回首，
@@ -19,7 +25,10 @@ import SwiftUI
 struct CoverFlowView: View {
     @EnvironmentObject private var store: PlaybackStore
 
-    /// 歌词面板拉起时为 true（封面流收小，给歌词留地方）。
+    /// 尺寸档（调用方按实测屏宽经 `PlayerTokens.sizeTier(for:topInset:)` 传入）。
+    var tier: PlayerTokens.PlayerSizeTier = .standard
+    /// 兼容保留：r20 起不再参与尺寸计算（歌词面板拉起收小的逻辑已删），
+    /// 调用方不要再传它；留着只为不断旧调用点的编译。
     var isCompact: Bool = false
     /// 点队列行切歌以外的切歌回调（默认直接调 store；调用方一般不用传）。
     var onSelectIndex: ((Int) -> Void)? = nil
@@ -30,11 +39,11 @@ struct CoverFlowView: View {
     private static let swipeThreshold: CGFloat = 56
 
     private var itemSize: CGFloat {
-        isCompact ? PlayerTokens.coverFlowItemSizeCompact : PlayerTokens.coverFlowItemSize
+        PlayerTokens.coverItem(tier)
     }
 
     private var trackHeight: CGFloat {
-        isCompact ? PlayerTokens.coverFlowTrackHeightCompact : PlayerTokens.coverFlowTrackHeight
+        PlayerTokens.coverTrackHeight(tier)
     }
 
     /// 显示的 5 个位置：相对当前下标的偏移 -2…+2（队首/队尾处自然变少，不补假数据）。
@@ -93,10 +102,9 @@ struct CoverFlowView: View {
             }
         }
         .animation(.easeOut(duration: 0.38), value: store.currentIndex)
-        .animation(.easeOut(duration: 0.38), value: isCompact)
     }
 
-    // MARK: - 变换表（照抄 app.css .cf__item[data-off]）
+    // MARK: - 变换表（照抄 app.css .cf__item[data-off]，偏移按边长等比）
 
     private struct Metrics {
         var offsetX: CGFloat
@@ -106,13 +114,14 @@ struct CoverFlowView: View {
     }
 
     private func metrics(for offset: Int) -> Metrics {
-        // 侧张横向偏移：常规 128/224；收小档 104/182。
-        let step1: CGFloat = isCompact ? 104 : 128
-        let step2: CGFloat = isCompact ? 182 : 224
+        // 侧张横向偏移：标准档 128/224（边长 188）；按边长等比缩放，
+        // compact 168 → 114/200，large 208 → 142/248。
+        let step1: CGFloat = itemSize * 128 / 188
+        let step2: CGFloat = itemSize * 224 / 188
         // translateZ 的透视缩放：scale = 1100 / (1100 + |z|)。
-        // 常规 -110 → 0.91、-200 → 0.85；收小档 -90 → 0.92、-160 → 0.87。
-        let z1: CGFloat = isCompact ? 90 : 110
-        let z2: CGFloat = isCompact ? 160 : 200
+        // -110 → 0.91、-200 → 0.85（各档同值，不随 tier 变）。
+        let z1: CGFloat = 110
+        let z2: CGFloat = 200
         switch offset {
         case 0:
             return Metrics(offsetX: 0, scale: 1.04, rotateY: 0, opacity: 1)

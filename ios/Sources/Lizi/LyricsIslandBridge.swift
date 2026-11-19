@@ -416,7 +416,9 @@ final class LiziIslandCoordinator {
         UIGraphicsBeginImageContextWithOptions(target, false, 1.0)
         defer { UIGraphicsEndImageContext() }
         image.draw(in: CGRect(origin: .zero, size: target))
-        return UIGraphicsGetImageFromCurrentImageContext()?.jpegData(compressionQuality: 0.8)
+        // 第 20 轮：0.8 → 0.7（同 NativeIslandCoordinator；最终预算由
+        // LiveActivityManager.fittedState 强制执行）。
+        return UIGraphicsGetImageFromCurrentImageContext()?.jpegData(compressionQuality: 0.7)
     }
 
     /// 歌停了时收掉岛。平时靠 staleDate 10s 自动消失，这里是显式收尾。

@@ -11,8 +11,9 @@ import SwiftUI
 ///   （播放中三角变均衡条动画，照抄壳版 .hall-hero__play-bars）。
 /// - 右上角锁按钮：有海报时才出现；锁定 = 闭锁图标，解锁 = 开锁图标；
 ///   状态 UserDefaults 持久化（`lizi.native.hall.heroLocked`），默认解锁。
-/// - 点按整卡进播放页；左右滑切歌（左滑 = 上一首、右滑 = 下一首，
-///   锁定时失效）。上下拖动改卡片尺寸是 P5 的活，P1 不做；
+/// - 点按整卡进播放页；双击整卡也进播放页（r20：单 / 双击都落传统
+///   PlayerView，见 `openClassicPlayer()`）。左右滑切歌（左滑 = 上一首、
+///   右滑 = 下一首，锁定时失效）。上下拖动改卡片尺寸是 P5 的活，P1 不做；
 ///   竖向滚动用 simultaneousGesture 保证不被横滑手势吃掉。
 /// - 壳版悬停才展开的歌词 / 方形封面是桌面 hover 交互，原生触屏没有 hover，
 ///   P1 不做；歌词在播放页看。
@@ -148,7 +149,27 @@ struct HeroCardView: View {
         .clipShape(RoundedRectangle(cornerRadius: 3))
         .shadow(color: .black.opacity(0.25), radius: 30, x: 0, y: 18)
         .contentShape(Rectangle())
-        .onTapGesture { nav.show(.player) }
+        // r20 双击进播放页：双击优先、单击兜底的排他组合，一只手势包办单 / 双击。
+        // - `TapGesture(count: 2).exclusively(before: TapGesture(count: 1))`：
+        //   系统先等双击窗口（约 0.3 秒）：两下都落在卡片上 → 只走双击分支，
+        //   单击分支绝不触发；只有一下、双击失败 → 才走单击分支。
+        //   所以双击一次只进一次播放页（且单击动作要等双击窗口过后才执行，
+        //   轻微延迟是这个写法的固有代价，任务书已接受）。
+        // - 不能写成两个独立的 `.onTapGesture`（一个 count: 1、一个 count: 2）：
+        //   两个手势互不协调，双击会先触发两次单击再触发双击。
+        // - 滑动不会误触双击：滑动是一次连续触摸、只有一次抬手，成不了两次
+        //   点按；且手指移动超出点按容差后两个 TapGesture 都会失败，
+        //   下面 simultaneousGesture 里的 DragGesture 照常接管切歌。
+        // - 卡片里的三个 Button（锁 / 打开歌单 / 播放键）是子视图手势，
+        //   优先级高于父视图的 `.gesture`，点它们时父手势不触发，和原来
+        //   `.onTapGesture` 时的行为一致；双击锁按钮只会开关锁两次，不进播放页。
+        // - 禁缩放：这里没有任何捏合手势。
+        .gesture(
+            TapGesture(count: 2)
+                .onEnded { openClassicPlayer() }
+                .exclusively(before: TapGesture(count: 1)
+                    .onEnded { openClassicPlayer() })
+        )
         .simultaneousGesture(
             DragGesture(minimumDistance: 24, coordinateSpace: .local)
                 .onEnded { value in
@@ -162,6 +183,25 @@ struct HeroCardView: View {
                     if dx < 0 { playback.previous() } else { playback.next() }
                 }
         )
+    }
+
+    /// 进传统播放器（单击 / 双击大卡片共用；「打开歌单」按钮走同一路由）。
+    ///
+    /// 强制传统的办法就是只走 `.player` 路由、不碰持久化键：
+    /// RootView 的 `.player` 分支永远渲染传统 PlayerView，从不读
+    /// `lizi.native.playerMode`，所以不管上次停留在哪个舞台形态，进来的
+    /// 都是传统播放器；同时也不改键，舞台页里点「形态」仍走 `.stage()`、
+    /// 默认读保存的形态，页内切换的持久化不受影响（播放页顶栏已无舞台
+    /// 入口，r20 首页也已去舞台，舞台只从形态选择器进）。
+    /// 千万别在这里 `StageCatalog.saveFormId("classic")`：
+    /// `isAvailable(classic)` 恒为 false（classic 没有 HTML 文件），
+    /// `savedFormId()` 读到 "classic" 会回落到默认 "001"，下次点舞台就
+    /// 丢了用户上次用的形态。
+    ///
+    /// 空态：`track == nil` 时也照常进 `.player`，和单击现有行为一致；
+    /// PlayerView 自带空态（标题「未在播放」），不编假数据、不崩。
+    private func openClassicPlayer() {
+        nav.showClassicPlayer()
     }
 
     private func togglePlay() {

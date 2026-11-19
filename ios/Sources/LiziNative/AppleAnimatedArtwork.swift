@@ -131,8 +131,17 @@ final class AppleAnimatedArtworkProvider {
     private var webTokenExp: Date?
     /// 进行中的 prepare：同 key 的并发请求合并，只拉一次。
     private var inflight: [String: [(Bool) -> Void]] = [:]
-    /// 否定结果（无素材 / 匹配不上）：key → 记入时间，7 天内不再重复查。
-    private var negatives: [String: Date] = [:]
+    /// 否定结果（无素材 / 匹配不上）：key →（记入时间，结论 lane），7 天内不再重复查。
+    /// lane 跟着存：否定缓存命中时也要按首歌把结论重记一笔，否则 7 天内再播
+    /// 这首歌，诊断里看不到路线 B 的任何结论（r20 补）。
+    private var negatives: [String: (date: Date, lane: String)] = [:]
+    /// 最近一次按 key 落定的路线 B 结论 lane（五个结论之一）：prepare 同 key
+    /// 合并调用（第二首歌）回调时，按这个 lane 给那首歌补记一笔。
+    private var lastConclusion: [String: String] = [:]
+    /// 本次 resolve 里 amp-api 失败过的 key（token/网络/限流）：ampGet 全部
+    /// 尝试耗尽时记入。resolve 据此把“查不到”与“没查成”分开——没查成记
+    /// route-b-download-failed，不记否定（瞬时问题，下次还查）；只有确定
+    /// “无匹配 / 无 editorialVideo”才记否定（r20 补）。
 
     private init() {}
 
@@ -163,11 +172,42 @@ final class AppleAnimatedArtworkProvider {
     /// 竖版到手回调 true，任何失败回调 false（调用方走路线 A）。
     /// 同 key 并发调用合并为一次网络请求。
     func prepare(for track: Track, onReady: @escaping (Bool) -> Void) {
-        guard let key = albumKey(for: track) else { onReady(false); return }
-        if isReady(key: key) { onReady(true); return }
+        guard let key = albumKey(for: track) else {
+            // 歌手或专辑名为空（单曲常无专辑名）：路线 B 匹配不了，直接认栽，
+            // 调用方走路线 A。记一笔——否则“《海嶼你》这类歌 B 为什么没动”
+            // 在诊断里完全看不到。
+            DiagLog.shared.recordLog(category: "apple-animated-artwork",
+                message: "route B skipped, no artist/album to match track=\(track.title) artist=\(track.artist) album=\(track.album)",
+                fields: ["lane": "route-b-no-key", "platform": track.platform])
+            onReady(false); return
+        }
+        if isReady(key: key) {
+            // 缓存已就绪也是一个结论：记 route-b-ready，否则已缓存的专辑再播时
+            // 诊断里看不到路线 B 的任何结论（r20 补：用户体感“全是本地生成”
+            // 的一半原因——真视频明明已缓存挂上，诊断却没留痕）。
+            lock.lock(); lastConclusion[key] = "route-b-ready"; lock.unlock()
+            DiagLog.shared.recordLog(category: "apple-animated-artwork",
+                message: "route B ready (cached) track=\(track.title) artist=\(track.artist) album=\(track.album)",
+                fields: ["lane": "route-b-ready", "platform": track.platform])
+            onReady(true); return
+        }
         lock.lock()
         if inflight[key] != nil {
-            inflight[key]?.append(onReady)
+            // 同 key 第二首歌（同专辑另一首歌在 resolve 还没完时切来）：等首歌
+            // 的 resolve 落定后，按落定的 lane 给这首歌也记一笔结论（r20 补），
+            // 否则这首歌在诊断里没有路线 B 结论。
+            let wrapped: (Bool) -> Void = { [weak self] ok in
+                guard let self else { onReady(ok); return }
+                self.lock.lock()
+                let lane = self.lastConclusion[key] ?? (ok ? "route-b-ready" : "route-b-download-failed")
+                self.lock.unlock()
+                let short = lane.replacingOccurrences(of: "route-b-", with: "")
+                DiagLog.shared.recordLog(category: "apple-animated-artwork",
+                    message: "route B \(short) (shared prepare) track=\(track.title) artist=\(track.artist) album=\(track.album)",
+                    fields: ["lane": lane, "platform": track.platform])
+                onReady(ok)
+            }
+            inflight[key]?.append(wrapped)
             lock.unlock()
             return
         }
@@ -218,11 +258,18 @@ final class AppleAnimatedArtworkProvider {
 
     /// 解析专辑并下载两版视频。返回 true = 竖版已就绪（方形尽力而为）。
     private func resolveAndDownload(track: Track, key: String) async -> Bool {
-        // 否定结果在有效期内：直接认栽，不重复查。
+        // 否定结果在有效期内：直接认栽，不重复查——但结论要重记一笔（r20 补）：
+        // 否则 7 天内再播这首歌，诊断里看不到路线 B 的任何结论。
         lock.lock()
-        let negAt = negatives[key]
+        let neg = negatives[key]
+        ampFailedKeys.remove(key)
         lock.unlock()
-        if let at = negAt, Date().timeIntervalSince(at) < Self.negativeTTL {
+        if let neg, Date().timeIntervalSince(neg.date) < Self.negativeTTL {
+            lock.lock(); lastConclusion[key] = neg.lane; lock.unlock()
+            let short = neg.lane.replacingOccurrences(of: "route-b-", with: "")
+            DiagLog.shared.recordLog(category: "apple-animated-artwork",
+                message: "route B \(short) (cached negative) track=\(track.title) artist=\(track.artist) album=\(track.album)",
+                fields: ["lane": neg.lane, "platform": track.platform])
             return false
         }
         // 1. 拿专辑 id + 所在店面（hint 路径顺带把 editorialVideo 也拿了，免得再查一次）。
@@ -231,7 +278,7 @@ final class AppleAnimatedArtworkProvider {
         if track.platform == "applemusic" {
             if let hint = appleAlbumIdHint(for: track) {
                 for sf in Self.storefronts {
-                    if let ed = await fetchEditorialVideo(albumId: hint, storefront: sf) {
+                    if let ed = await fetchEditorialVideo(albumId: hint, storefront: sf, key: key) {
                         album = (hint, sf)
                         editorial = ed
                         break
@@ -239,22 +286,55 @@ final class AppleAnimatedArtworkProvider {
                 }
             }
             if album == nil, let songId = appleSongId(for: track) {
-                album = await albumIdForSong(songId)
+                album = await albumIdForSong(songId, key: key)
             }
         }
         if album == nil {
-            album = await albumIdBySearch(artist: track.artist, album: track.album)
+            album = await albumIdBySearch(artist: track.artist, album: track.album, key: key)
         }
         guard let album else {
-            markNegative(key)
+            // 查不到分两种：amp-api 没查成（token/网络/限流）→ download-failed，
+            // 不记否定；真查了没匹配上 → no-match，记否定（r20 补：之前两种
+            // 都记 no-match，token 死掉时全锅都算到“匹配不上”头上）。
+            lock.lock()
+            let ampFailed = ampFailedKeys.contains(key)
+            lock.unlock()
+            if ampFailed {
+                lock.lock(); lastConclusion[key] = "route-b-download-failed"; lock.unlock()
+                DiagLog.shared.recordLog(category: "apple-animated-artwork",
+                    message: "route B amp-api failed, album lookup inconclusive track=\(track.title) artist=\(track.artist) album=\(track.album)",
+                    fields: ["lane": "route-b-download-failed", "platform": track.platform])
+                return false
+            }
+            markNegative(key, lane: "route-b-no-match")
+            lock.lock(); lastConclusion[key] = "route-b-no-match"; lock.unlock()
+            DiagLog.shared.recordLog(category: "apple-animated-artwork",
+                message: "route B no album match track=\(track.title) artist=\(track.artist) album=\(track.album)",
+                fields: ["lane": "route-b-no-match", "platform": track.platform])
             return false
         }
         // 2. 拉 editorialVideo（hint 路径已拿到就不再拉）。
         if editorial == nil {
-            editorial = await fetchEditorialVideo(albumId: album.id, storefront: album.storefront)
+            editorial = await fetchEditorialVideo(albumId: album.id, storefront: album.storefront, key: key)
         }
         guard let editorial else {
-            markNegative(key)
+            // 同上：没查成（token/网络）→ download-failed 不记否定；
+            // 真查了专辑无 editorialVideo → no-video，记否定。
+            lock.lock()
+            let ampFailed = ampFailedKeys.contains(key)
+            lock.unlock()
+            if ampFailed {
+                lock.lock(); lastConclusion[key] = "route-b-download-failed"; lock.unlock()
+                DiagLog.shared.recordLog(category: "apple-animated-artwork",
+                    message: "route B amp-api failed, editorialVideo lookup inconclusive albumId=\(album.id) storefront=\(album.storefront) track=\(track.title)",
+                    fields: ["lane": "route-b-download-failed", "albumId": album.id, "storefront": album.storefront, "platform": track.platform])
+                return false
+            }
+            markNegative(key, lane: "route-b-no-video")
+            lock.lock(); lastConclusion[key] = "route-b-no-video"; lock.unlock()
+            DiagLog.shared.recordLog(category: "apple-animated-artwork",
+                message: "route B album has no editorialVideo albumId=\(album.id) storefront=\(album.storefront) track=\(track.title)",
+                fields: ["lane": "route-b-no-video", "albumId": album.id, "storefront": album.storefront, "platform": track.platform])
             return false
         }
         // 3. 两版视频各下一份（竖版是主用，方形尽力）。
@@ -262,21 +342,35 @@ final class AppleAnimatedArtworkProvider {
         async let square = downloadAspect(editorial: editorial, key: key, aspect: .square)
         let portraitOK = await portrait
         _ = await square
-        if portraitOK { pruneCache(keeping: key) }
-        if !portraitOK { markNegative(key) }
+        if portraitOK {
+            pruneCache(keeping: key)
+            lock.lock(); lastConclusion[key] = "route-b-ready"; lock.unlock()
+            DiagLog.shared.recordLog(category: "apple-animated-artwork",
+                message: "route B ready albumId=\(album.id) storefront=\(album.storefront) track=\(track.title)",
+                fields: ["lane": "route-b-ready", "albumId": album.id, "storefront": album.storefront, "platform": track.platform])
+        } else {
+            // r20：视频下载失败不记否定——下载失败多是瞬时网络/限流问题，
+            // 记 7 天否定会把一首明明有真素材的专辑判死 7 天（进程内），
+            // 下次 prepare 直接认栽、连重试的机会都没有；只有“无匹配 /
+            // 专辑根本无 editorialVideo”这两种确定性结论才记否定（见上）。
+            lock.lock(); lastConclusion[key] = "route-b-download-failed"; lock.unlock()
+            DiagLog.shared.recordLog(category: "apple-animated-artwork",
+                message: "route B video download failed albumId=\(album.id) storefront=\(album.storefront) track=\(track.title)",
+                fields: ["lane": "route-b-download-failed", "albumId": album.id, "storefront": album.storefront, "platform": track.platform])
+        }
         return portraitOK
     }
 
-    private func markNegative(_ key: String) {
+    private func markNegative(_ key: String, lane: String) {
         lock.lock()
-        negatives[key] = Date()
+        negatives[key] = (Date(), lane)
         lock.unlock()
     }
 
     /// 单曲 → 专辑：songs/{id}?include=albums，取 relationships.albums.data[0].id。
-    private func albumIdForSong(_ songId: String) async -> (id: String, storefront: String)? {
+    private func albumIdForSong(_ songId: String, key: String) async -> (id: String, storefront: String)? {
         for sf in Self.storefronts {
-            guard let data = try? await ampGet(path: "/v1/catalog/\(sf)/songs/\(songId)?include=albums"),
+            guard let data = try? await ampGet(path: "/v1/catalog/\(sf)/songs/\(songId)?include=albums", key: key),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let list = json["data"] as? [[String: Any]],
                   let first = list.first,
@@ -292,14 +386,14 @@ final class AppleAnimatedArtworkProvider {
     /// 其他平台的歌：按 "歌手 专辑名" 在 amp-api 搜专辑，首个双向匹配的才算命中。
     /// 只比歌手 + 专辑名，不比歌名（同一专辑的歌共用一个动态封面；歌名不参与匹配，
     /// 免得单曲与专辑版同名不同盘时配错）。
-    private func albumIdBySearch(artist: String, album: String) async -> (id: String, storefront: String)? {
+    private func albumIdBySearch(artist: String, album: String, key: String) async -> (id: String, storefront: String)? {
         let artist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
         let albumName = album.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !artist.isEmpty, !albumName.isEmpty else { return nil }
         let term = "\(artist) \(albumName)"
         guard let encoded = term.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
         for sf in Self.storefronts {
-            guard let data = try? await ampGet(path: "/v1/catalog/\(sf)/search?types=albums&term=\(encoded)&limit=5"),
+            guard let data = try? await ampGet(path: "/v1/catalog/\(sf)/search?types=albums&term=\(encoded)&limit=5", key: key),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let results = json["results"] as? [String: Any],
                   let albums = results["albums"] as? [String: Any],
@@ -337,8 +431,8 @@ final class AppleAnimatedArtworkProvider {
 
     /// 拉一张专辑的 editorialVideo（无此字段返回 nil = 该专辑没有真素材）。
     /// 注意：官方 api.music.apple.com 同 token 返回 200 但无此字段，必须走 amp-api。
-    private func fetchEditorialVideo(albumId: String, storefront: String) async -> [String: Any]? {
-        guard let data = try? await ampGet(path: "/v1/catalog/\(storefront)/albums/\(albumId)?extend=editorialVideo"),
+    private func fetchEditorialVideo(albumId: String, storefront: String, key: String) async -> [String: Any]? {
+        guard let data = try? await ampGet(path: "/v1/catalog/\(storefront)/albums/\(albumId)?extend=editorialVideo", key: key),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let list = json["data"] as? [[String: Any]],
               let first = list.first,
@@ -426,7 +520,9 @@ final class AppleAnimatedArtworkProvider {
 
     /// amp-api GET：必须带 Origin，否则 401。先试用户 token（有就优先用自己的配额），
     /// 401/403 时改用网页 token 各重试一次；网页 token 过期/失效时重抠一次。
-    private func ampGet(path: String) async throws -> Data {
+    /// key：本次 resolve 的专辑键——全部尝试耗尽时把 key 记进 ampFailedKeys，
+    /// 调用方据此把“没查成”（token/网络/限流）与“查了没有”分开记（r20 补）。
+    private func ampGet(path: String, key: String) async throws -> Data {
         guard let url = URL(string: "https://amp-api.music.apple.com" + path) else {
             throw AmpError.http(0)
         }
@@ -464,6 +560,9 @@ final class AppleAnimatedArtworkProvider {
                 lastError = error
             }
         }
+        // 全部尝试耗尽：把 key 记进 ampFailedKeys，调用方据此把“没查成”
+        // 与“查了没有”分开记（r20 补）；不记否定，下次还查。
+        lock.lock(); ampFailedKeys.insert(key); lock.unlock()
         throw lastError ?? AmpError.noToken
     }
 

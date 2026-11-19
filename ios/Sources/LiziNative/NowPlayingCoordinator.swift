@@ -33,11 +33,24 @@ final class NowPlayingCoordinator: ObservableObject {
     private static let animatedArtworkKey = "lizi.animatedArtwork"
 
     private var lastArtwork: MPMediaItemArtwork?
+    /// lastArtwork 属于哪首歌（r20：之前只凭 lastTrackId == track.id 认，
+    /// 但 lastTrackId 在 writeNowPlaying 末尾就先推进到新歌、封面下载还没完，
+    /// 5 秒进度复写会在新歌下载窗口里把上一首的静态图挂到新歌头上——
+    /// 静态图没有“上一首兜底”的需求，错挂就是错歌的封面，必须按归属认）。
+    private var lastArtworkTrackId: String?
     private var lastCoverURL: String?
     private var lastCoverKey: String?
     private var lastTrackId: String?
     private var lastPlaying: Bool = false
     private var lastReassertAt: Date = .distantPast
+    /// 挂载诊断上次记过的值（只在曲目或挂载结果变化时记，避免 5 秒进度
+    /// 复写把 DiagLog（上限 100 条）刷满）。
+    private var lastMountDiagTrackId: String?
+    private var lastMountDiagDesc: String?
+    /// 封面拉取已耗尽的曲目（下载失败 + 10 秒重试也失败）：writeNowPlaying
+    /// 不再为它重拉（lastArtwork == nil 时每 5 秒进度复写都会触发重拉，
+    /// 会无限重试）；切走再切回（lastTrackId 变化）仍会重拉。
+    private var coverFailedTrackId: String?
 
     func bind(store: PlaybackStore) {
         self.store = store
@@ -79,6 +92,23 @@ final class NowPlayingCoordinator: ObservableObject {
             return
         }
         reassertRemoteCommandsIfNeeded()
+        // r20 切歌埋点：只在曲目变化的那一次记（lastTrackId 在本函数末尾才
+        // 推进，后续 5 秒进度复写不再重复记）。track id / 封面 host / 本歌
+        // 的 A 键与 B 键一次记全，下次真机复现直接定位到最后一步。
+        let coverHost = track.coverURL?.host ?? "-"
+        let aKey: String
+        if let url = track.coverURL, !url.absoluteString.isEmpty {
+            aKey = AnimatedArtworkManager.key(forCoverURL: url.absoluteString)
+        } else {
+            aKey = AnimatedArtworkManager.defaultKey
+        }
+        let bKey = AppleAnimatedArtworkProvider.shared.albumKey(for: track) ?? "-"
+        if lastTrackId != track.id {
+            DiagLog.shared.recordLog(category: "animated-artwork",
+                message: "track changed id=\(track.id) platform=\(track.platform) title=\(track.title) coverHost=\(coverHost) aKey=\(aKey) bKey=\(bKey)",
+                fields: ["lane": "track-changed", "platform": track.platform, "trackId": track.id,
+                         "coverHost": coverHost, "aKey": aKey, "bKey": bKey])
+        }
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: track.title,
             MPNowPlayingInfoPropertyPlaybackRate: store.isPlaying ? 1.0 : 0.0,
@@ -89,70 +119,116 @@ final class NowPlayingCoordinator: ObservableObject {
             info[MPMediaItemPropertyPlaybackDuration] = store.duration
             info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = store.progress
         }
-        if let art = lastArtwork, lastTrackId == track.id {
+        // 静态图只挂归属本歌的那一张（r20：见 lastArtworkTrackId 注释，
+        // 之前按 lastTrackId 认会在新歌下载窗口里错挂上一首的静态图）。
+        if let art = lastArtwork, lastArtworkTrackId == track.id {
             info[MPMediaItemPropertyArtwork] = art
         }
-        // iOS 26+ 动态封面：先问路线 B（Apple 官方真视频），就绪就挂真视频；
-        // 未就绪（首次切歌专辑解析还没回来）直接走路线 A，不等。
-        if #available(iOS 26.0, *), animatedArtworkEnabled,
-           let appleKey = AppleAnimatedArtworkProvider.shared.albumKey(for: track),
-           AppleAnimatedArtworkProvider.shared.isReady(key: appleKey) {
+        // iOS 26+ 动态封面：3x4 与 1x1 两个键各自先问路线 B（Apple 官方真视频），
+        // B 没挂上再走路线 A（本地生成）；两个键都挂不上才回静态。
+        // 不用整段 if/else——B 竖版就绪但方形缺失的半截状态不能把 A 也挡掉（r20）：
+        // r19 的写法是 B 分支一旦进入（isReady 为真）就不再试 A，B 只挂上一个键
+        // 或一个键都没挂上时，另一个键本可以由 A 补上却被跳过。
+        var route3x4 = "none"
+        var route1x1 = "none"
+        if #available(iOS 26.0, *), animatedArtworkEnabled {
             let supported = MPNowPlayingInfoCenter.supportedAnimatedArtworkKeys
-            if supported.contains(MPNowPlayingInfoProperty3x4AnimatedArtwork),
-               let art = AppleAnimatedArtworkProvider.shared.artwork(forKey: appleKey, aspect: .portrait) {
-                info[MPNowPlayingInfoProperty3x4AnimatedArtwork] = art
-            }
-            if supported.contains(MPNowPlayingInfoProperty1x1AnimatedArtwork),
-               let art = AppleAnimatedArtworkProvider.shared.artwork(forKey: appleKey, aspect: .square) {
-                info[MPNowPlayingInfoProperty1x1AnimatedArtwork] = art
-            }
-        } else {
-            // 路线 A：只挂 supportedAnimatedArtworkKeys 里在列的键；
-            // 本歌视频没就绪就挂上一首的缓存，不要静默变回静态。
-            if #available(iOS 26.0, *), animatedArtworkEnabled,
-               let animKey = animatedArtworkKeyForCurrentTrack() {
-                let supported = MPNowPlayingInfoCenter.supportedAnimatedArtworkKeys
-                if supported.contains(MPNowPlayingInfoProperty3x4AnimatedArtwork),
-                   let art = AnimatedArtworkManager.shared.artwork(forKey: animKey, aspect: .portrait) {
+            let appleKey = AppleAnimatedArtworkProvider.shared.albumKey(for: track)
+            let appleReady = appleKey.map { AppleAnimatedArtworkProvider.shared.isReady(key: $0) } ?? false
+            if supported.contains(MPNowPlayingInfoProperty3x4AnimatedArtwork) {
+                if let key = appleKey, appleReady,
+                   let art = AppleAnimatedArtworkProvider.shared.artwork(forKey: key, aspect: .portrait) {
                     info[MPNowPlayingInfoProperty3x4AnimatedArtwork] = art
+                    route3x4 = "B"
+                } else if let animKey = animatedArtworkKeyForCurrentTrack(),
+                          let art = AnimatedArtworkManager.shared.artwork(forKey: animKey, aspect: .portrait) {
+                    info[MPNowPlayingInfoProperty3x4AnimatedArtwork] = art
+                    route3x4 = "A"
                 }
-                if supported.contains(MPNowPlayingInfoProperty1x1AnimatedArtwork),
-                   let art = AnimatedArtworkManager.shared.artwork(forKey: animKey, aspect: .square) {
+            }
+            if supported.contains(MPNowPlayingInfoProperty1x1AnimatedArtwork) {
+                if let key = appleKey, appleReady,
+                   let art = AppleAnimatedArtworkProvider.shared.artwork(forKey: key, aspect: .square) {
                     info[MPNowPlayingInfoProperty1x1AnimatedArtwork] = art
+                    route1x1 = "B"
+                } else if let animKey = animatedArtworkKeyForCurrentTrack(),
+                          let art = AnimatedArtworkManager.shared.artwork(forKey: animKey, aspect: .square) {
+                    info[MPNowPlayingInfoProperty1x1AnimatedArtwork] = art
+                    route1x1 = "A"
                 }
             }
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         lastPlaying = store.isPlaying
-        // 封面还没到货（或换歌了）就去拉，到了补写一次。
-        if lastTrackId != track.id || lastArtwork == nil {
+        logAnimatedMountIfChanged(track: track, route3x4: route3x4, route1x1: route1x1,
+                                  aKey: aKey, bKey: bKey, coverHost: coverHost)
+        // 封面还没到货（或换歌了）就去拉，到了补写一次。封面已拉取失败耗尽的
+        // 歌不再重拉（coverFailedTrackId 守门，见上）；切歌时 lastTrackId 变化
+        // 仍会重拉。
+        if lastTrackId != track.id || (lastArtwork == nil && coverFailedTrackId != track.id) {
             lastTrackId = track.id
             Task { await fetchArtwork(for: track) }
         }
     }
 
-    /// 当前歌挂哪个动态视频：本歌的视频就绪就挂本歌的；没就绪就挂上一首的缓存。
+    /// 锁屏挂载诊断：曲目或挂载结果变化时记一条（路线/开关/键），静态还是
+    /// 动态、走的哪条路线，下次真机复现直接从设置 → 诊断日志看最后一步。
+    /// r20：desc 里带本歌的 A 键与 B 键——挂载从“上一首兜底”切到“本歌”
+    /// 的那一次会再记一条，锁屏上到底挂的是哪首歌的视频一眼能对上。
+    private func logAnimatedMountIfChanged(track: Track, route3x4: String, route1x1: String,
+                                           aKey: String, bKey: String, coverHost: String) {
+        let desc = "enabled=\(animatedArtworkEnabled) 3x4=\(route3x4) 1x1=\(route1x1) aKey=\(aKey) bKey=\(bKey)"
+        guard lastMountDiagTrackId != track.id || lastMountDiagDesc != desc else { return }
+        lastMountDiagTrackId = track.id
+        lastMountDiagDesc = desc
+        DiagLog.shared.recordLog(category: "animated-artwork",
+            message: "lock screen artwork mounted track=\(track.title) artist=\(track.artist) platform=\(track.platform) coverHost=\(coverHost) \(desc)",
+            fields: ["lane": "animated-mount", "route3x4": route3x4, "route1x1": route1x1,
+                     "enabled": animatedArtworkEnabled, "platform": track.platform,
+                     "trackId": track.id, "aKey": aKey, "bKey": bKey, "coverHost": coverHost])
+    }
+
+    /// 当前歌挂哪个动态视频：本歌的竖版视频就绪就挂本歌的；没就绪就挂上一首的缓存。
+    /// 只看竖版就绪（锁屏用竖版；方形只是 1x1 备用，r20 之前要求两个尺寸都在，
+    /// 方形一失败竖版也被拖死）。
     private func animatedArtworkKeyForCurrentTrack() -> String? {
-        if let key = lastCoverKey, AnimatedArtworkManager.shared.isReady(key: key) { return key }
+        if let key = lastCoverKey, AnimatedArtworkManager.shared.isReady(key: key, aspect: .portrait) { return key }
         return AnimatedArtworkManager.shared.fallbackKey(for: lastCoverKey ?? "")
     }
 
     /// 锁屏专辑图：先走 https 下整张原图；到货后写静态 artwork，并触发
     /// AnimatedArtworkManager 渲染动态视频（就绪后 onReady 回调补写 Now Playing）。
     private func fetchArtwork(for track: Track) async {
-        guard let url = track.coverURL else {
+        // 换歌了，上一首的失败标记清掉（重试只针对同一首歌耗尽时守门）。
+        if coverFailedTrackId != track.id { coverFailedTrackId = nil }
+        // 路线 B 不依赖封面（匹配只用歌手+专辑名）：一进来就并行准备真视频，
+        // 别让它等封面下载——r20 之前 B 的 prepare 排在封面下载之后，封面
+        // 下载慢/失败时 B 连尝试的机会都没有。就绪后回调里重写一次
+        // Now Playing 挂上；无素材什么都不做（本歌继续用路线 A）。
+        // prepare 内部有同 key 去重 + 7 天否定缓存（只记“无匹配 / 专辑根本
+        // 无 editorialVideo”两种确定性结论；视频下载失败不记否定，见
+        // AppleAnimatedArtwork.resolveAndDownload），重复调不会重复拉。
+        AppleAnimatedArtworkProvider.shared.prepare(for: track) { [weak self] ready in
+            guard let self, ready else { return }
+            Task { @MainActor in self.writeNowPlaying() }
+        }
+        guard let url = track.coverURL, !url.absoluteString.isEmpty else {
             // 没封面的歌也动起来：用默认图（纯白，符合「无封面用白色」偏好）
             // 生成动态视频（AnimatedArtworkManager.defaultKey，所有没封面的歌共用）。
+            // r20：Track.from 可能造出非 nil 的空 URL（URL(string: "")），
+            // 之前 guard let 直接放行、走下载再失败——无封面的歌被当成“下载
+            // 失败”，白白记一条失败日志、排一次 10 秒重试、还立 coverFailed
+            // 标记；空串现在直接走这条干净的默认分支。
+            // 静态图也上默认白图（别留上一首的），归属记成本歌；lastArtwork
+            // 非空后本分支末尾的 writeNowPlaying 不会再触发重拉（见下）。
+            let defaultImage = defaultCoverImage()
+            let defaultSized = Self.lockScreenSized(defaultImage)
+            lastArtwork = MPMediaItemArtwork(boundsSize: defaultSized.size) { _ in defaultSized }
+            lastArtworkTrackId = track.id
             lastCoverKey = AnimatedArtworkManager.defaultKey
             let key = AnimatedArtworkManager.defaultKey
-            // 路线 B 并行准备真视频（匹配只用歌手+专辑名，不依赖封面）：
-            // 就绪后回调里重写一次 Now Playing 挂上；无素材什么都不做。
-            AppleAnimatedArtworkProvider.shared.prepare(for: track) { [weak self] ready in
-                guard let self, ready else { return }
-                Task { @MainActor in self.writeNowPlaying() }
-            }
             if !AnimatedArtworkManager.shared.isReady(key: key) {
-                AnimatedArtworkManager.shared.prepare(cover: defaultCoverImage(), key: key) { [weak self] in
+                AnimatedArtworkManager.shared.prepare(cover: defaultImage, key: key) { [weak self] in
                     guard let self else { return }
                     Task { @MainActor in
                         guard self.lastCoverKey == key else { return }
@@ -160,6 +236,9 @@ final class NowPlayingCoordinator: ObservableObject {
                     }
                 }
             }
+            // default 视频已就绪时上面没有 onReady 会再补写：这里直接重挂一次，
+            // 否则暂停态（无 5 秒进度复写）的无封面歌会一直挂着上一首的视频。
+            writeNowPlaying()
             return
         }
         let urlString = url.absoluteString
@@ -182,15 +261,56 @@ final class NowPlayingCoordinator: ObservableObject {
                 image = nil
             }
         }
-        guard let image, lastCoverURL == urlString else { return }
-        lastArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
-        writeNowPlaying()
-        // 路线 B 并行准备真视频：就绪后回调里重写一次 Now Playing 挂上；
-        // 未就绪/无素材什么都不做（本歌继续用路线 A）。
-        AppleAnimatedArtworkProvider.shared.prepare(for: track) { [weak self] ready in
-            guard let self, ready else { return }
-            Task { @MainActor in self.writeNowPlaying() }
+        guard let image else {
+            // 歌已经切走了：旧下载丢弃，新歌那轮自己会拉。
+            guard lastCoverURL == urlString else { return }
+            // 封面没拉到 ≠ 锁屏只能静态（r20 之前的根因：这里直接 return，
+            // 两条 prepare 都没跑；lastTrackId 已推进、lastArtwork 非空时
+            // 后续 writeNowPlaying 再也不会重拉——整首歌静态，且无任何记录；
+            // 壳版 ContentView 同样位置是记 DiagLog + 上默认图兜底）。
+            // 现在：记一笔诊断；静态图清掉（别留上一首的封面）；路线 A 用
+            // 默认白图生成兜底视频（路线 B 已在上面并行准备，不依赖封面）；
+            // 10 秒后重试一次封面（仍是这首歌才拉，最多一次）。
+            DiagLog.shared.recordLog(category: "animated-artwork",
+                message: "cover download failed, fallback to default animated video track=\(track.title) platform=\(track.platform) host=\(url.host ?? "")",
+                fields: ["lane": "cover-download-failed", "host": url.host ?? "", "platform": track.platform])
+            // 先立失败标记再补写：writeNowPlaying 里 lastArtwork == nil 会触发
+            // 重拉，标记必须在这之前立好，否则补写会立刻再拉一次、失败再补写，
+            // 无限循环。重试只排一次：第二次失败（重试那次）不再排。
+            let shouldRetry = coverFailedTrackId != track.id
+            coverFailedTrackId = track.id
+            lastArtwork = nil
+            lastArtworkTrackId = nil
+            lastCoverKey = AnimatedArtworkManager.defaultKey
+            let defaultKey = AnimatedArtworkManager.defaultKey
+            writeNowPlaying()
+            if !AnimatedArtworkManager.shared.isReady(key: defaultKey) {
+                AnimatedArtworkManager.shared.prepare(cover: defaultCoverImage(), key: defaultKey) { [weak self] in
+                    guard let self else { return }
+                    Task { @MainActor in
+                        guard self.lastCoverKey == defaultKey else { return }
+                        self.writeNowPlaying()
+                    }
+                }
+            }
+            if shouldRetry {
+                Task.detached {
+                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    await MainActor.run {
+                        guard self.lastCoverURL == urlString,
+                              self.store?.currentTrack?.id == track.id else { return }
+                        Task { await self.fetchArtwork(for: track) }
+                    }
+                }
+            }
+            return
         }
+        guard lastCoverURL == urlString else { return }
+        coverFailedTrackId = nil
+        let sized = Self.lockScreenSized(image)
+        lastArtwork = MPMediaItemArtwork(boundsSize: sized.size) { _ in sized }
+        lastArtworkTrackId = track.id
+        writeNowPlaying()
         // 动态视频：后台渲染，完了在主线程回调补写（渲染失败也回调，调用方用上一首缓存兜底）。
         AnimatedArtworkManager.shared.prepare(cover: image, key: key) { [weak self] in
             guard let self else { return }
@@ -209,6 +329,22 @@ final class NowPlayingCoordinator: ObservableObject {
             UIColor.white.setFill()
             context.fill(CGRect(origin: .zero, size: size))
         }
+    }
+
+    /// 锁屏静态图尺寸（照抄壳版 ContentView.lockScreenSized）：最长边压到
+    /// 1000px 再交给系统（全屏铺满要大图，但 3000px 原图没必要）；小图原样
+    /// 返回——上游给的 240/300px 小封面（酷狗 240、QQ 300）在这里不放大，
+    /// 放大也补不出细节；全屏清晰度要靠上游给大图或动态视频（720x960）。
+    private static func lockScreenSized(_ image: UIImage) -> UIImage {
+        let maxEdge: CGFloat = 1000
+        let longest = max(image.size.width, image.size.height)
+        guard longest > maxEdge, longest > 0 else { return image }
+        let scale = maxEdge / longest
+        let target = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        UIGraphicsBeginImageContextWithOptions(target, false, 1.0)
+        defer { UIGraphicsEndImageContext() }
+        image.draw(in: CGRect(origin: .zero, size: target))
+        return UIGraphicsGetImageFromCurrentImageContext() ?? image
     }
 
     // MARK: - 远程命令（照抄壳版 ContentView.reassertRemoteCommands）

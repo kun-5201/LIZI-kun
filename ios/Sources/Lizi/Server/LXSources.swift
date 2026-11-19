@@ -482,6 +482,9 @@ final class LXSourceRegistry {
                         }
                         lastError = NSError(domain: "LXSources", code: 2, userInfo: [NSLocalizedDescriptionKey: "音源 \(meta.name) 返回的地址打不开"])
                     } catch {
+                        // 第 20 轮：同 LXScriptEngine 档位循环——取消不是某一家源失败，
+                        // 不要换下一个源重试，立刻向上传，让外层超时错误原样返回。
+                        if error is CancellationError { throw error }
                         lastError = error
                     }
                 }

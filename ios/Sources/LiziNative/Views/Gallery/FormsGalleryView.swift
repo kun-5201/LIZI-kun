@@ -46,8 +46,10 @@ struct FormsGalleryView: View {
                 .padding()
             }
         }
-        // 球面画廊入口（P3 r19 集成）：首页工具区只放「形态长廊」一张卡，
-        // 另一个画廊入口放在长廊页内——右下角悬浮按钮，不进 WebGL 页本身，
+        // 球面画廊入口（P3 r19 集成）：首页工具区的「形态长廊」卡已撤
+        // （r20 首页去舞台）；长廊整页目前只剩深链 lizinative://forms 入口，
+        // 形态选择走舞台页「形态」九宫格弹窗（SphereGalleryView）。球面画廊
+        // 入口放在长廊页内——右下角悬浮按钮，不进 WebGL 页本身，
         // 不挡中间的球面格子与 caption。
         .overlay(alignment: .bottomTrailing) {
             if loaded {

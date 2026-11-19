@@ -109,11 +109,18 @@ final class AnimatedArtworkManager {
 
     /// 两个尺寸的视频都在磁盘上才算就绪（Caches 可能被系统清掉，只信文件不信内存）。
     func isReady(key: String) -> Bool {
-        FileManager.default.fileExists(atPath: fileURL(key: key, aspect: .portrait).path)
-            && FileManager.default.fileExists(atPath: fileURL(key: key, aspect: .square).path)
+        isReady(key: key, aspect: .portrait) && isReady(key: key, aspect: .square)
+    }
+
+    /// 单个尺寸的视频在磁盘上才算该尺寸就绪（锁屏只用竖版：竖版好了就能挂，
+    /// 不用等方形；r20 之前挂载与回落都认“两个都在”，方形一失败竖版也被拖死）。
+    func isReady(key: String, aspect: Aspect) -> Bool {
+        FileManager.default.fileExists(atPath: fileURL(key: key, aspect: aspect).path)
     }
 
     /// 对一个封面准备动态视频。已就绪时立刻回调；否则后台渲染，完了在主线程回调。
+    /// 竖版先行：锁屏只用竖版 3:4，竖版一好就先回调挂上，不等方形（方形只是
+    /// 1x1 备用）；方形随后尽力补，失败只记日志，不影响已挂上的竖版。
     /// 渲染失败重试一次；两次都失败也回调——调用方用上一首的缓存兜底，
     /// 不要静默变回静态（第 12 轮第 20 件 03:33 硬性要求：每首歌都要动）。
     /// 注意：只做渲染与文件管理，不碰任何 iOS 26 的符号，26 以下调了也没事
@@ -134,39 +141,82 @@ final class AnimatedArtworkManager {
             // 开工前再确认一次：切歌快时旧歌的渲染直接跳过。
             let stillCurrent = DispatchQueue.main.sync { self.currentKey == key }
             guard stillCurrent else { return }
-            var succeeded = false
-            for _ in 1...2 {
-                do {
-                    try self.render(image: image, key: key, aspect: .portrait)
-                    try self.render(image: image, key: key, aspect: .square)
-                    succeeded = true
-                    break
-                } catch {
-                    // 第一次失败就地重试一次；两次都失败才认栽。
-                    continue
+            let start = Date()
+            // 竖版：已在磁盘就直接认，没在就渲染（最多两次）；失败记一条诊断——
+            // r20 之前失败在这里 `catch { continue }` 静默吞掉，锁屏变静态且无记录。
+            var portraitOK = self.isReady(key: key, aspect: .portrait)
+            if !portraitOK {
+                portraitOK = self.renderWithRetry(image: image, key: key, aspect: .portrait)
+                if !portraitOK {
+                    DiagLog.shared.recordLog(category: "animated-artwork",
+                        message: "route A portrait render failed key=\(key)",
+                        fields: ["lane": "route-a-render-failed", "aspect": "portrait"])
                 }
             }
-            if succeeded { self.pruneCache(keeping: key) }
-            DispatchQueue.main.async {
-                if succeeded { self.lastGoodKey = key }
-                onReady()
+            if portraitOK {
+                // 竖版好了：先记为最近可用的兜底，再回调挂上（不等方形）。
+                DispatchQueue.main.async {
+                    self.lastGoodKey = key
+                    onReady()
+                }
+                let ms = Int(Date().timeIntervalSince(start) * 1000)
+                DiagLog.shared.recordLog(category: "animated-artwork",
+                    message: "route A portrait ready key=\(key) ms=\(ms)",
+                    fields: ["lane": "route-a-ready", "ms": ms])
+            } else {
+                DispatchQueue.main.async { onReady() }
+            }
+            // 切歌了就别再烧方形：方形只是 1x1 备用，当前歌已经不是这首了。
+            let stillCurrentAfterPortrait = DispatchQueue.main.sync { self.currentKey == key }
+            guard stillCurrentAfterPortrait else { return }
+            // 方形尽力而为：失败只记日志，不影响已挂上的竖版；成功再回调一次
+            // （调用方补挂 1x1 键），顺带清缓存。
+            if !self.isReady(key: key, aspect: .square) {
+                if self.renderWithRetry(image: image, key: key, aspect: .square) {
+                    self.pruneCache(keeping: key)
+                    DispatchQueue.main.async { onReady() }
+                } else {
+                    DiagLog.shared.recordLog(category: "animated-artwork",
+                        message: "route A square render failed key=\(key)",
+                        fields: ["lane": "route-a-render-failed", "aspect": "square"])
+                }
+            } else {
+                self.pruneCache(keeping: key)
             }
         }
     }
 
-    /// 当前歌的视频不可用时拿什么兜底：最近一个渲染成功的键（上一首的缓存），
-    /// 要求它不是当前键、且视频还在磁盘上。没有可兜底的就返回 nil（比如刚装好
+    /// 单个尺寸渲染，最多两次（第一次失败就地重试一次）；返回是否成功。
+    /// 取消（切歌导致 currentKey 变了）不重试：新歌的渲染已经在队里排着，
+    /// 旧歌再烧一轮纯属浪费，重试只会把新歌的视频往后拖。
+    private func renderWithRetry(image: UIImage, key: String, aspect: Aspect) -> Bool {
+        for _ in 1...2 {
+            do {
+                try render(image: image, key: key, aspect: aspect)
+                return true
+            } catch RenderError.cancelled {
+                return false
+            } catch {
+                continue
+            }
+        }
+        return false
+    }
+
+    /// 当前歌的视频不可用时拿什么兜底：最近一个竖版渲染成功的键（上一首的缓存），
+    /// 要求它不是当前键、且竖版视频还在磁盘上。没有可兜底的就返回 nil（比如刚装好
     /// 第一首歌、视频还在渲染——那几秒只能先静态，等 onReady 回调补写）。
     func fallbackKey(for key: String) -> String? {
-        guard let good = lastGoodKey, good != key, isReady(key: good) else { return nil }
+        guard let good = lastGoodKey, good != key, isReady(key: good, aspect: .portrait) else { return nil }
         return good
     }
 
     /// 已就绪时返回可直接放进 nowPlayingInfo 的动态封面对象；iOS 26 以下永远返回 nil。
-    /// 同一 key+尺寸只建一个对象，反复复用。
+    /// 同一 key+尺寸只建一个对象，反复复用。按尺寸认就绪（竖版好了就能挂，
+    /// 不用等方形——r20 之前这里认“两个都在”，方形缺失会连竖版一起拒掉）。
     func artwork(forKey key: String, aspect: Aspect) -> Any? {
         if #available(iOS 26.0, *) {
-            guard isReady(key: key) else { return nil }
+            guard isReady(key: key, aspect: aspect) else { return nil }
             let cacheKey = key + aspect.suffix
             if let cached = artworks[cacheKey] { return cached }
             let art = makeArtwork(key: key, aspect: aspect)
@@ -289,6 +339,18 @@ final class AnimatedArtworkManager {
         input.requestMediaDataWhenReady(on: encodeQueue) { [weak self] in
             guard let self else { done.signal(); return }
             while input.isReadyForMoreMediaData {
+                // r20：切歌取消——渲染是串行队列里最耗时的一段（竖版+方形
+                // 各 240 帧），旧歌的渲染跑满全程才会轮到新歌，锁屏就一直
+                // 挂着上一首的视频。每 24 帧（约 1 秒）看一次 currentKey，
+                // 歌已经切走了就地取消，不等跑完、也不重试（见 renderWithRetry）。
+                // main.sync 读 currentKey（与 workQueue 里既有的 stillCurrent
+                // 检查同一路）；主线程从不等 encodeQueue，不会死锁。
+                if frameIndex % 24 == 0, frameIndex > 0,
+                   DispatchQueue.main.sync(execute: { self.currentKey != key }) {
+                    writer.cancelWriting()
+                    done.signal()
+                    return
+                }
                 if frameIndex >= totalFrames {
                     input.markAsFinished()
                     writer.finishWriting { done.signal() }
@@ -318,6 +380,11 @@ final class AnimatedArtworkManager {
             writer.cancelWriting()
             try? FileManager.default.removeItem(at: tmpURL)
             throw RenderError.timeout
+        }
+        if writer.status == .cancelled {
+            // 切歌取消（见上面帧循环里的检查）：不留半截文件，不重试。
+            try? FileManager.default.removeItem(at: tmpURL)
+            throw RenderError.cancelled
         }
         if writer.status != .completed {
             try? FileManager.default.removeItem(at: tmpURL)
@@ -381,6 +448,8 @@ final class AnimatedArtworkManager {
         case noCGImage
         case timeout
         case failed
+        /// 切歌导致当前渲染作废（currentKey 已变）：renderWithRetry 不重试。
+        case cancelled
     }
 }
 

@@ -12,7 +12,7 @@ settings:
     SWIFT_VERSION: "5.0"
     IPHONEOS_DEPLOYMENT_TARGET: "16.2"
     MARKETING_VERSION: "1.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    CURRENT_PROJECT_VERSION: "2"  # r20：构建号 +1，新扩展强制重载（旧扩展按 bundle ID 缓存）
 
 targets:
   Lizi:

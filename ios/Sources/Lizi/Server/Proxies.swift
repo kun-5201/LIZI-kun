@@ -119,6 +119,15 @@ enum Proxies {
                     "Cache-Control": "public, max-age=86400",
                 ], body: data)
             } catch {
+                // 第 20 轮：任务被取消（-999，调用方导航走了 / 视图没了 / 连接断了）
+                // 不是失败：不重试、不记日志，立刻回 499。旧代码把取消当普通
+                // 错误重试 4 次（2 候选 × 2 次）还记一条 fetch failed，诊断里
+                // 几十条 -999 全是这么来的。注意：URLSession 的 async API 在
+                // 这里漏出的是原始 NSURLError -999，不是 CancellationError，
+                // 两边都要认。
+                if error is CancellationError || (error as NSError).code == NSURLErrorCancelled {
+                    return .error(499, "cancelled")
+                }
                 lastError = error
                 continue
             }

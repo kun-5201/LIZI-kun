@@ -15,7 +15,11 @@ struct SearchView: View {
     @FocusState private var searchFocused: Bool
 
     /// 搜索框是否展开（收起时只留 38pt 圆钮图标）。
-    @State private var searchExpanded = false
+    /// r20：初始 true——进搜索页就是展开态，TextField 首帧已在视图树里才能聚焦。
+    /// 之前初始 false 时进页只有 38pt 图标，TextField 根本不存在，焦点无处可落，
+    /// 用户必须再点一次图标才出键盘。失焦且输入为空时仍由下面的
+    /// onChange(searchFocused) 收回成圆钮，不影响进页即打字的验收。
+    @State private var searchExpanded = true
     /// 「清空记录」两步确认的第一步是否已按下（3 秒内第二下才真清，照抄壳版）。
     @State private var clearArmed = false
 
@@ -65,6 +69,16 @@ struct SearchView: View {
         }
         .onChange(of: searchExpanded) { _ in
             if searchExpanded { searchFocused = true }
+        }
+        .onAppear {
+            // r20 进页即聚焦：searchExpanded 初始 true，TextField 首帧已挂上，
+            // 这里同步置焦点——刻意不用 DispatchQueue.main.async / Task /
+            // asyncAfter：异步回调会脱离点按手势的同步链路，键盘弹不出
+            // （第 14 轮 btn-search-now 同类问题）。导航本身是 RootView 的
+            // 同步 state 切换（无 NavigationStack / sheet / 转场动画），
+            // onAppear 就落在点按触发的那次更新里，焦点不会丢。
+            // 失焦后点图标再展开仍走上面的 onChange(searchExpanded) 聚焦。
+            searchFocused = true
         }
     }
 

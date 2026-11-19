@@ -726,6 +726,11 @@ final class LXScriptInstance {
                         let url = try await self.callScriptMusicUrl(source: source, songId: songId, quality: tier, songName: songName)
                         return (url, tier)
                     } catch {
+                        // 第 20 轮：取消（25 秒总超时 / 上层切歌）不是某一档失败——
+                        // 旧代码把它当普通档位失败吞掉、继续试下一档，超时后还要把
+                        // 剩下几档各跑一遍才返回，25 秒超时形同虚设。立刻向上传，
+                        // 让外层的超时错误原样返回、调用方走平台兜底。
+                        if error is CancellationError { throw error }
                         lastError = error
                     }
                 }

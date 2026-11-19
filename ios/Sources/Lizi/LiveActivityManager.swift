@@ -1,5 +1,6 @@
 import ActivityKit
 import Foundation
+import UIKit
 
 /// Drives the Dynamic Island / Live Activity that shows the synced lyric
 /// of the song playing in the Lizi web player.
@@ -36,10 +37,38 @@ final class LiveActivityManager {
 
     private var activity: Activity<LiziLyricsAttributes>?
 
+    /// 后台起岛被拦下时暂存的启动请求（回前台再起；第 20 轮）。
+    private struct PendingStart {
+        let title: String
+        let artist: String
+        let state: LiziLyricsAttributes.ContentState
+    }
+    private let pendingLock = NSLock()
+    private var pendingStart: PendingStart?
+    /// 上次因后台记过“推迟”日志的曲目 key（同一首歌后台反复推只记一次，不刷屏）。
+    private var lastDeferKey: String?
+    private var foregroundObserver: NSObjectProtocol?
+    /// 最近一次起岛的曲名/歌手（只作 updateActivity 时 payload 预算的估算用）。
+    private var lastTitle = ""
+    private var lastArtist = ""
+
     init() {
         refreshAuthorization()
         // Clear any activity left over from a previous launch.
         Task { @MainActor in await self.endAllActivities() }
+        // 第 20 轮：后台暂存的起岛请求回前台再发（见 retryPendingStart）。
+        foregroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.retryPendingStart() }
+        }
+    }
+
+    deinit {
+        if let foregroundObserver {
+            NotificationCenter.default.removeObserver(foregroundObserver)
+        }
     }
 
     /// Re-reads the system authorization state. Call when the app returns
@@ -78,13 +107,24 @@ final class LiveActivityManager {
                 fields: ["reason": "island-not-allowed", "lane": "island"])
             return
         }
+        // 第 20 轮：ContentState 超 4KB 必被 ActivityKit 拒（r19 真机 15 次
+        // Payload maximum size exceeded）；先按预算压封面，仍超就去掉封面。
+        let fitted = Self.fittedState(state, title: title, artist: artist, log: true)
+        lastTitle = title
+        lastArtist = artist
         Task { @MainActor in
+            // 第 20 轮：后台 Activity.request 必抛 Target is not foreground
+            //（r19 真机 5 次）。后台不请求、只暂存，回前台再起；同一首歌只记一次。
+            guard UIApplication.shared.applicationState == .active else {
+                self.deferStart(title: title, artist: artist, state: fitted)
+                return
+            }
             if let existing = self.activity {
                 await existing.end(nil, dismissalPolicy: .immediate)
                 self.activity = nil
             }
             let attributes = LiziLyricsAttributes(title: title, artist: artist)
-            let content = ActivityContent(state: state, staleDate: Date().addingTimeInterval(10))
+            let content = ActivityContent(state: fitted, staleDate: Date().addingTimeInterval(10))
             do {
                 let newActivity = try Activity.request(
                     attributes: attributes,
@@ -99,6 +139,11 @@ final class LiveActivityManager {
             } catch {
                 self.lastError = "启动灵动岛失败：\(error.localizedDescription)"
                 self.isRunning = false
+                // 后台竞态（检查完才切后台）：同样暂存等回前台，不刷屏。
+                if error.localizedDescription.localizedCaseInsensitiveContains("not foreground") {
+                    self.deferStart(title: title, artist: artist, state: fitted)
+                    return
+                }
                 DiagLog.shared.recordPlaybackStep("island start FAIL: \(error.localizedDescription)")
                 DiagLog.shared.recordLog(category: "island",
                     message: "灵动岛 Activity.request 抛错（auth=\(authDesc)）：\(error.localizedDescription)",
@@ -107,13 +152,117 @@ final class LiveActivityManager {
         }
     }
 
+    /// 后台暂存一次启动请求（同一首歌只记一次日志/面包屑，不刷屏）。
+    private func deferStart(title: String, artist: String, state: LiziLyricsAttributes.ContentState) {
+        let key = "\(title)\n\(artist)"
+        pendingLock.lock()
+        let isNew = lastDeferKey != key || pendingStart == nil
+        pendingStart = PendingStart(title: title, artist: artist, state: state)
+        if isNew { lastDeferKey = key }
+        pendingLock.unlock()
+        guard isNew else { return }
+        DiagLog.shared.recordPlaybackStep("island start deferred (background)")
+        DiagLog.shared.recordLog(category: "island",
+            message: "灵动岛启动推迟：App 在后台，回前台再起",
+            fields: ["reason": "island-deferred-background", "lane": "island"])
+    }
+
+    /// 回前台时把暂存的启动请求发出去（仍在后台就留着下次再试）。
+    @MainActor
+    private func retryPendingStart() {
+        pendingLock.lock()
+        let pending = pendingStart
+        pendingLock.unlock()
+        guard let pending else { return }
+        guard UIApplication.shared.applicationState == .active else { return }
+        pendingLock.lock()
+        pendingStart = nil
+        lastDeferKey = nil
+        pendingLock.unlock()
+        startActivity(title: pending.title, artist: pending.artist, state: pending.state)
+    }
+
+    // MARK: - Payload 预算（第 20 轮）
+
+    /// ActivityKit 单条推送上限约 4KB；JSON 编码后的 state + attributes
+    /// 按这个预算卡（实测：120px JPEG q0.8 的实拍封面编后约 5.4KB，必超；
+    /// q0.7 约 4.5KB 仍超，q0.6 约 3.9KB 无余量——只靠固定档位不够，
+    /// 必须运行时量、逐档压、仍超就去封面）。
+    static let islandPayloadBudget = 3800
+
+    /// state + attributes 的 JSON 编码字节数（ContentState 里的 Data 按
+    /// base64 计，和实际推送体同量级；作预算代理，不追求逐字节相等）。
+    static func payloadSize(title: String, artist: String, state: LiziLyricsAttributes.ContentState) -> Int {
+        let encoder = JSONEncoder()
+        var size = 0
+        if let data = try? encoder.encode(state) { size += data.count }
+        if let data = try? encoder.encode(LiziLyricsAttributes(title: title, artist: artist)) { size += data.count }
+        return size
+    }
+
+    /// 把 state 压进预算：先原样试；超了就把封面按 (96px, 0.6) → (80px, 0.5)
+    /// → (64px, 0.5) 逐档重压；仍超就去掉封面（词和进度一定能推上去）。
+    /// 起岛/更新都过这一道，所以两条组装路（原生协调器与网页桥）不用各自再算。
+    /// log=true 只在起岛时记（更新每 5 秒一次，不记，免得刷诊断）。
+    static func fittedState(_ state: LiziLyricsAttributes.ContentState, title: String, artist: String, log: Bool = false) -> LiziLyricsAttributes.ContentState {
+        let originalSize = payloadSize(title: title, artist: artist, state: state)
+        guard state.coverData != nil, originalSize > islandPayloadBudget else {
+            if log, state.coverData != nil {
+                DiagLog.shared.recordLog(category: "island",
+                    message: "island payload bytes=\(originalSize) cover kept",
+                    fields: ["reason": "island-payload-ok", "lane": "island"])
+            }
+            return state
+        }
+        if let data = state.coverData, let image = UIImage(data: data) {
+            for (px, quality) in [(96, CGFloat(0.6)), (80, CGFloat(0.5)), (64, CGFloat(0.5))] {
+                guard let thumb = thumbnail(image, maxSide: CGFloat(px), quality: quality) else { continue }
+                var candidate = state
+                candidate.coverData = thumb
+                let size = payloadSize(title: title, artist: artist, state: candidate)
+                if size <= islandPayloadBudget {
+                    if log {
+                        DiagLog.shared.recordLog(category: "island",
+                            message: "island payload bytes=\(originalSize)->\(size) cover down to \(px)px q\(quality)",
+                            fields: ["reason": "island-payload-shrunk", "lane": "island"])
+                    }
+                    return candidate
+                }
+            }
+        }
+        var dropped = state
+        dropped.coverData = nil
+        let size = payloadSize(title: title, artist: artist, state: dropped)
+        if log {
+            DiagLog.shared.recordLog(category: "island",
+                message: "island payload bytes=\(originalSize)->\(size) cover dropped (still over budget)",
+                fields: ["reason": "island-payload-cover-dropped", "lane": "island"])
+        }
+        return dropped
+    }
+
+    /// 等比缩到最长边 px，JPEG 重压（只在 fittedState 超预算时走，不常跑）。
+    private static func thumbnail(_ image: UIImage, maxSide: CGFloat, quality: CGFloat) -> Data? {
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return nil }
+        let scale = maxSide / max(size.width, size.height)
+        let target = scale >= 1
+            ? size
+            : CGSize(width: max(1, size.width * scale), height: max(1, size.height * scale))
+        let renderer = UIGraphicsImageRenderer(size: target)
+        let resized = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: target)) }
+        return resized.jpegData(compressionQuality: quality)
+    }
+
     /// Pushes a new state to the running activity. No-op when none is running.
     /// The coordinator throttles calls: only on lyric-line / track change,
     /// or a progress refresh at most every 5 seconds.
     func updateActivity(state: LiziLyricsAttributes.ContentState) {
         guard let activity else { return }
+        // 更新同样受 4KB 限制：超了整条更新被拒，先按预算压封面（不记日志）。
+        let fitted = Self.fittedState(state, title: lastTitle, artist: lastArtist)
         Task { @MainActor in
-            let content = ActivityContent(state: state, staleDate: Date().addingTimeInterval(10))
+            let content = ActivityContent(state: fitted, staleDate: Date().addingTimeInterval(10))
             await activity.update(content)
         }
     }

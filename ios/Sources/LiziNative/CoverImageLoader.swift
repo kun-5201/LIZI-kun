@@ -14,12 +14,20 @@ import UIKit
 /// 3. 占位：两步都失败返回 `nil`，调用方显示默认图（白色底 + 音符，
 ///    绝不用 ♪ 冒充封面本身）。
 ///
+/// 在飞任务共享（第 20 轮）：同一 URL 在一次启动里只拉一次，且取图跑在
+/// detached 任务里——调用方的 `.task(id:)` 取消（视图滚走、切歌）只取消
+/// 等待，不取消拉图本身；拉完进缓存，下次出现直接命中。旧代码里每次视图
+/// 消失都把在飞的代理请求一并取消（-999），封面永远拉不到、一直回默认图。
+///
 /// 内存缓存：同一 URL 在一次启动里只拉一次（`NSCache`，约 50MB 上限，
 /// 封面图本身不大；跨启动不持久化，磁盘缓存不在本轮范围）。
 actor CoverImageLoader {
     static let shared = CoverImageLoader()
 
     private let cache = NSCache<NSURL, UIImage>()
+    /// 在飞的取图任务（第 20 轮）：同一 URL 只拉一次；detached 任务不继承
+    /// 调用方的取消，视图消失也不停。
+    private var inFlight: [URL: Task<UIImage?, Never>] = [:]
 
     private init() {
         cache.totalCostLimit = 50 * 1024 * 1024
@@ -27,8 +35,27 @@ actor CoverImageLoader {
     }
 
     /// 取一张封面的 `UIImage`；三级都失败返回 `nil`（调用方显示占位）。
+    /// 调用方取消等待时抛 CancellationError，但拉图本身继续跑完、进缓存。
     func image(for url: URL) async -> UIImage? {
         if let hit = cache.object(forKey: url as NSURL) { return hit }
+        if let running = inFlight[url] { return await running.value }
+        let task = Task.detached {
+            let img = await CoverImageLoader.fetchUncached(url: url)
+            await CoverImageLoader.shared.noteFinished(img, for: url)
+            return img
+        }
+        inFlight[url] = task
+        return await task.value
+    }
+
+    /// 在飞任务收尾（无论成功失败都清 inFlight；成功才进缓存）。
+    private func noteFinished(_ image: UIImage?, for url: URL) {
+        if let image { store(image, for: url) }
+        inFlight[url] = nil
+    }
+
+    /// 进程内代理 → 直链（不抛错；两步都失败返回 `nil`）。
+    private static func fetchUncached(url: URL) async -> UIImage? {
         // 1) 进程内代理（Proxies.proxyImage：白名单 + Referer + https 升级）。
         let proxyReq = HttpRequest(method: "GET", path: "/api/img",
                                    query: ["url": url.absoluteString],
@@ -36,14 +63,12 @@ actor CoverImageLoader {
         let proxyResp = await Proxies.proxyImage(proxyReq)
         if (200...299).contains(proxyResp.status),
            let image = UIImage(data: proxyResp.body) {
-            store(image, for: url)
             return image
         }
         // 2) 直链兜底。
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             if let image = UIImage(data: data) {
-                store(image, for: url)
                 return image
             }
         } catch {

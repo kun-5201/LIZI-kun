@@ -24,11 +24,20 @@ struct LiziNativeApp: App {
         //「聆澜音源（赞助版）」（默认启用、可关不可删）；包内没有时静默
         // 不出现。壳版包里没有该文件，调用是空操作。
         LXSourceRegistry.shared.registerBundledSponsoredSourceIfPresent()
-        let store = PlaybackStore()
+        // 第 22 轮第 5 件（照 Moumusic 三件套 @MainActor）：PlaybackStore /
+        // NativeIslandCoordinator / NowPlayingCoordinator 都是 @MainActor，
+        // 在非隔离的 App.init 里只能用 MainActor.assumeIsolated 创建
+        //（启动本来就在主线程，安全；Swift 5 语言模式下这是编译要求）。
+        let store: PlaybackStore
+        let island: NativeIslandCoordinator
+        let nowPlaying: NowPlayingCoordinator
+        MainActor.assumeIsolated {
+            store = PlaybackStore()
+            island = NativeIslandCoordinator(store: store)
+            nowPlaying = NowPlayingCoordinator()
+            nowPlaying.bind(store: store)
+        }
         _playback = StateObject(wrappedValue: store)
-        let island = NativeIslandCoordinator(store: store)
-        let nowPlaying = NowPlayingCoordinator()
-        nowPlaying.bind(store: store)
         self.islandCoordinator = island
         self.nowPlayingCoordinator = nowPlaying
         // 岛上控制直调播放器（不再点 DOM）：previous / togglePlay / next / toggleLike。
@@ -53,9 +62,12 @@ struct LiziNativeApp: App {
                 .environmentObject(playback)
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
                     // 回前台：重读 Live Activities 授权态 + 复核一次远程命令
-                    //（防系统把锁屏按钮回落到 ±10 秒）。
-                    islandCoordinator.refreshAuthorization()
-                    nowPlayingCoordinator.reassertRemoteCommands()
+                    //（防系统把锁屏按钮回落到 ±10 秒）。两个协调器都是
+                    // @MainActor（第 22 轮第 5 件），跳主线程再调。
+                    Task { @MainActor in
+                        islandCoordinator.refreshAuthorization()
+                        nowPlayingCoordinator.reassertRemoteCommands()
+                    }
                 }
         }
     }
@@ -71,7 +83,7 @@ struct LiziNativeApp: App {
 /// 这里调 LiveActivityManager.endAllActivitiesSynchronously，等 end 真正完成
 /// （最多 2 秒）才返回，再记一笔终止标记供下次启动诊断。
 /// 进程被 SIGKILL（没机会跑 willTerminate）的极端情况兜底：staleDate 已收紧到
-/// 10 秒 + 启动时 LiveActivityManager.init 里清残留活动。
+/// 8 秒（第 22 轮第 5 件）+ 启动时 LiveActivityManager.init 里清残留活动。
 final class LiziNativeAppDelegate: NSObject, UIApplicationDelegate {
     func applicationWillTerminate(_ application: UIApplication) {
         LiveActivityManager.endAllActivitiesSynchronously(timeout: 2)

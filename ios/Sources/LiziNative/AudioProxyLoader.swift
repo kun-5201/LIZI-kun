@@ -114,7 +114,15 @@ final class AudioProxyLoader: NSObject, AVAssetResourceLoaderDelegate {
         } else {
             headers["Range"] = "bytes=\(offset)-"
         }
-        var urlRequest = URLRequest(url: job.originalURL, timeoutInterval: 30)
+        // 第 22 轮第 5 件：上游取流先升 https（Upstream.upgradedAudioURL，
+        // 与服务端 /api/audio 同款）：http 原址进 URLSession 在真机上直接
+        // 被 ATS -1022 拦（04:22 诊断：car-er.kuwo.cn 的代理取流失败，
+        // 错的就是这一行）；.kuwo.cn 在升级表里，VM 实测 https 通
+        //（https://car-er.kuwo.cn/ 回 403，TLS 与服务端都正常——403 只是
+        // 根路径没有音频资源）。白名单校验仍用原地址的 host
+        //（升级只换 scheme，不换 host），下面 hostAllowed 不动。
+        let fetchURL = Upstream.upgradedAudioURL(job.originalURL)
+        var urlRequest = URLRequest(url: fetchURL, timeoutInterval: 30)
         urlRequest.httpMethod = "GET"
         for (k, v) in headers { urlRequest.setValue(v, forHTTPHeaderField: k) }
         do {
@@ -146,7 +154,7 @@ final class AudioProxyLoader: NSObject, AVAssetResourceLoaderDelegate {
             dataRequest.respond(with: data)
             loadingRequest.finishLoading()
         } catch {
-            DiagLog.shared.recordPlaybackStep("audio proxy fetch FAIL source=\(job.source) host=\(job.originalURL.host ?? "") err=\(error.localizedDescription)")
+            DiagLog.shared.recordPlaybackStep("audio proxy fetch FAIL source=\(job.source) host=\(job.originalURL.host ?? "") scheme=\(fetchURL.scheme ?? "-") err=\(error.localizedDescription)")
             loadingRequest.finishLoading(with: error)
         }
     }

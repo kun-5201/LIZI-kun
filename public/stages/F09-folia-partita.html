@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>云阶 · Folia</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0e16;overflow:hidden}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #hint{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:9;
+    font:500 11px/1.5 ui-monospace,Consolas,monospace;color:rgba(220,225,245,.35);
+    letter-spacing:.08em;pointer-events:none;transition:opacity .6s;white-space:nowrap}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">等待第一句…</div>
+<script>
+"use strict";
+/* ============================================================================
+   云阶（F09 · Folia partita）
+   ----------------------------------------------------------------------------
+   效果来源：Folia（AGPL-3.0，作者 chthollyphile）的 partita（云阶）模式——
+   逐行向右下错落的阶梯。本文件只学形态与流程，按 Lizi 舞台承载协议（__c100）
+   独立重写，未复制 Folia 源码。
+   形态：上句 / 当前句 / 下句排成向右下错落的阶梯，当前句最大最亮、落在
+   阶梯的台面上；参考线可开关；错落幅度可调。
+   播放联动：init 换歌重排；tick 推时间；beat 让当前阶亮度一跳。
+   ========================================================================== */
+const S = { guideLines: true, stagger: 60, semantic: true };
+window.__stagePanel = {
+  title: '云阶 · Folia',
+  hint: '歌词排成向右下错落的阶梯，当前句落在台面上。',
+  items: [
+    { key: 'guideLines', label: '参考线', type: 'switch', def: true },
+    { key: 'stagger', label: '错落幅度', type: 'range', min: 20, max: 100, step: 5, def: 60 },
+    { key: 'semantic', label: '语义排布', type: 'switch', def: true },
+    { key: 'shake', label: '震动', type: 'switch', def: true }
+  ]
+};
+window.__liziShake = true;
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const hint = document.getElementById('hint');
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+resize();
+addEventListener('resize', resize);
+
+let lines = [], accent = [150, 165, 255], song = null;
+let clockT = 0, clockAt = performance.now(), playing = false;
+let curIdx = -1, stepPulse = 0;
+const now = () => clockT + (playing ? (performance.now() - clockAt) / 1000 : 0);
+const rgb = a => `rgb(${a[0] | 0},${a[1] | 0},${a[2] | 0})`;
+const rgba = (a, al) => `rgba(${a[0] | 0},${a[1] | 0},${a[2] | 0},${al})`;
+function curIdxAt(t) { let idx = -1; for (let i = 0; i < lines.length; i++) { if (lines[i].t <= t + 0.001) idx = i; else break; } return idx; }
+function charsOf(line) {
+  if (line.chars && line.chars.length) return line.chars;
+  const cs = [...line.text], n = cs.length || 1;
+  return cs.map((c, i) => ({ c, t: line.t + (line.dur || 6) * i / n }));
+}
+function fitFont(text, px, maxW, weight) {
+  let s = px;
+  ctx.font = `${weight || 600} ${s}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  while (s > 12 && ctx.measureText(text).width > maxW) {
+    s -= 2;
+    ctx.font = `${weight || 600} ${s}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  }
+  return s;
+}
+function drawStep(text, x, y, fs, alpha, isCur, t, chars) {
+  // 台面：当前阶下一道亮线
+  if (isCur) {
+    ctx.fillStyle = rgba(accent, 0.25 + stepPulse * 0.3);
+    ctx.fillRect(x - 14, y + fs * 0.62, Math.min(W * 0.8, ctx.measureText(text).width + 28), 3);
+  }
+  ctx.font = `700 ${fs}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  if (!chars) {
+    ctx.fillStyle = isCur ? '#ffffff' : rgba([255, 255, 255], alpha);
+    if (isCur) { ctx.shadowColor = rgb(accent); ctx.shadowBlur = 14 + stepPulse * 16; }
+    ctx.fillText(text, x, y);
+    ctx.shadowBlur = 0;
+    return;
+  }
+  let cx = x;
+  chars.forEach(ch => {
+    const w = ctx.measureText(ch.c).width;
+    const sung = t >= ch.t;
+    ctx.fillStyle = sung ? '#ffffff' : rgba([255, 255, 255], alpha);
+    if (sung) { ctx.shadowColor = rgb(accent); ctx.shadowBlur = 12; }
+    ctx.fillText(ch.c, cx, y);
+    ctx.shadowBlur = 0;
+    cx += w;
+  });
+}
+function frame() {
+  requestAnimationFrame(frame);
+  const t = now();
+  const idx = curIdxAt(t);
+  if (idx !== curIdx) curIdx = idx;
+  stepPulse *= 0.94;
+  const g = ctx.createLinearGradient(0, 0, W, H);
+  g.addColorStop(0, '#0b0e16'); g.addColorStop(1, rgba(accent, 0.18));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const st = S.stagger;
+  const baseX = W * 0.08, baseY = H * 0.3;
+  if (S.guideLines) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.14)'; ctx.lineWidth = 1;
+    ctx.setLineDash([4, 6]);
+    for (let i = 0; i < 4; i++) {
+      ctx.beginPath(); ctx.moveTo(baseX + i * st * 0.7, baseY + i * st * 1.1 - 30);
+      ctx.lineTo(baseX + i * st * 0.7 + W * 0.5, baseY + i * st * 1.1 - 30); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+  const prev = lines[curIdx - 1], cur = lines[curIdx], nxt = lines[curIdx + 1], nxt2 = lines[curIdx + 2];
+  if (prev) {
+    const fs = fitFont(prev.text, 24, W * 0.62, 500);
+    drawStep(prev.text, baseX, baseY, fs, 0.3, false, t, null);
+  }
+  if (cur) {
+    const fs = fitFont(cur.text, Math.min(W * 0.08, 54), W * 0.72, 700);
+    drawStep(cur.text, baseX + st * 0.7, baseY + st * 1.1, fs, 1, true, t, charsOf(cur));
+    hint.style.opacity = '0';
+  } else {
+    hint.style.opacity = lines.length ? '1' : '0.5';
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+  }
+  if (nxt) {
+    const fs = fitFont(nxt.text, 24, W * 0.62, 500);
+    drawStep(nxt.text, baseX + st * 1.4, baseY + st * 2.2, fs, 0.42, false, t, null);
+  }
+  if (nxt2) {
+    const fs = fitFont(nxt2.text, 20, W * 0.55, 500);
+    drawStep(nxt2.text, baseX + st * 2.1, baseY + st * 3.3, fs, 0.25, false, t, null);
+  }
+}
+requestAnimationFrame(frame);
+
+function applySetting(p) {
+  if (!p || !p.key) return;
+  const v = p.value;
+  if (p.key === 'guideLines') S.guideLines = v !== false && v !== 'false';
+  else if (p.key === 'stagger') { const n = Number(v); if (isFinite(n)) S.stagger = Math.min(100, Math.max(20, n)); }
+  else if (p.key === 'semantic') S.semantic = v !== false && v !== 'false';
+}
+const ping = () => { try { parent.postMessage({ __c100: 1, type: 'activity' }, '*'); } catch (_) {} };
+addEventListener('pointermove', ping, { passive: true });
+addEventListener('pointerdown', ping, { passive: true });
+addEventListener('wheel', ping, { passive: true });
+addEventListener('keydown', ping);
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.key === ' ') {
+    e.preventDefault();
+    try { parent.postMessage({ __c100: 1, type: 'key', payload: { key: 'Space' } }, '*'); } catch (_) {}
+  }
+}, true);
+addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || d.__c100 !== 1) return;
+  if (d.type === 'init') {
+    const p = d.payload || {};
+    lines = (p.lines || []).slice().sort((a, b) => a.t - b.t);
+    song = p.song || null;
+    if (p.accent) accent = p.accent;
+    curIdx = -1; clockT = 0; clockAt = performance.now();
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+  } else if (d.type === 'tick') {
+    clockT = d.payload.time; clockAt = performance.now(); playing = !!d.payload.playing;
+  } else if (d.type === 'beat') {
+    if (window.__liziShake !== false) stepPulse = Math.min(1, 0.4 + (d.payload.level || 0) * 0.6);
+  } else if (d.type === 'setting') {
+    if (d.payload.key === 'shake') window.__liziShake = d.payload.value !== false;
+    else applySetting(d.payload);
+  }
+});
+try { parent.postMessage({ __c100: 1, type: 'ready' }, '*'); } catch (_) {}
+</script>
+</body>
+</html>

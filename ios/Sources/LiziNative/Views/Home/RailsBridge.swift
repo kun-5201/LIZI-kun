@@ -193,20 +193,23 @@ extension NativeBridge {
     // MARK: - 精选 feed（照抄壳版 FEAT_FEEDS 的 feed 划分；默认 = 任务指定的主 feed）
 
     /// 该平台精选有哪些 feed（id + 展示名；详情页切 feed 用）。
+    /// r22j：顺序照抄壳版 FEAT_FEEDS（app.js）——滚轮里第一项就是首页
+    /// 精选行的默认 feed：网易推荐歌单 wheel:false 不进滚轮，默认推荐新歌；
+    /// 酷狗新歌速递在前、精选歌单在后；酷我排行榜在前、推荐歌单在后。
     static func featuredFeeds(for platform: String) -> [(id: String, name: String)] {
         switch platform {
-        case "netease": return [("playlists", "推荐歌单"), ("newsong", "推荐新歌")]
+        case "netease": return [("newsong", "推荐新歌"), ("playlists", "推荐歌单")]
         case "qq": return [("playlists", "推荐歌单"), ("newsongs", "新歌首发")]
-        case "kugou": return [("playlists", "精选歌单"), ("newsongs", "新歌速递")]
+        case "kugou": return [("newsongs", "新歌速递"), ("playlists", "精选歌单")]
         case "qishui": return [("feed", "为你推荐")]
         case "bodian": return [("playlists", "推荐歌单")]
-        case "kuwo": return [("playlists", "推荐歌单"), ("ranks", "排行榜")]
+        case "kuwo": return [("ranks", "排行榜"), ("playlists", "推荐歌单")]
         case "applemusic": return [("playlists", "热门歌单")]
         default: return []
         }
     }
 
-    /// 首页行默认 feed（各平台第一个 feed；网易默认推荐歌单，推荐新歌在详情页切）。
+    /// 首页行默认 feed（各平台第一个 feed；网易默认推荐新歌，推荐歌单在详情页切）。
     static func defaultFeaturedFeed(for platform: String) -> String? {
         featuredFeeds(for: platform).first?.id
     }

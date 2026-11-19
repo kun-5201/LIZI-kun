@@ -5,8 +5,8 @@ import WidgetKit
 /// Live Activity for Lizi: 岛上长这样（第 12 轮第 15 件，按用户 03:41 两张
 /// 目标截图重做，照 Apple Music 的岛）：
 /// - compact（紧凑胶囊）：左边专辑封面缩略图，右边白色音频波形（均衡器）。
-///   没有歌词行——截图目标就是这样；歌词仍在 ContentState 里流转（驱动更新节流），
-///   视图不画。
+///   没有歌词行——截图目标就是这样；第 22 轮第 5 件：ContentState 里已无歌词
+///   字段（用户不要岛上歌词），岛更新只剩切歌、播放切换、喜欢态、5 秒进度四路。
 /// - expanded（点开）：左上封面大图，右边歌名+歌手，右上波形；下面进度条
 ///   （已播 / 剩余，m:ss）；最下面一排控制：星标（喜欢）、上一首、暂停/播放、
 ///   下一首、AirPlay。控制按钮走 LiveActivityIntent（App 进程内执行，不打开 App，
@@ -19,7 +19,21 @@ import WidgetKit
 /// - 点胶囊非按钮区：widgetURL lizinative://now，打开 App 落到正在播放的那首歌的
 ///   播放页（按上次的形态进）；点展开页里的控制按钮是各自的功能，不跳 App。
 /// - minimal: ♪。
-/// - lock screen：与展开页同款（封面 + 歌名/歌手 + 进度条 + 五个控制），
+/// - lock screen（r22d 已撤）：原来与展开页同款（封面 + 歌名/歌手 + 进度条 +
+///   五个控制），就是用户 04:20 截图里锁屏下面那张黑色卡片——同一个 Live
+///   Activity 的锁屏呈现，与灵动岛是同一份 ContentState、不是第二个活动；
+///   它的进度 0:17 对不上磨砂卡 2:43，是因为 ContentState.progress 只是
+///   App 每 5 秒推一次的快照，锁屏后推送停了就冻住，而磨砂卡是系统
+///   MPNowPlayingInfoCenter 的 Now Playing 卡、已播时间由系统按播放速率
+///   自己往前走（两张卡同首歌、同 4:00 总时长，0:17 + 3:43 = 2:43 + 1:17）。
+///   用户没让加这张卡，要求删掉；磨砂卡（系统 Now Playing）与灵动岛保留。
+///   App 侧没有「只留岛、不留锁屏」的公开开关（Apple 要求 Live Activity
+///   四种呈现全支持，且不提供按呈现面过滤的 API），唯一能动的手是把
+///   ActivityConfiguration 的锁屏闭包换成 EmptyView：岛的三个呈现是独立闭包，
+///   不受影响；Now Playing / 封面 / 播放本身一行未动。
+///   EmptyView 到底是让系统整个撤掉锁屏横幅、还是留一张空白黑卡，
+///   静态验不出来，真机清单 D1 是裁决项——若留空白黑卡，立刻回滚本轮，
+///   改走「锁屏只留系统 Now Playing 卡」的兜底（见 verification/r22d-device-checklist.md）。
 ///   锁屏上的全屏铺满是系统行为：系统拿 MPNowPlayingInfoCenter 的封面画全屏背景；
 ///   App 只负责把封面供过去，不自己画锁屏。
 struct LiziLiveActivity: Widget {
@@ -120,23 +134,32 @@ struct LiziLiveActivity: Widget {
         .buttonStyle(.plain)
     }
 
-    /// 点岛/点锁屏卡片 → 打开 App 落到正在播放的播放页。
+    /// 点岛 → 打开 App 落到正在播放的播放页。
     /// widgetURL 是 View 修饰器，不能挂在 ActivityConfiguration /
     /// DynamicIsland 链上（编包会报 ActivityConfiguration 没有 widgetURL 成员），
-    /// 只能挂在岛的各个区域视图与锁屏卡片的根视图上；控制按钮（Intent/Link）
-    /// 自带点按行为，不受它影响。
+    /// 只能挂在岛的各个区域视图的根视图上；控制按钮（Intent/Link）
+    /// 自带点按行为，不受它影响。（r22d：锁屏卡片已撤，widgetURL 不再挂锁屏视图。）
     private var nowURL: URL { URL(string: "lizinative://now")! }
 
     var body: some WidgetConfiguration {
-        ActivityConfiguration(for: LiziLyricsAttributes.self) { context in
-            lockScreenView(context: context)
+        ActivityConfiguration(for: LiziLyricsAttributes.self) { _ in
+            // r22d：锁屏呈现已撤——黑色卡片的来源就是这个闭包（原来调
+            // lockScreenView，画封面/歌名/进度条/五个控制，与截图黑卡逐项对得上）。
+            // 同一个 Live Activity 在锁屏与灵动岛是两次呈现：删这里只删锁屏那次，
+            // DynamicIsland 闭包原样保留，岛的紧凑/最小/展开三态不受影响；
+            // 磨砂卡是系统 Now Playing（MPNowPlayingInfoCenter），不在这个扩展里，
+            // 删不掉也删不着。EmptyView 是 App 侧唯一能动的手（无按呈现面过滤的
+            // 公开 API）；系统是否整条撤掉横幅、还是留空白黑卡，真机 D1 裁决。
+            EmptyView()
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     coverArt(context.state.coverData, size: 52, corner: 10)
+                        .widgetURL(nowURL)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     waveformView(height: 16)
+                        .widgetURL(nowURL)
                 }
                 DynamicIslandExpandedRegion(.center) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -148,6 +171,7 @@ struct LiziLiveActivity: Widget {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
+                    .widgetURL(nowURL)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(spacing: 10) {
@@ -167,32 +191,5 @@ struct LiziLiveActivity: Widget {
             }
             .keylineTint(.white)
         }
-    }
-
-    private func lockScreenView(context: ActivityViewContext<LiziLyricsAttributes>) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                coverArt(context.state.coverData, size: 48, corner: 8)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(context.attributes.title)
-                        .font(.headline)
-                        .lineLimit(1)
-                    Text(context.attributes.artist)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer()
-                waveformView(height: 16)
-            }
-            progressRow(context: context)
-            HStack {
-                Spacer()
-                controlButtons(context: context)
-                Spacer()
-            }
-        }
-        .padding()
-        .widgetURL(nowURL)
     }
 }

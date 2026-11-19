@@ -1,18 +1,14 @@
 import ActivityKit
 import Foundation
 
-/// Shared Live Activity attributes for Lizi 歌词灵动岛.
+/// Shared Live Activity attributes for Lizi 灵动岛（Apple Music 款：
+/// 封面 / 歌名+歌手 / 波形 / 进度 / 控制行，无歌词——第 22 轮第 5 件，
+/// 用户不要岛上歌词）。
 /// This file is compiled into BOTH the app target and the widget extension
 /// target, so it must stay identical in both. Keep it dependency-free apart
 /// from ActivityKit/Foundation.
 struct LiziLyricsAttributes: ActivityAttributes {
     struct ContentState: Codable, Hashable {
-        /// The lyric line currently being sung.
-        var currentLyric: String
-        /// Previous line, if any.
-        var prevLyric: String?
-        /// Next line, if any.
-        var nextLyric: String?
         /// Playback progress 0...1 (0 when duration unknown).
         var progress: Double
         /// Whether the player is currently playing (vs paused).

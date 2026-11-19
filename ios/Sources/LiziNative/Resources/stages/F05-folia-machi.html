@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>町景 · Folia</title>
+<style>
+  html,body{margin:0;height:100%;background:#0d1017;overflow:hidden}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #hint{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:9;
+    font:500 11px/1.5 ui-monospace,Consolas,monospace;color:rgba(220,225,245,.35);
+    letter-spacing:.08em;pointer-events:none;transition:opacity .6s;white-space:nowrap}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">等待第一句…</div>
+<script>
+"use strict";
+/* ============================================================================
+   町景（F05 · Folia machi）
+   ----------------------------------------------------------------------------
+   效果来源：Folia（AGPL-3.0，作者 chthollyphile）的 machi（町景）模式——
+   程序化微缩日本街角（便利店街角）：歌词写在招牌上——当前句逐字点亮在
+   LED 大屏上，下一句走 LED 跑马灯，歌名写在店铺招牌上；场景、时段、天气
+   可调。本文件只学形态与流程，按 Lizi 舞台承载协议（__c100）独立重写，
+   未复制 Folia 源码；不依赖 React / three.js。
+   形态：微缩街景——楼体 + 亮窗 + 便利店招牌；当前句在 LED 屏上逐字点亮，
+   下一句在底部跑马灯；时段改天色、天气改雨雪；镜头缓慢漂移。
+   播放联动：init 换歌重排；tick 推时间；beat 让 LED 屏亮度一跳。
+   ========================================================================== */
+const S = { timeOfDay: 'auto', weather: 'auto', drift: 0.5 };
+window.__stagePanel = {
+  title: '町景 · Folia',
+  hint: '微缩街角：歌词写在 LED 招牌与跑马灯上，时段天气可调。',
+  items: [
+    { key: 'timeOfDay', label: '时段', type: 'segment', def: 'auto', options: [
+      { v: 'auto', t: '自动' }, { v: 'day', t: '白天' }, { v: 'dusk', t: '黄昏' }, { v: 'night', t: '夜晚' } ] },
+    { key: 'weather', label: '天气', type: 'segment', def: 'auto', options: [
+      { v: 'auto', t: '自动' }, { v: 'clear', t: '晴' }, { v: 'rain', t: '雨' }, { v: 'snow', t: '雪' } ] },
+    { key: 'drift', label: '镜头漂移', type: 'range', min: 0, max: 1, step: 0.05, def: 0.5 },
+    { key: 'shake', label: '震动', type: 'switch', def: true }
+  ]
+};
+window.__liziShake = true;
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const hint = document.getElementById('hint');
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+resize();
+addEventListener('resize', resize);
+
+let lines = [], accent = [150, 165, 255], song = null;
+let clockT = 0, clockAt = performance.now(), playing = false;
+let curIdx = -1, ledBoost = 0, drops = [];
+const now = () => clockT + (playing ? (performance.now() - clockAt) / 1000 : 0);
+const rgb = a => `rgb(${a[0] | 0},${a[1] | 0},${a[2] | 0})`;
+const rgba = (a, al) => `rgba(${a[0] | 0},${a[1] | 0},${a[2] | 0},${al})`;
+function hash(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967295; }
+function curIdxAt(t) { let idx = -1; for (let i = 0; i < lines.length; i++) { if (lines[i].t <= t + 0.001) idx = i; else break; } return idx; }
+function charsOf(line) {
+  if (line.chars && line.chars.length) return line.chars;
+  const cs = [...line.text], n = cs.length || 1;
+  return cs.map((c, i) => ({ c, t: line.t + (line.dur || 6) * i / n }));
+}
+function fitFont(text, px, maxW, weight) {
+  let s = px;
+  ctx.font = `${weight || 600} ${s}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  while (s > 12 && ctx.measureText(text).width > maxW) {
+    s -= 2;
+    ctx.font = `${weight || 600} ${s}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  }
+  return s;
+}
+// 时段：自动按当前小时，白天 7–17、黄昏 17–19、其余夜晚
+function resolveTime(t) {
+  if (S.timeOfDay !== 'auto') return S.timeOfDay;
+  const h = new Date().getHours();
+  return h >= 7 && h < 17 ? 'day' : h >= 17 && h < 19 ? 'dusk' : 'night';
+}
+function resolveWeather() {
+  if (S.weather !== 'auto') return S.weather;
+  return 'clear';
+}
+function frame() {
+  requestAnimationFrame(frame);
+  const t = now();
+  const idx = curIdxAt(t);
+  if (idx !== curIdx) curIdx = idx;
+  ledBoost *= 0.95;
+  const tod = resolveTime(t), wx = resolveWeather();
+  const sky = tod === 'day' ? ['#9db8d9', '#d9e4ee'] : tod === 'dusk' ? ['#3a2b4d', '#e8824f'] : ['#0d1017', '#1c2436'];
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, sky[0]); g.addColorStop(1, sky[1]);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const driftX = Math.sin(t * 0.12) * 14 * S.drift;
+  const groundY = H * 0.78;
+  // 远处楼体
+  for (let i = 0; i < 5; i++) {
+    const bw = W * 0.16, bx = W * (0.02 + i * 0.19) + driftX * 0.4, bh = H * (0.3 + hash('b' + i) * 0.18);
+    ctx.fillStyle = tod === 'night' ? '#171d2b' : '#5c6a80';
+    ctx.fillRect(bx, groundY - bh, bw, bh);
+    // 亮窗
+    ctx.fillStyle = tod === 'night' ? 'rgba(255,214,130,0.85)' : 'rgba(255,255,255,0.5)';
+    for (let wy = 0; wy < 3; wy++) for (let wx2 = 0; wx2 < 2; wx2++) {
+      if (hash('w' + i + wy + wx2) > 0.45) ctx.fillRect(bx + 8 + wx2 * (bw / 2), groundY - bh + 12 + wy * 26, bw / 2 - 16, 14);
+    }
+  }
+  // 地面
+  ctx.fillStyle = tod === 'night' ? '#10141f' : '#3c4658';
+  ctx.fillRect(0, groundY, W, H - groundY);
+  // 便利店：主体 + 招牌（歌名）+ LED 大屏（当前句）
+  const shopX = W * 0.22 + driftX, shopW = W * 0.56, shopY = H * 0.34, shopH = groundY - shopY;
+  ctx.fillStyle = tod === 'night' ? '#232c40' : '#e8e4da';
+  ctx.fillRect(shopX, shopY, shopW, shopH);
+  ctx.fillStyle = rgb(accent);
+  ctx.fillRect(shopX, shopY, shopW, H * 0.055);
+  if (song && song.name) {
+    ctx.fillStyle = '#fff';
+    const sfs = fitFont(song.name, 17, shopW - 24, 700);
+    ctx.font = `700 ${sfs}px "PingFang SC",system-ui,sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(song.name, shopX + shopW / 2, shopY + H * 0.027);
+  }
+  // LED 大屏
+  const ledX = shopX + 14, ledY = shopY + H * 0.075, ledW = shopW - 28, ledH = H * 0.2;
+  ctx.fillStyle = '#05070c'; ctx.fillRect(ledX, ledY, ledW, ledH);
+  ctx.strokeStyle = rgba(accent, 0.7); ctx.lineWidth = 2; ctx.strokeRect(ledX, ledY, ledW, ledH);
+  const line = lines[curIdx];
+  if (line) {
+    const chars = charsOf(line);
+    const fs = fitFont(line.text, 44, ledW - 24, 700);
+    ctx.font = `700 ${fs}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const totalW = ctx.measureText(line.text).width;
+    let x = shopX + shopW / 2 - totalW / 2;
+    chars.forEach(ch => {
+      const w = ctx.measureText(ch.c).width;
+      const sung = t >= ch.t;
+      ctx.fillStyle = sung ? rgba([120, 255, 170], 0.65 + 0.35 * ledBoost + 0.3) : 'rgba(120,255,170,0.28)';
+      if (sung) { ctx.shadowColor = '#78ffaa'; ctx.shadowBlur = 12 + ledBoost * 14; }
+      ctx.fillText(ch.c, x + w / 2, ledY + ledH / 2);
+      ctx.shadowBlur = 0;
+      x += w;
+    });
+    hint.style.opacity = '0';
+  } else {
+    hint.style.opacity = lines.length ? '1' : '0.5';
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+  }
+  // 底部 LED 跑马灯：下一句
+  const nxt = lines[curIdx + 1];
+  ctx.fillStyle = 'rgba(5,7,12,0.9)'; ctx.fillRect(0, H - 34, W, 34);
+  if (nxt) {
+    ctx.fillStyle = 'rgba(255,214,130,0.9)';
+    const nfs = fitFont(nxt.text, 16, W, 500);
+    ctx.font = `500 ${nfs}px "PingFang SC",system-ui,sans-serif`;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    const scroll = (t * 60) % (W + ctx.measureText(nxt.text).width + 80);
+    ctx.fillText('NEXT  ' + nxt.text, W - scroll, H - 17);
+  }
+  ctx.textAlign = 'left';
+  // 雨 / 雪
+  if (wx === 'rain' || wx === 'snow') {
+    if (drops.length < 90) for (let i = 0; i < 4; i++) drops.push({ x: Math.random() * W, y: -10, v: wx === 'rain' ? 500 + Math.random() * 200 : 40 + Math.random() * 40 });
+    ctx.strokeStyle = wx === 'rain' ? 'rgba(180,200,235,0.5)' : 'rgba(255,255,255,0.8)';
+    ctx.lineWidth = wx === 'rain' ? 1 : 2;
+    for (let i = drops.length - 1; i >= 0; i--) {
+      const d = drops[i]; d.y += d.v * 0.016; if (wx === 'rain') d.x -= d.v * 0.016 * 0.2;
+      if (d.y > H) { drops.splice(i, 1); continue; }
+      ctx.beginPath(); ctx.moveTo(d.x, d.y); ctx.lineTo(d.x - (wx === 'rain' ? 3 : 0), d.y + (wx === 'rain' ? 12 : 2)); ctx.stroke();
+    }
+  } else drops = [];
+}
+requestAnimationFrame(frame);
+
+function applySetting(p) {
+  if (!p || !p.key) return;
+  const v = p.value;
+  if (p.key === 'timeOfDay') { const s = String(v); if (['auto', 'day', 'dusk', 'night'].includes(s)) S.timeOfDay = s; }
+  else if (p.key === 'weather') { const s = String(v); if (['auto', 'clear', 'rain', 'snow'].includes(s)) S.weather = s; }
+  else if (p.key === 'drift') { const n = Number(v); if (isFinite(n)) S.drift = Math.min(1, Math.max(0, n)); }
+}
+const ping = () => { try { parent.postMessage({ __c100: 1, type: 'activity' }, '*'); } catch (_) {} };
+addEventListener('pointermove', ping, { passive: true });
+addEventListener('pointerdown', ping, { passive: true });
+addEventListener('wheel', ping, { passive: true });
+addEventListener('keydown', ping);
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.key === ' ') {
+    e.preventDefault();
+    try { parent.postMessage({ __c100: 1, type: 'key', payload: { key: 'Space' } }, '*'); } catch (_) {}
+  }
+}, true);
+addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || d.__c100 !== 1) return;
+  if (d.type === 'init') {
+    const p = d.payload || {};
+    lines = (p.lines || []).slice().sort((a, b) => a.t - b.t);
+    song = p.song || null;
+    if (p.accent) accent = p.accent;
+    curIdx = -1; drops = []; clockT = 0; clockAt = performance.now();
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+  } else if (d.type === 'tick') {
+    clockT = d.payload.time; clockAt = performance.now(); playing = !!d.payload.playing;
+  } else if (d.type === 'beat') {
+    if (window.__liziShake !== false) ledBoost = Math.min(1, 0.4 + (d.payload.level || 0) * 0.6);
+  } else if (d.type === 'setting') {
+    if (d.payload.key === 'shake') window.__liziShake = d.payload.value !== false;
+    else applySetting(d.payload);
+  }
+});
+try { parent.postMessage({ __c100: 1, type: 'ready' }, '*'); } catch (_) {}
+</script>
+</body>
+</html>

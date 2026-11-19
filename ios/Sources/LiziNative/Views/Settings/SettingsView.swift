@@ -187,6 +187,12 @@ struct SettingsView: View {
                                 Image(systemName: settings.visiblePlatforms.contains(id)
                                       ? "checkmark.square.fill" : "square")
                                     .foregroundColor(LiziTokens.ink2)
+                                // r22j 平台管理：每行左边放该平台小 logo（26pt、
+                                // 圆角 7，照抄壳版 `.pm__logo` 26×26 radius 7；
+                                // 顺序与壳版 `#plat-list` 一致：checkbox → logo → 名字）。
+                                if let info = LiziPlatforms.all.first(where: { $0.id == id }) {
+                                    PlatformIconView(platform: info, selected: false, size: 26)
+                                }
                                 Text(SettingsStore.platformNames[id] ?? id)
                                     .font(.liziBody(size: LiziTokens.size14))
                                     .foregroundColor(LiziTokens.ink)
@@ -195,7 +201,7 @@ struct SettingsView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    Text("至少保留一个；全部勾上就是全部显示。选择已保存，首页平台条接线在 P3 打磨项。")
+                    Text("至少保留一个；全部勾上就是全部显示。选择已保存，首页平台条实时跟着变（回首页即生效）。")
                         .font(.liziBody(size: LiziTokens.size13))
                         .foregroundColor(LiziTokens.ink3)
                 }

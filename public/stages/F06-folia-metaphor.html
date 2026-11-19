@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>隐喻 · Folia</title>
+<style>
+  html,body{margin:0;height:100%;background:#0e0d0b;overflow:hidden}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #hint{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:9;
+    font:500 11px/1.5 ui-monospace,Consolas,monospace;color:rgba(220,225,245,.35);
+    letter-spacing:.08em;pointer-events:none;transition:opacity .6s;white-space:nowrap}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">等待第一句…</div>
+<script>
+"use strict";
+/* ============================================================================
+   隐喻（F06 · Folia metaphor）
+   ----------------------------------------------------------------------------
+   效果来源：Folia（AGPL-3.0，作者 chthollyphile）的 metaphor（隐喻）模式——
+   概念性实验歌词动画：歌词与周围饰物是同一片无定形墨——墨团与字形画进
+   同一个场再阈值化，融开又分开；流场、半调网屏、粗砂纸颗粒；画面靠剪辑
+   而非补间运动：按唱词硬切机位（远 / 近 / 特写）。本文件只学形态与流程，
+   按 Lizi 舞台承载协议（__c100）独立重写，未复制 Folia 源码；不依赖
+   React / three.js。
+   形态：纸底 + 融合墨团（字是墨场里的一块）；半调网点底纹；粗颗粒噪点；
+   每句硬切一次机位（位置与缩放跳变，无过渡）。
+   播放联动：init 换歌重排；tick 推时间；beat 让墨团胀一下。
+   ========================================================================== */
+const S = { fuse: 0.6, halftone: true, hardCut: true };
+window.__stagePanel = {
+  title: '隐喻 · Folia',
+  hint: '概念实验动画：墨团融合 + 半调网屏 + 每句硬切机位。',
+  items: [
+    { key: 'fuse', label: '墨团融合', type: 'range', min: 0, max: 1, step: 0.05, def: 0.6 },
+    { key: 'halftone', label: '半调网屏', type: 'switch', def: true },
+    { key: 'hardCut', label: '每句硬切机位', type: 'switch', def: true },
+    { key: 'shake', label: '震动', type: 'switch', def: true }
+  ]
+};
+window.__liziShake = true;
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const hint = document.getElementById('hint');
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+resize();
+addEventListener('resize', resize);
+
+let lines = [], accent = [150, 165, 255], song = null;
+let clockT = 0, clockAt = performance.now(), playing = false;
+let curIdx = -1, cut = 0, beatPulse = 0;
+const now = () => clockT + (playing ? (performance.now() - clockAt) / 1000 : 0);
+const rgb = a => `rgb(${a[0] | 0},${a[1] | 0},${a[2] | 0})`;
+const rgba = (a, al) => `rgba(${a[0] | 0},${a[1] | 0},${a[2] | 0},${al})`;
+function hash(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967295; }
+function curIdxAt(t) { let idx = -1; for (let i = 0; i < lines.length; i++) { if (lines[i].t <= t + 0.001) idx = i; else break; } return idx; }
+function charsOf(line) {
+  if (line.chars && line.chars.length) return line.chars;
+  const cs = [...line.text], n = cs.length || 1;
+  return cs.map((c, i) => ({ c, t: line.t + (line.dur || 6) * i / n }));
+}
+function fitFont(text, px, maxW, weight) {
+  let s = px;
+  ctx.font = `${weight || 600} ${s}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  while (s > 12 && ctx.measureText(text).width > maxW) {
+    s -= 2;
+    ctx.font = `${weight || 600} ${s}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  }
+  return s;
+}
+function frame() {
+  requestAnimationFrame(frame);
+  const t = now();
+  const idx = curIdxAt(t);
+  if (idx !== curIdx) { curIdx = idx; if (S.hardCut) cut = (cut + 1) % 3; }
+  beatPulse *= 0.95;
+  // 纸底
+  ctx.fillStyle = '#e8e2d4'; ctx.fillRect(0, 0, W, H);
+  // 半调网点底纹
+  if (S.halftone) {
+    ctx.fillStyle = 'rgba(20,18,16,0.16)';
+    const step = 14;
+    for (let y = step / 2; y < H; y += step)
+      for (let x = step / 2; x < W; x += step) {
+        const r = 1 + hash('h' + x + ',' + y) * 1.6;
+        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+      }
+  }
+  // 机位硬切：0 远景居中 / 1 近景左上 / 2 特写右下（跳变，无过渡）
+  let ox = 0, oy = 0, zoom = 1;
+  if (S.hardCut) {
+    if (cut === 1) { ox = -W * 0.06; oy = -H * 0.05; zoom = 1.18; }
+    else if (cut === 2) { ox = W * 0.05; oy = H * 0.04; zoom = 1.32; }
+  }
+  ctx.save();
+  ctx.translate(W / 2 + ox, H / 2 + oy); ctx.scale(zoom, zoom); ctx.translate(-W / 2, -H / 2);
+  const line = lines[curIdx];
+  if (line) {
+    const chars = charsOf(line);
+    const fs = fitFont(line.text, Math.min(W * 0.085, 60), W * 0.8, 700);
+    const by = H * 0.52;
+    // 融合墨团：字背后一团随拍点呼吸的墨，模糊边缘与字融在一起
+    const blobR = fs * (1.1 + S.fuse * 0.9 + beatPulse * 0.35);
+    const bg = ctx.createRadialGradient(W / 2, by, 4, W / 2, by, blobR);
+    bg.addColorStop(0, rgba([24, 22, 20], 0.85));
+    bg.addColorStop(0.7, rgba([24, 22, 20], 0.45));
+    bg.addColorStop(1, 'rgba(24,22,20,0)');
+    ctx.fillStyle = bg;
+    ctx.beginPath(); ctx.arc(W / 2, by, blobR, 0, Math.PI * 2); ctx.fill();
+    // 卫星墨点
+    for (let i = 0; i < 5; i++) {
+      const a = hash('m' + curIdx + i) * Math.PI * 2;
+      const rr = blobR * (0.7 + hash('n' + i) * 0.5);
+      const mx = W / 2 + Math.cos(a) * rr, my = by + Math.sin(a) * rr * 0.6;
+      ctx.fillStyle = rgba([24, 22, 20], 0.5);
+      ctx.beginPath(); ctx.arc(mx, my, 6 + hash('s' + i) * 14 * S.fuse, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.font = `700 ${fs}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const totalW = ctx.measureText(line.text).width;
+    let x = W / 2 - totalW / 2;
+    chars.forEach(ch => {
+      const w = ctx.measureText(ch.c).width;
+      const sung = t >= ch.t;
+      ctx.fillStyle = sung ? '#f5f1e6' : 'rgba(245,241,230,0.4)';
+      ctx.fillText(ch.c, x + w / 2, by);
+      x += w;
+    });
+    const nxt = lines[curIdx + 1];
+    if (nxt) {
+      ctx.fillStyle = 'rgba(24,22,20,0.45)';
+      const nfs = fitFont(nxt.text, 18, W * 0.7, 500);
+      ctx.font = `500 ${nfs}px "PingFang SC",system-ui,sans-serif`;
+      ctx.fillText(nxt.text, W / 2, by + fs + 44);
+    }
+    hint.style.opacity = '0';
+  } else {
+    hint.style.opacity = lines.length ? '1' : '0.5';
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+  }
+  ctx.restore();
+  // 粗砂纸颗粒
+  ctx.fillStyle = 'rgba(20,18,16,0.05)';
+  for (let i = 0; i < 120; i++) ctx.fillRect(hash('g' + i) * W, hash('gg' + i) * H, 1.5, 1.5);
+}
+requestAnimationFrame(frame);
+
+function applySetting(p) {
+  if (!p || !p.key) return;
+  const v = p.value;
+  if (p.key === 'fuse') { const n = Number(v); if (isFinite(n)) S.fuse = Math.min(1, Math.max(0, n)); }
+  else if (p.key === 'halftone') S.halftone = v !== false && v !== 'false';
+  else if (p.key === 'hardCut') S.hardCut = v !== false && v !== 'false';
+}
+const ping = () => { try { parent.postMessage({ __c100: 1, type: 'activity' }, '*'); } catch (_) {} };
+addEventListener('pointermove', ping, { passive: true });
+addEventListener('pointerdown', ping, { passive: true });
+addEventListener('wheel', ping, { passive: true });
+addEventListener('keydown', ping);
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.key === ' ') {
+    e.preventDefault();
+    try { parent.postMessage({ __c100: 1, type: 'key', payload: { key: 'Space' } }, '*'); } catch (_) {}
+  }
+}, true);
+addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || d.__c100 !== 1) return;
+  if (d.type === 'init') {
+    const p = d.payload || {};
+    lines = (p.lines || []).slice().sort((a, b) => a.t - b.t);
+    song = p.song || null;
+    if (p.accent) accent = p.accent;
+    curIdx = -1; cut = 0; clockT = 0; clockAt = performance.now();
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+  } else if (d.type === 'tick') {
+    clockT = d.payload.time; clockAt = performance.now(); playing = !!d.payload.playing;
+  } else if (d.type === 'beat') {
+    if (window.__liziShake !== false) beatPulse = Math.min(1, 0.4 + (d.payload.level || 0) * 0.6);
+  } else if (d.type === 'setting') {
+    if (d.payload.key === 'shake') window.__liziShake = d.payload.value !== false;
+    else applySetting(d.payload);
+  }
+});
+try { parent.postMessage({ __c100: 1, type: 'ready' }, '*'); } catch (_) {}
+</script>
+</body>
+</html>

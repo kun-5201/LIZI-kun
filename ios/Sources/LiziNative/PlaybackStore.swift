@@ -16,10 +16,15 @@ import Foundation
 /// 音频会话：AVAudioSession .playback 独占（不设 mixWithOthers），第一次真正
 /// 播放时才激活（照抄壳版 ContentView 的做法，避免打开 App 就抢走别的 App 的声音）。
 ///
-/// 注意：刻意不用 @MainActor（照抄壳版 LiveActivityManager 的做法）——
-/// App.init（非隔离上下文）要同步创建它，且 IslandControlRelay / 远程命令
-/// 的回调都在非隔离闭包里；主线程执行由各调用点的 Task { @MainActor in } 跳转
-/// + AVPlayer 回调队列 .main 保证，不靠编译器隔离。
+/// 第 22 轮第 5 件（照 Moumusic PlayerService）：状态全在 @MainActor 上——
+/// 之前刻意不用 @MainActor（App.init 同步创建、远程命令闭包非隔离），但旧任务
+/// 与新任务打架正是这么来的：非隔离的 store 任由旧 resolve / 旧歌词任务
+/// 在新一代点播后继续改状态。Moumusic 的三件套是 PlayerService、NowPlayingManager、
+/// AccountStore 全 @MainActor；这里同款：PlaybackStore、NowPlayingCoordinator、
+/// NativeIslandCoordinator 全 @MainActor。App.init 里用 MainActor.assumeIsolated
+/// 接线（启动本来就在主线程）；远程命令 / Intent 回调早已是 Task { @MainActor in }。
+/// LiveActivityManager 保持非隔离（壳版 WebHost 同样非隔离地持有它，见其文件头）。
+@MainActor
 final class PlaybackStore: ObservableObject {
     // MARK: - 发布状态（UI 工人直接读这些）
 
@@ -70,20 +75,28 @@ final class PlaybackStore: ObservableObject {
     private var timeObserver: Any?
     private var itemStatusObservation: NSKeyValueObservation?
     private var itemObservers: [NSObjectProtocol] = []
-    private var playToken = 0
+    /// 取链代际（第 22 轮第 5 件，照 Moumusic PlayerService.resolveGeneration）：
+    /// 唯一的代际计数器，放在取链的 owner（PlaybackStore）这里，不各处各建。
+    /// advanceGeneration() +1 并取消在飞的取链/歌词任务；取链链路的每一步
+    /// await 之后都查 gen == resolveGeneration，对不上就退，不碰状态。
+    /// currentPlayGeneration 是它的快照——开始播当前这首歌的那一代：
+    /// 切台只 bump resolveGeneration，不动它，所以已在播的歌的生命周期
+    /// （startItem / item 回调 / 失败兜底 / 播完切歌）不受切台影响，继续播；
+    /// 取链链路（resolveURL 各腿、歌词）认 resolveGeneration，切台中途的
+    /// 取链作废（见 advanceGeneration 注释的行为说明）。
+    private(set) var resolveGeneration = 0
+    /// 开始播当前这首歌的那一代（playCurrent 入口时置为当时的 resolveGeneration）。
+    private var currentPlayGeneration = 0
     /// 在飞的点播任务（r20 集成 L①：`playCurrent` 的 resolve 段包进可存取的
     /// Task；新点播先取消旧的，旧任务的 resolve 被取消后立刻向上抛
     /// CancellationError，不再攒出多个无返回的挂死调用；取消时记一条
     /// `resolve superseded` 面包屑。next()/previous() 都走 play()，
     /// 所以这里是唯一的取消点）。
     private var playTask: Task<Void, Never>?
-    /// 第 21 轮第 1 件：`playTask` 本身分不清“已完成”和“还在飞”
-    /// （完成的 Task 的 isCancelled 也是 false），旧代码重按一首已播完的歌
-    /// 也会记一条假的 `resolve superseded`。用代际数认：在飞 = playCurrent
-    /// 正在跑的那一代；play() 只在真正在飞时才记 superseded，`play tap`
-    /// 每次都记（带 priorInFlight）——下次诊断一眼分清“新进程重按”
-    /// （无 play tap 前序、无 superseded）还是“同进程内重按”。
-    private var playGeneration = 0
+    /// 在飞的歌词任务（第 22 轮第 5 件，照 Moumusic lyricsTask：新点播 /
+    /// 切台时 advanceGeneration() 一并取消；回来时还要再查代际，旧词
+    /// 绝不盖到新歌头上。歌词只给播放页用，岛上不再推词，见 NativeIslandCoordinator）。
+    private var lyricsTask: Task<Void, Never>?
     /// playTask 引用的那一代（defer 里只清自己这一代，不清新任务）。
     private var playTaskGen = 0
     /// 当前这代 playCurrent 是否正在跑（defer 里按代际清）。
@@ -110,6 +123,9 @@ final class PlaybackStore: ObservableObject {
     /// 不编假曲目；重新点一次星标（取消再点）后才有完整记录。
     private static let likedTracksKey = "lizi.native.likedTracks"
     private static let qualityKey = "lizi.native.quality"
+    /// r22：随机与循环重启后保留（与队列面板头部同一套状态，控制行两端按钮共用）。
+    private static let repeatModeKey = "lizi.native.repeatMode"
+    private static let shuffleKey = "lizi.native.isShuffled"
     private var likedIds: Set<String> {
         get {
             let arr = UserDefaults.standard.stringArray(forKey: Self.likedKey) ?? []
@@ -123,6 +139,12 @@ final class PlaybackStore: ObservableObject {
            let q = AudioQuality(rawValue: raw) {
             preferredQuality = q
         }
+        // r22：随机与循环重启后保留（缺省：顺序、不随机；旧值非法时同样回落缺省）。
+        if let raw = UserDefaults.standard.string(forKey: Self.repeatModeKey),
+           let mode = RepeatMode(rawValue: raw) {
+            repeatMode = mode
+        }
+        isShuffled = UserDefaults.standard.bool(forKey: Self.shuffleKey)
         configureAudioSession()
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
@@ -233,6 +255,27 @@ final class PlaybackStore: ObservableObject {
 
     // MARK: - 控制
 
+    /// 代际 +1，并取消所有进行中的取链/歌词任务（第 22 轮第 5 件，照
+    /// Moumusic PlayerService 1219–1221 行一次全 cancel + 1260 行代际+1）。
+    /// 唯一的代际入口：play()（新点播）、HomeViewModel.selectPlatform
+    /// （切台，G1）、stop()（清空/停播，免得在飞的取链在停播后又把歌起播）
+    /// 都走这里，不各自加一、不各自取消。
+    /// 只取消在飞任务：不停已在播的音频（player 不动）、不清队列
+    /// （queue / currentIndex 不动）、不动 currentPlayGeneration
+    /// （已在播那首歌的生命周期继续走完，见 resolveGeneration 注释）。
+    /// 行为说明（切台时）：切台瞬间正在取链的那首点播会被取消、不会出声，
+    /// 需重按——这是代际契约本身（旧 resolve 作废），不是静默失败；
+    /// 已在播的歌不受影响，继续播完、播完正常切下一首。
+    func advanceGeneration() {
+        resolveGeneration += 1
+        if let old = playTask, !old.isCancelled {
+            old.cancel()
+        }
+        lyricsTask?.cancel()
+        lyricsTask = nil
+        DiagLog.shared.recordPlaybackStep("resolve generation advanced gen=\(resolveGeneration)")
+    }
+
     /// 播放指定曲目（不在队列里时先把它设为单首队列）。
     func play(_ track: Track) {
         if let idx = queue.firstIndex(where: { $0.track.id == track.id && $0.track.platform == track.platform }) {
@@ -241,23 +284,39 @@ final class PlaybackStore: ObservableObject {
             queue = [QueueItem(track: track)]
             currentIndex = 0
         }
-        // r20 集成 L①：新点播先取消旧的在飞任务（旧 resolve 被取消后
-        // 立刻向上抛 CancellationError，不再挂死），再起新任务。
+        // r20 集成 L① + 第 22 轮第 5 件（Moumusic startPlaying 同款）：
+        // 新点播先 advanceGeneration()：代际 +1，取消旧的在飞任务
+        // （旧 resolve 被取消后立刻向上抛 CancellationError，不再攒出
+        // 多个无返回的挂死调用），再起新任务。
         // r21a：superseded 只在旧任务真正在飞时才记（见 playCurrentActive
-        // 注释）；`play tap` 每次都记——下次诊断里 5 次尝试若全是
+        // 注释）；`play tap` 每次都记（带 gen）——下次诊断里 5 次尝试若全是
         // “play tap priorInFlight=false 且无 superseded”，就是每次都是
         // 新进程（崩了重进），不是同进程重按。
-        playGeneration += 1
-        let gen = playGeneration
         let wasInFlight = playCurrentActive
-        if let old = playTask, !old.isCancelled {
-            old.cancel()
-            if wasInFlight {
-                DiagLog.shared.recordPlaybackStep("resolve superseded source=\(track.platform) id=\(track.id)")
-            }
+        advanceGeneration()
+        let gen = resolveGeneration
+        if wasInFlight {
+            DiagLog.shared.recordPlaybackStep("resolve superseded source=\(track.platform) id=\(track.id)")
         }
         playTaskGen = gen
-        DiagLog.shared.recordPlaybackStep("play tap source=\(track.platform) id=\(track.id) priorInFlight=\(wasInFlight)")
+        DiagLog.shared.recordPlaybackStep("play tap source=\(track.platform) id=\(track.id) priorInFlight=\(wasInFlight) gen=\(gen)")
+        // 第 22 轮第 5 件：看门狗——playCurrent 的第一步 "play start" 是
+        // 在 Task 里记的；主线程若在 tap 到 Task 启动之间卡死（04:22 诊断：
+        // tap 后 14 秒零记录），没有任何任务能记下这一步。看门狗跑在 detached
+        // 后台任务里（不依赖主线程），3 秒 / 8 秒后各查一次面包屑里有没有
+        // 这一代的 "play start source="；没有就记一笔，下次诊断直接分清
+        // “主线程卡死”还是“playCurrent 里某一步 trap”。已启动就静默。
+        Task.detached {
+            for waitSeconds in [3, 8] {
+                try? await Task.sleep(nanoseconds: UInt64(waitSeconds) * 1_000_000_000)
+                let crumbs = (DiagLog.shared.json()["playbackBreadcrumb"] as? [String]) ?? []
+                let started = crumbs.contains {
+                    $0.contains("play start source=") && $0.contains("gen=\(gen)")
+                }
+                if started { break }
+                DiagLog.shared.recordPlaybackStep("play start MISSING after \(waitSeconds)s gen=\(gen) (main stall suspected)")
+            }
+        }
         playTask = Task { @MainActor in await playCurrent(gen: gen) }
     }
 
@@ -364,17 +423,21 @@ final class PlaybackStore: ObservableObject {
         }
     }
 
-    /// 循环模式切换（顺序 → 全部循环 → 单曲循环）。
+    /// 循环模式切换（顺序 → 全部循环 → 单曲循环；r22：切完即写盘，重启保留）。
     func cycleRepeatMode() {
         switch repeatMode {
         case .off: repeatMode = .all
         case .all: repeatMode = .one
         case .one: repeatMode = .off
         }
+        UserDefaults.standard.set(repeatMode.rawValue, forKey: Self.repeatModeKey)
     }
 
-    /// 随机开关。
-    func setShuffled(_ on: Bool) { isShuffled = on }
+    /// 随机开关（r22：切完即写盘，重启保留）。
+    func setShuffled(_ on: Bool) {
+        isShuffled = on
+        UserDefaults.standard.set(on, forKey: Self.shuffleKey)
+    }
 
     /// 请求档位（EQ 页 P4 改这里；显示的永远是实际返回档位，不是这个）。
     func setPreferredQuality(_ q: AudioQuality) {
@@ -383,7 +446,10 @@ final class PlaybackStore: ObservableObject {
     }
 
     /// 停止（播完 / 清空队列用；不 end 灵动岛，岛靠暂停态 + staleDate 自然消失）。
+    /// 第 22 轮第 5 件：停播先 advanceGeneration()——在飞的取链若不作废，
+    /// 它 resolve 回来还会调 startItem 把歌重新起播，停播等于没停。
     func stop() {
+        advanceGeneration()
         player.pause()
         player.replaceCurrentItem(with: nil)
         isPlaying = false
@@ -406,11 +472,15 @@ final class PlaybackStore: ObservableObject {
                 playTask = nil
             }
         }
-        playToken += 1
-        let token = playToken
+        currentPlayGeneration = gen
         proxyTried = false
         fallbackRetried = false
         demoTried = false
+        // 第 22 轮第 5 件：入口第一步就记 "play start"（带 gen）——之前它
+        // 记在 @Published 赋值之后，tap→entry 之间是黑洞；现在分两步：
+        // entry（Task 调度到了）与 state set（赋值完成），死在哪一段
+        // 下次诊断直接看得到；看门狗（play() 里）就查这一句。
+        DiagLog.shared.recordPlaybackStep("play start source=\(track.platform) id=\(track.id) gen=\(gen)")
         isLoading = true
         errorMessage = nil
         isDemo = false
@@ -421,18 +491,25 @@ final class PlaybackStore: ObservableObject {
         isLiked = likedIds.contains(track.id)
         lyrics = []
         currentLyricIndex = -1
+        DiagLog.shared.recordPlaybackStep("play state set source=\(track.platform) id=\(track.id) gen=\(gen)")
 
-        DiagLog.shared.recordPlaybackStep("play start source=\(track.platform) id=\(track.id)")
-        // 歌词并行拉（不阻塞取链；切歌时 token 变了就丢弃）。
-        Task { @MainActor in
+        // 歌词并行拉（不阻塞取链；句柄留给 advanceGeneration() 取消，
+        // 回来时再查代际，旧词绝不盖到新歌头上）。
+        lyricsTask = Task { @MainActor in
             let parsed = await NativeBridge.lyrics(for: track)
-            guard token == self.playToken else { return }
+            guard gen == self.resolveGeneration, !Task.isCancelled else { return }
             self.lyrics = parsed.lines
             self.currentLyricIndex = LyricsParser.currentLineIndex(lines: parsed.lines, atMs: 0)
         }
 
-        let result = await resolveURL(for: track)
-        guard token == playToken else { return }
+        let result = await resolveURL(for: track, gen: gen)
+        // 第 22 轮第 5 件：resolve 回来先查代际（Moumusic 同款守卫）——
+        // 新一代已来 / 任务已取消时直接退，不碰状态、不起播；之前这里
+        // 只有 token 检查且静默 return，死在取链里时诊断里看不出是哪一代。
+        guard gen == resolveGeneration, !Task.isCancelled else {
+            DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) current=\(resolveGeneration) source=\(track.platform) id=\(track.id)")
+            return
+        }
         guard let result, let url = result.url else {
             // 取链全失败：不放演示音冒充，直接报错（演示音只在播放阶段兜底，见 handlePlaybackFailure）。
             isLoading = false
@@ -448,10 +525,10 @@ final class PlaybackStore: ObservableObject {
         if result.isTrial || result.isPreview {
             currentTrack?.isTrial = true
         }
-        DiagLog.shared.recordPlaybackStep("url ok source=\(track.platform) id=\(track.id) via=\(result.via)")
+        DiagLog.shared.recordPlaybackStep("url ok source=\(track.platform) id=\(track.id) via=\(result.via) scheme=\(url.scheme ?? "-")")
 
         activateSessionOnce()
-        await startItem(url: url, track: track, token: token)
+        await startItem(url: url, track: track, gen: gen)
     }
 
     /// 把地址交给 AVPlayer 并起播（token 抢占丢弃点 + 状态观察都落在这里）。
@@ -461,8 +538,10 @@ final class PlaybackStore: ObservableObject {
     /// 非 http(s)/代理/file 的地址直接拒掉（LX 只回 http(s)，平台只回
     /// http(s)，演示音是 file——别的 scheme 进 AVPlayer 没有意义，
     /// 只会把失败推迟到 item failed，还不如在这里明说）。
-    private func startItem(url: URL, track: Track, token: Int) async {
-        guard token == playToken else { return }
+    private func startItem(url: URL, track: Track, gen: Int) async {
+        // 播放生命周期认 currentPlayGeneration（开始播那首歌的那一代），
+        // 不认 resolveGeneration——切台只 bump 后者，已起播的歌不受影响。
+        guard gen == currentPlayGeneration else { return }
         DiagLog.shared.recordPlaybackStep("startItem begin source=\(track.platform) id=\(track.id) via=\(lastFetchVia) scheme=\(url.scheme ?? "-")")
         guard url.scheme == "http" || url.scheme == "https"
                 || url.scheme == AudioProxyLoader.scheme || url.isFileURL else {
@@ -481,7 +560,7 @@ final class PlaybackStore: ObservableObject {
             asset = AVURLAsset(url: url)
         }
         let item = AVPlayerItem(asset: asset)
-        observe(item: item, token: token)
+        observe(item: item, gen: gen)
         DiagLog.shared.recordPlaybackStep("set src via=\(lastFetchVia) source=\(track.platform) id=\(track.id)")
         player.replaceCurrentItem(with: item)
         player.play()
@@ -496,7 +575,7 @@ final class PlaybackStore: ObservableObject {
     /// 监听当前 item 的状态与结束事件（每次换 item 都重建观察，避免旧观察串台）。
     /// 第 21 轮第 1 件：ready/failed 都落盘——之前只有失败重试链记步，
     /// item 进了播放器后是 ready 还是 failed、失败原因是什么，诊断里看不到。
-    private func observe(item: AVPlayerItem, token: Int) {
+    private func observe(item: AVPlayerItem, gen: Int) {
         itemStatusObservation?.invalidate()
         for o in itemObservers { NotificationCenter.default.removeObserver(o) }
         itemObservers = []
@@ -504,11 +583,11 @@ final class PlaybackStore: ObservableObject {
         itemStatusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             guard let self else { return }
             Task { @MainActor in
-                guard token == self.playToken else { return }
+                guard gen == self.currentPlayGeneration else { return }
                 if item.status == .failed {
                     let reason = item.error?.localizedDescription ?? "-"
                     DiagLog.shared.recordPlaybackStep("item failed source=\(self.currentTrack?.platform ?? "-") id=\(self.currentTrack?.id ?? "-") error=\(reason)")
-                    await self.handlePlaybackFailure()
+                    await self.handlePlaybackFailure(gen: gen)
                 } else if item.status == .readyToPlay {
                     let d = item.asset.duration.seconds
                     if d.isFinite, d > 0 { self.duration = d }
@@ -525,7 +604,7 @@ final class PlaybackStore: ObservableObject {
         ) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
-                guard token == self.playToken else { return }
+                guard gen == self.currentPlayGeneration else { return }
                 if self.repeatMode == .one {
                     self.seek(to: 0)
                     self.resume()
@@ -539,8 +618,8 @@ final class PlaybackStore: ObservableObject {
         ) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
-                guard token == self.playToken else { return }
-                await self.handlePlaybackFailure()
+                guard gen == self.currentPlayGeneration else { return }
+                await self.handlePlaybackFailure(gen: gen)
             }
         }
         itemObservers = [endObserver, failObserver]
@@ -551,15 +630,14 @@ final class PlaybackStore: ObservableObject {
     /// 1) 同一条地址走音频代理再试一次（每首只一次）；
     /// 2) 按优先级往下一档重试一次（platform → cloud/LX）；
     /// 3) 再失败放演示音（界面照常走完，角标 reason 说清真正原因）。
-    private func handlePlaybackFailure() async {
-        guard let track = currentTrack else { return }
-        let token = playToken
+    private func handlePlaybackFailure(gen: Int) async {
+        guard gen == currentPlayGeneration, let track = currentTrack else { return }
         // 1) 代理兜底（直链失败可能是 CDN 临时抽风 / CORS 抖动）。
         if !proxyTried, let url = currentAssetURL, url.scheme != AudioProxyLoader.scheme {
             proxyTried = true
             DiagLog.shared.recordPlaybackStep("direct play FAIL, try proxy source=\(track.platform) id=\(track.id) via=\(lastFetchVia)")
             let proxyURL = proxyLoader.proxyURL(for: url, source: track.platform)
-            await startItem(url: proxyURL, track: track, token: token)
+            await startItem(url: proxyURL, track: track, gen: gen)
             return
         }
         // 2) 往下一档重试一次（已证实是死的那一档直接跳过）。
@@ -569,24 +647,24 @@ final class PlaybackStore: ObservableObject {
                                 skipCloud: lastFetchVia == "cloud",
                                 skipLX: false)
             DiagLog.shared.recordPlaybackStep("play FAIL, retry next tier source=\(track.platform) id=\(track.id) via=\(lastFetchVia)")
-            if let result = await resolveURL(for: track, skips: skips),
-               let url = result.url, token == playToken {
+            if let result = await resolveURL(for: track, gen: gen, skips: skips),
+               let url = result.url, gen == currentPlayGeneration {
                 lastFetchVia = result.via
                 lastFetchReason = result.reason
                 actualQuality = result.actualQuality
-                await startItem(url: url, track: track, token: token)
+                await startItem(url: url, track: track, gen: gen)
                 return
             }
         }
         // 3) 演示音兜底（第 11 轮第 8 件：取链失败走演示音、播放失败也走演示音）。
         // demoTried 护栏：演示音本身播失败时不再重进这一档，否则死循环。
-        if !demoTried, let demoURL = DemoTone.url(), token == playToken {
+        if !demoTried, let demoURL = DemoTone.url(), gen == currentPlayGeneration {
             demoTried = true
             DiagLog.shared.recordPlaybackStep("play FAIL, fallback to demo source=\(track.platform) id=\(track.id) reason=\(lastFetchReason)")
             isDemo = true
             actualQuality = nil
             errorMessage = nil
-            await startItem(url: demoURL, track: track, token: token)
+            await startItem(url: demoURL, track: track, gen: gen)
             return
         }
         isLoading = false
@@ -605,8 +683,12 @@ final class PlaybackStore: ObservableObject {
 
     /// 取链编排（player.js fetchTrackUrl 的顺序；每一档只在上一档明确拿不到
     /// 地址时才跑）。返回 nil = 各档都拿不到（调用方按 reason 报错，不编地址）。
-    private func resolveURL(for track: Track, skips: SkipSet = SkipSet()) async -> NativeBridge.SongURLResult? {
-        DiagLog.shared.recordPlaybackStep("resolve start source=\(track.platform) id=\(track.id)")
+    /// 第 22 轮第 5 件：每腿 await 之后都查代际（Moumusic 同款守卫）——
+    /// 新一代已来 / 任务已取消时立刻回 nil，不再往下烧平台请求、不把旧地址
+    /// 交给新一代；7 个平台都走这同一条编排（平台腿在 NativeBridge.songURL
+    /// 里按平台分，LX 腿只覆盖 5 家有 LX 解析的平台，见 lxSupported）。
+    private func resolveURL(for track: Track, gen: Int, skips: SkipSet = SkipSet()) async -> NativeBridge.SongURLResult? {
+        DiagLog.shared.recordPlaybackStep("resolve start source=\(track.platform) id=\(track.id) gen=\(gen)")
         // 本地文件：地址就是文件 URL，不走 LX、不走平台接口。
         if track.platform == "local" {
             if let fileURL = LocalMusic.fileURL(id: track.id) {
@@ -616,15 +698,31 @@ final class PlaybackStore: ObservableObject {
         }
         let lxSupported = ["netease", "qq", "kugou", "kuwo", "qishui"].contains(track.platform)
         let member = await NativeBridge.isMember(platform: track.platform)
+        guard gen == resolveGeneration, !Task.isCancelled else {
+            DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=member source=\(track.platform) id=\(track.id)")
+            return nil
+        }
         // 没会员 → LX 先（拿整首）；有会员 → 平台先。
         let lxFirst = !skips.skipLX && lxSupported && !member
         var lastReason = ""
         if lxFirst, let lx = await NativeBridge.lxSongURL(track: track, quality: preferredQuality) {
+            guard gen == resolveGeneration, !Task.isCancelled else {
+                DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=lx-first source=\(track.platform) id=\(track.id)")
+                return nil
+            }
             DiagLog.shared.recordPlaybackStep("resolve lx-first ok source=\(track.platform) id=\(track.id)")
             return lx
         }
+        guard gen == resolveGeneration, !Task.isCancelled else {
+            DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=lx-first source=\(track.platform) id=\(track.id)")
+            return nil
+        }
         if !skips.skipPlatform {
             let r = await NativeBridge.songURL(track: track, quality: preferredQuality)
+            guard gen == resolveGeneration, !Task.isCancelled else {
+                DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=platform source=\(track.platform) id=\(track.id)")
+                return nil
+            }
             lastReason = r.reason
             if let url = r.url {
                 // 没会员 + LX 已先跑过且没拿到时，官方的试听地址直接拒掉（不放试听片段）。
@@ -639,11 +737,23 @@ final class PlaybackStore: ObservableObject {
         }
         if !skips.skipCloud, track.platform == "netease",
            let cloud = await NativeBridge.cloudSongURL(track: track) {
+            guard gen == resolveGeneration, !Task.isCancelled else {
+                DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=cloud source=\(track.platform) id=\(track.id)")
+                return nil
+            }
             DiagLog.shared.recordPlaybackStep("resolve cloud ok id=\(track.id)")
             return cloud
         }
+        guard gen == resolveGeneration, !Task.isCancelled else {
+            DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=cloud source=\(track.platform) id=\(track.id)")
+            return nil
+        }
         if !lxFirst, !skips.skipLX, lxSupported,
            let lx = await NativeBridge.lxSongURL(track: track, quality: preferredQuality) {
+            guard gen == resolveGeneration, !Task.isCancelled else {
+                DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=lx-fallback source=\(track.platform) id=\(track.id)")
+                return nil
+            }
             DiagLog.shared.recordPlaybackStep("resolve lx fallback ok source=\(track.platform) id=\(track.id)")
             return lx
         }

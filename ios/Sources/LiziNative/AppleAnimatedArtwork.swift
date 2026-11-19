@@ -139,10 +139,14 @@ final class AppleAnimatedArtworkProvider {
     /// 合并调用（第二首歌）回调时，按这个 lane 给那首歌补记一笔。
     private var lastConclusion: [String: String] = [:]
     /// 本次 resolve 里 amp-api 失败过的 key（token/网络/限流）：ampGet 全部
-    /// 尝试耗尽时记入。resolve 据此把“查不到”与“没查成”分开——没查成记
-    /// route-b-download-failed，不记否定（瞬时问题，下次还查）；只有确定
-    /// “无匹配 / 无 editorialVideo”才记否定（r20 补）。
+    /// 尝试耗尽时记入。resolve 据此把“查不到”与“没查成”分开——没查成按
+    /// kind 记 lane（见 ampFailureLane），不记否定（瞬时问题，下次还查）；
+    /// 只有确定“无匹配 / 无 editorialVideo”才记否定（r20 补）。
     private var ampFailedKeys: Set<String> = []
+    /// 本次 resolve 里 amp-api 失败的种类（第 22 轮第 3 件，见 ampGet 分流）：
+    /// token-expired / rate-limited / network / token-unavailable 四种之一。
+    /// 调用方据此把失败记成对应的 lane，而不是都记 download-failed。
+    private var ampFailureKind: [String: String] = [:]
 
     private init() {}
 
@@ -268,6 +272,7 @@ final class AppleAnimatedArtworkProvider {
         lock.lock()
         let neg = negatives[key]
         ampFailedKeys.remove(key)
+        ampFailureKind.removeValue(forKey: key)
         lock.unlock()
         if let neg, Date().timeIntervalSince(neg.date) < Self.negativeTTL {
             lock.lock(); lastConclusion[key] = neg.lane; lock.unlock()
@@ -298,17 +303,21 @@ final class AppleAnimatedArtworkProvider {
             album = await albumIdBySearch(artist: track.artist, album: track.album, key: key)
         }
         guard let album else {
-            // 查不到分两种：amp-api 没查成（token/网络/限流）→ download-failed，
-            // 不记否定；真查了没匹配上 → no-match，记否定（r20 补：之前两种
-            // 都记 no-match，token 死掉时全锅都算到“匹配不上”头上）。
+            // 查不到分两种：amp-api 没查成（token/网络/限流）→ 按分流的 kind
+            // 记 lane（token-expired / rate-limited / network-failed /
+            // token-unavailable），不记否定；真查了没匹配上 → no-match，
+            // 记否定（r20 补：之前两种都记 no-match，token 死掉时全锅都算到
+            // “匹配不上”头上）。
             lock.lock()
             let ampFailed = ampFailedKeys.contains(key)
             lock.unlock()
             if ampFailed {
-                lock.lock(); lastConclusion[key] = "route-b-download-failed"; lock.unlock()
+                let lane = ampFailureLane(for: key)
+                let kind = ampFailureKind(for: key) ?? "network"
+                lock.lock(); lastConclusion[key] = lane; lock.unlock()
                 DiagLog.shared.recordLog(category: "apple-animated-artwork",
-                    message: "route B amp-api failed, album lookup inconclusive track=\(track.title) artist=\(track.artist) album=\(track.album)",
-                    fields: ["lane": "route-b-download-failed", "platform": track.platform])
+                    message: "route B amp-api failed kind=\(kind) album lookup inconclusive track=\(track.title) artist=\(track.artist) album=\(track.album)",
+                    fields: ["lane": lane, "kind": kind, "platform": track.platform])
                 return false
             }
             markNegative(key, lane: "route-b-no-match")
@@ -323,16 +332,18 @@ final class AppleAnimatedArtworkProvider {
             editorial = await fetchEditorialVideo(albumId: album.id, storefront: album.storefront, key: key)
         }
         guard let editorial else {
-            // 同上：没查成（token/网络）→ download-failed 不记否定；
-            // 真查了专辑无 editorialVideo → no-video，记否定。
+            // 同上：没查成（token/网络/限流）→ 按分流的 kind 记 lane，
+            // 不记否定；真查了专辑无 editorialVideo → no-video，记否定。
             lock.lock()
             let ampFailed = ampFailedKeys.contains(key)
             lock.unlock()
             if ampFailed {
-                lock.lock(); lastConclusion[key] = "route-b-download-failed"; lock.unlock()
+                let lane = ampFailureLane(for: key)
+                let kind = ampFailureKind(for: key) ?? "network"
+                lock.lock(); lastConclusion[key] = lane; lock.unlock()
                 DiagLog.shared.recordLog(category: "apple-animated-artwork",
-                    message: "route B amp-api failed, editorialVideo lookup inconclusive albumId=\(album.id) storefront=\(album.storefront) track=\(track.title)",
-                    fields: ["lane": "route-b-download-failed", "albumId": album.id, "storefront": album.storefront, "platform": track.platform])
+                    message: "route B amp-api failed kind=\(kind) editorialVideo lookup inconclusive albumId=\(album.id) storefront=\(album.storefront) track=\(track.title)",
+                    fields: ["lane": lane, "kind": kind, "albumId": album.id, "storefront": album.storefront, "platform": track.platform])
                 return false
             }
             markNegative(key, lane: "route-b-no-video")
@@ -372,6 +383,28 @@ final class AppleAnimatedArtworkProvider {
         lock.lock()
         negatives[key] = (Date(), lane)
         lock.unlock()
+    }
+
+    /// 本次 resolve 里 amp-api 失败的种类（ampGet 分流记的，四种之一；
+    /// 没失败过返回 nil）。
+    private func ampFailureKind(for key: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return ampFailureKind[key]
+    }
+
+    /// amp-api 没查成时记的 lane（第 22 轮第 3 件）：按 kind 分流，
+    /// token-expired / rate-limited / network-failed / token-unavailable
+    /// 四种都是“没查成”，不记否定——token 失效尤其不能记 7 天否定
+    /// （r20 已修，确认还在）：下次 prepare 照常重查，不会把一张有真素材
+    /// 的专辑判死 7 天。只有“无匹配 / 专辑根本无 editorialVideo”
+    /// 这两种确定性结论才记否定（见 resolveAndDownload 的 markNegative）。
+    private func ampFailureLane(for key: String) -> String {
+        switch ampFailureKind(for: key) ?? "network" {
+        case "token-expired": return "route-b-token-expired"
+        case "rate-limited": return "route-b-rate-limited"
+        case "token-unavailable": return "route-b-token-unavailable"
+        default: return "route-b-network-failed"
+        }
     }
 
     /// 单曲 → 专辑：songs/{id}?include=albums，取 relationships.albums.data[0].id。
@@ -529,11 +562,19 @@ final class AppleAnimatedArtworkProvider {
     /// 401/403 时改用网页 token 各重试一次；网页 token 过期/失效时重抠一次。
     /// key：本次 resolve 的专辑键——全部尝试耗尽时把 key 记进 ampFailedKeys，
     /// 调用方据此把“没查成”（token/网络/限流）与“查了没有”分开记（r20 补）。
+    /// 第 22 轮第 3 件：失败分流——401/403、429、5xx/网络错、没 token
+    /// 是四种不同结论，之前全部吞进同一个 "download-failed"，token 死掉
+    /// 几天都看不出来；现在按 kind 记进 ampFailureKind，调用方按 kind
+    /// 记 lane（见 ampFailureLane）。5xx 与 URLError/超时都算 network
+    /// （瞬时问题，下次还查）；只有 401/403 全灭才算 token-expired。
     private func ampGet(path: String, key: String) async throws -> Data {
         guard let url = URL(string: "https://amp-api.music.apple.com" + path) else {
             throw AmpError.http(0)
         }
         var lastError: Error?
+        var sawAuthFailure = false
+        var sawRateLimit = false
+        var attemptedAnyToken = false
         // 顺序：用户 token → 网页 token；每种最多试两次（第二次是刷新后重试）。
         let userToken = UserDefaults.standard.string(forKey: Self.userDevTokenKey) ?? ""
         var attempts: [(token: String, refreshWeb: Bool)] = []
@@ -541,12 +582,14 @@ final class AppleAnimatedArtworkProvider {
         attempts.append((await webTokenForRequest(), true))
         for (index, attempt) in attempts.enumerated() {
             guard !attempt.token.isEmpty else { continue }
+            attemptedAnyToken = true
             do {
                 let (data, resp) = try await fetchDataWithHeaders(
                     url: url, headers: ["Authorization": "Bearer \(attempt.token)"])
                 let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 if status == 200 { return data }
                 if status == 401 || status == 403 {
+                    sawAuthFailure = true
                     // 用户 token 被拒：换网页 token（下一轮）；网页 token 被拒：重抠一次再试。
                     if attempt.refreshWeb, index == attempts.count - 1 {
                         refreshWebTokenCache()
@@ -555,10 +598,12 @@ final class AppleAnimatedArtworkProvider {
                             let (data2, resp2) = try await fetchDataWithHeaders(
                                 url: url, headers: ["Authorization": "Bearer \(fresh)"])
                             if (resp2 as? HTTPURLResponse)?.statusCode == 200 { return data2 }
+                            if (resp2 as? HTTPURLResponse)?.statusCode == 429 { sawRateLimit = true }
                         }
                     }
                     continue
                 }
+                if status == 429 { sawRateLimit = true }
                 // 429（共用 token 被限流）与 5xx：不定论，直接当失败，不硬刷。
                 throw AmpError.http(status)
             } catch let e as AmpError {
@@ -567,9 +612,19 @@ final class AppleAnimatedArtworkProvider {
                 lastError = error
             }
         }
-        // 全部尝试耗尽：把 key 记进 ampFailedKeys，调用方据此把“没查成”
+        // 全部尝试耗尽：按分流记 kind，调用方据此把“没查成”
         // 与“查了没有”分开记（r20 补）；不记否定，下次还查。
-        lock.lock(); ampFailedKeys.insert(key); lock.unlock()
+        // token 失效（401/403）只记 kind，不记否定（r20 已修，确认还在）：
+        // 下次 prepare 照常重查，不会把一张有真素材的专辑判死 7 天。
+        let kind: String
+        if sawRateLimit { kind = "rate-limited" }
+        else if sawAuthFailure { kind = "token-expired" }
+        else if !attemptedAnyToken { kind = "token-unavailable" }
+        else { kind = "network" }
+        lock.lock()
+        ampFailedKeys.insert(key)
+        ampFailureKind[key] = kind
+        lock.unlock()
         throw lastError ?? AmpError.noToken
     }
 

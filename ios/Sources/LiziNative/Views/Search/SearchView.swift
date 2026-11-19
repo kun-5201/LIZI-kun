@@ -189,6 +189,16 @@ struct SearchView: View {
     // MARK: - 搜索历史下拉
 
     /// 聚焦且为空时弹出：每条可删，顶部「清空记录」两步确认（照抄壳版）。
+    ///
+    /// r22i 根因：这块之前是纯 VStack + `.frame(maxHeight: 320)`，没有任何
+    /// ScrollView。历史上限 20 条（SearchViewModel.historyMax），每行约 37pt、
+    /// 加表头约 36pt，满 20 条约 776pt，远超 320pt 上限；超出的行被后面的
+    /// .clipShape 裁掉、不可见也够不着，根本没有可滚动的容器。竖滑手势还会
+    /// 漏到下层 resultsContent 的 ScrollView 上（或只落在点按用的透明层），
+    /// 表现为「记录列表上下滑不动」，和 r20 的进页聚焦是两回事。
+    /// 修法：行列表包进纵向 ScrollView（表头留在外面，滑动时固定可见），
+    /// 外层 maxHeight 320 不动，负责给 ScrollView 定界；ScrollView 不加
+    /// scrollDismissesKeyboard——滑一下就收键盘会把面板本身收掉。
     private var historyPanel: some View {
         VStack(spacing: 0) {
             HStack {
@@ -216,35 +226,39 @@ struct SearchView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            ForEach(viewModel.history, id: \.self) { item in
-                HStack(spacing: 8) {
-                    Button {
-                        // 只设文字：onChange 的 300ms 防抖会接手搜，不在这里
-                        // 再调 searchNow，否则同一条词会连搜两次。
-                        viewModel.query = item
-                        searchFocused = false
-                    } label: {
-                        Text(item)
-                            .font(SearchDesignTokens.font(SearchDesignTokens.size14))
-                            .foregroundStyle(SearchDesignTokens.ink)
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(spacing: 0) {
+                    ForEach(viewModel.history, id: \.self) { item in
+                        HStack(spacing: 8) {
+                            Button {
+                                // 只设文字：onChange 的 300ms 防抖会接手搜，不在这里
+                                // 再调 searchNow，否则同一条词会连搜两次。
+                                viewModel.query = item
+                                searchFocused = false
+                            } label: {
+                                Text(item)
+                                    .font(SearchDesignTokens.font(SearchDesignTokens.size14))
+                                    .foregroundStyle(SearchDesignTokens.ink)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                            Button {
+                                viewModel.deleteHistory(item)
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(SearchDesignTokens.ink3)
+                                    .frame(width: 22, height: 22)
+                                    .background(SearchDesignTokens.coverPlaceholder)
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
                     }
-                    .buttonStyle(.plain)
-                    Button {
-                        viewModel.deleteHistory(item)
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(SearchDesignTokens.ink3)
-                            .frame(width: 22, height: 22)
-                            .background(SearchDesignTokens.coverPlaceholder)
-                            .clipShape(Circle())
-                    }
-                    .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
             }
         }
         .frame(maxHeight: 320)

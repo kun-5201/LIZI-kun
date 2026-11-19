@@ -1,7 +1,8 @@
 import AppIntents
 import Foundation
 
-/// 灵动岛展开页 / 锁屏卡片上的控制按钮（第 12 轮第 15 件：按 03:41 展开页截图重做）。
+/// 灵动岛展开页上的控制按钮（第 12 轮第 15 件：按 03:41 展开页截图重做；
+/// r22d：锁屏卡片已撤，按钮只剩岛的展开页在用，见 LiziLiveActivityViews.swift）。
 ///
 /// 本文件同时编进 App target 与扩展 target（project.yml 里 Lizi target 的
 /// sources 显式加了这一份）：扩展里只用它构造 Button(intent:)，

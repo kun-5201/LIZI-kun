@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>时计 · Folia</title>
+<style>
+  html,body{margin:0;height:100%;background:#0e0d0b;overflow:hidden}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #hint{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:9;
+    font:500 11px/1.5 ui-monospace,Consolas,monospace;color:rgba(220,225,245,.35);
+    letter-spacing:.08em;pointer-events:none;transition:opacity .6s;white-space:nowrap}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">等待第一句…</div>
+<script>
+"use strict";
+/* ============================================================================
+   时计（F14 · Folia pendolo）
+   ----------------------------------------------------------------------------
+   效果来源：Folia（AGPL-3.0，作者 chthollyphile）的 pendolo（时计）模式——
+   左侧齿轮，右侧歌词；表盘按鼓点走字，表心可放封面。本文件只学形态与流程，
+   按 Lizi 舞台承载协议（__c100）独立重写，未复制 Folia 源码。
+   注意：与目录里的 534 星盘时计不撞——534 是“巨型 3D 神圣几何星盘齿轮咬合
+   与时间倒流卡点”的 3D 场景（且无文件、不可播），本形态是钟表盘 + 歌词面板
+   的平面时计；去重见交回报告。
+   形态：左侧钟表盘——齿轮随时间咬合转动、时针分针走播放进度、表心圆盘
+   可放封面主色 + 歌名首字；右侧歌词逐字点亮；鼓点时齿轮跳一格。
+   播放联动：init 换歌重排；tick 推时间与表针；beat 让齿轮跳格。
+   ========================================================================== */
+const S = { coverOnFace: true, centerGradient: true, drumDial: true };
+window.__stagePanel = {
+  title: '时计 · Folia',
+  hint: '左侧齿轮钟表盘，右侧歌词；表针走播放进度。',
+  items: [
+    { key: 'coverOnFace', label: '表心封面', type: 'switch', def: true },
+    { key: 'centerGradient', label: '中心渐变', type: 'switch', def: true },
+    { key: 'drumDial', label: '鼓点拨表', type: 'switch', def: true },
+    { key: 'shake', label: '震动', type: 'switch', def: true }
+  ]
+};
+window.__liziShake = true;
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const hint = document.getElementById('hint');
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+resize();
+addEventListener('resize', resize);
+
+let lines = [], accent = [150, 165, 255], song = null, duration = 0;
+let clockT = 0, clockAt = performance.now(), playing = false;
+let curIdx = -1, gearStep = 0;
+const now = () => clockT + (playing ? (performance.now() - clockAt) / 1000 : 0);
+const rgb = a => `rgb(${a[0] | 0},${a[1] | 0},${a[2] | 0})`;
+const rgba = (a, al) => `rgba(${a[0] | 0},${a[1] | 0},${a[2] | 0},${al})`;
+function curIdxAt(t) { let idx = -1; for (let i = 0; i < lines.length; i++) { if (lines[i].t <= t + 0.001) idx = i; else break; } return idx; }
+function charsOf(line) {
+  if (line.chars && line.chars.length) return line.chars;
+  const cs = [...line.text], n = cs.length || 1;
+  return cs.map((c, i) => ({ c, t: line.t + (line.dur || 6) * i / n }));
+}
+function fitFont(text, px, maxW, weight) {
+  let s = px;
+  ctx.font = `${weight || 600} ${s}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  while (s > 12 && ctx.measureText(text).width > maxW) {
+    s -= 2;
+    ctx.font = `${weight || 600} ${s}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  }
+  return s;
+}
+function drawGear(x, y, r, teeth, rot) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+  ctx.strokeStyle = rgba(accent, 0.8); ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (let i = 0; i < teeth; i++) {
+    const a = i / teeth * Math.PI * 2;
+    ctx.moveTo(Math.cos(a) * r * 0.82, Math.sin(a) * r * 0.82);
+    ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, r * 0.82, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, r * 0.2, 0, Math.PI * 2); ctx.fillStyle = rgba(accent, 0.8); ctx.fill();
+  ctx.restore();
+}
+function frame() {
+  requestAnimationFrame(frame);
+  const t = now();
+  const idx = curIdxAt(t);
+  if (idx !== curIdx) curIdx = idx;
+  ctx.fillStyle = '#0e0d0b'; ctx.fillRect(0, 0, W, H);
+  const cx = W * 0.26, cy = H * 0.46, R = Math.min(W, H) * 0.3;
+  // 表盘
+  if (S.centerGradient) {
+    const g = ctx.createRadialGradient(cx, cy, 4, cx, cy, R);
+    g.addColorStop(0, rgba(accent, 0.3)); g.addColorStop(1, 'rgba(20,18,16,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.strokeStyle = rgba(accent, 0.9); ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
+  for (let i = 0; i < 12; i++) {
+    const a = i / 12 * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * R * 0.88, cy + Math.sin(a) * R * 0.88);
+    ctx.lineTo(cx + Math.cos(a) * R * 0.97, cy + Math.sin(a) * R * 0.97);
+    ctx.stroke();
+  }
+  // 齿轮：随时间咬合转动，鼓点跳一格
+  drawGear(cx - R * 0.95, cy + R * 0.75, R * 0.22, 10, t * 0.4 + gearStep * 0.6);
+  drawGear(cx + R * 0.95, cy - R * 0.75, R * 0.17, 8, -t * 0.5 - gearStep * 0.75);
+  // 表针走播放进度
+  const prog = duration > 0 ? Math.min(1, t / duration) : 0;
+  const ha = -Math.PI / 2 + prog * Math.PI * 2;
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(ha) * R * 0.62, cy + Math.sin(ha) * R * 0.62); ctx.stroke();
+  ctx.strokeStyle = rgba(accent, 0.9); ctx.lineWidth = 2;
+  const ma = -Math.PI / 2 + (t % 60) / 60 * Math.PI * 2;
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(ma) * R * 0.85, cy + Math.sin(ma) * R * 0.85); ctx.stroke();
+  // 表心：封面主色圆盘 + 歌名首字
+  if (S.coverOnFace) {
+    ctx.fillStyle = rgb(accent);
+    ctx.beginPath(); ctx.arc(cx, cy, R * 0.3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#101014';
+    ctx.font = `800 ${Math.round(R * 0.3)}px "PingFang SC",system-ui,sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(song && song.name ? [...song.name][0] : '♪', cx, cy);
+  }
+  // 右侧歌词
+  const lx = W * 0.52;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  const prev = lines[curIdx - 1], nxt = lines[curIdx + 1];
+  if (prev) {
+    ctx.fillStyle = 'rgba(255,255,255,0.28)';
+    const fs = fitFont(prev.text, 20, W * 0.42, 500);
+    ctx.font = `500 ${fs}px "PingFang SC",system-ui,sans-serif`;
+    ctx.fillText(prev.text, lx, H * 0.34);
+  }
+  const line = lines[curIdx];
+  if (line) {
+    const chars = charsOf(line);
+    const fs = fitFont(line.text, 40, W * 0.42, 700);
+    ctx.font = `700 ${fs}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+    let x = lx;
+    chars.forEach(ch => {
+      const w = ctx.measureText(ch.c).width;
+      const sung = t >= ch.t;
+      ctx.fillStyle = sung ? '#ffffff' : 'rgba(255,255,255,0.35)';
+      if (sung) { ctx.shadowColor = rgb(accent); ctx.shadowBlur = 10; }
+      ctx.fillText(ch.c, x, H * 0.48);
+      ctx.shadowBlur = 0;
+      x += w;
+    });
+    hint.style.opacity = '0';
+  } else {
+    hint.style.opacity = lines.length ? '1' : '0.5';
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+  }
+  if (nxt) {
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    const fs = fitFont(nxt.text, 20, W * 0.42, 500);
+    ctx.font = `500 ${fs}px "PingFang SC",system-ui,sans-serif`;
+    ctx.fillText(nxt.text, lx, H * 0.62);
+  }
+  ctx.textAlign = 'left';
+}
+requestAnimationFrame(frame);
+
+function applySetting(p) {
+  if (!p || !p.key) return;
+  const v = p.value;
+  if (p.key === 'coverOnFace') S.coverOnFace = v !== false && v !== 'false';
+  else if (p.key === 'centerGradient') S.centerGradient = v !== false && v !== 'false';
+  else if (p.key === 'drumDial') S.drumDial = v !== false && v !== 'false';
+}
+const ping = () => { try { parent.postMessage({ __c100: 1, type: 'activity' }, '*'); } catch (_) {} };
+addEventListener('pointermove', ping, { passive: true });
+addEventListener('pointerdown', ping, { passive: true });
+addEventListener('wheel', ping, { passive: true });
+addEventListener('keydown', ping);
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.key === ' ') {
+    e.preventDefault();
+    try { parent.postMessage({ __c100: 1, type: 'key', payload: { key: 'Space' } }, '*'); } catch (_) {}
+  }
+}, true);
+addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || d.__c100 !== 1) return;
+  if (d.type === 'init') {
+    const p = d.payload || {};
+    lines = (p.lines || []).slice().sort((a, b) => a.t - b.t);
+    song = p.song || null;
+    duration = Number(p.duration) || 0;
+    if (p.accent) accent = p.accent;
+    curIdx = -1; gearStep = 0; clockT = 0; clockAt = performance.now();
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+  } else if (d.type === 'tick') {
+    clockT = d.payload.time; clockAt = performance.now(); playing = !!d.payload.playing;
+  } else if (d.type === 'beat') {
+    if (S.drumDial && window.__liziShake !== false) gearStep += 1;
+  } else if (d.type === 'setting') {
+    if (d.payload.key === 'shake') window.__liziShake = d.payload.value !== false;
+    else applySetting(d.payload);
+  }
+});
+try { parent.postMessage({ __c100: 1, type: 'ready' }, '*'); } catch (_) {}
+</script>
+</body>
+</html>

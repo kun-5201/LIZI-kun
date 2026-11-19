@@ -479,6 +479,13 @@ extension NetEaseService {
                     "at": Int(Date().timeIntervalSince1970),
                 ])
             }
+            // 退出登录：上游调用抛错（超时/断网）时本地也必须清掉 —— Folia
+            // logout 是先读 cookie 发请求、本地登录态当即作废，不等上游回答。
+            // 这里请求本身要带 cookie 头去上游作废，所以不能先清再发；但发
+            // 失败也不能留着死 cookie（成功分支已清，只补失败分支）。
+            if hit.key == "logout" {
+                session.clear()
+            }
             return .json(502, ["code": 502, "error": error.localizedDescription])
         }
     }

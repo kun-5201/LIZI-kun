@@ -166,7 +166,7 @@ struct StageView: View {
                 .frame(maxWidth: .infinity)
 
             // 设置按钮：只有形态声明了 __stagePanel 才显示（壳版同款显隐规则；
-            // 69 个已收录形态全有声明，所以实际常驻）。
+            // 85 个已收录形态全有声明，所以实际常驻）。
             if bridge.panelSpec != nil {
                 Button(action: {
                     bridge.wakeHUD()

@@ -2,8 +2,8 @@ import ActivityKit
 import Foundation
 import UIKit
 
-/// Drives the Dynamic Island / Live Activity that shows the synced lyric
-/// of the song playing in the Lizi web player.
+/// Drives the Dynamic Island / Live Activity (Apple Music 款：封面 /
+/// 歌名+歌手 / 波形 / 进度 / 控制行，无歌词——第 22 轮第 5 件）。
 ///
 /// Adapted from island-lyrics, but deliberately NOT @MainActor: the Lizi
 /// WebHost that owns this manager is not MainActor-isolated, and Swift
@@ -15,8 +15,12 @@ import UIKit
 /// - Starting requires ONLY `areActivitiesEnabled`. A switched-off
 ///   "More Frequent Updates" (frequentPushesEnabled, iOS 17.2+) is a warning,
 ///   never a gate — otherwise the island silently stays black.
-/// - `staleDate` is 10 seconds on every push, so the island disappears
-///   shortly after playback stops. (第 12 轮 03:43 收紧：原来 15 秒。)
+/// - `staleDate` 是 islandStaleSeconds（8 秒），每次推送都带。岛的
+///   正常更新是 5 秒一次（进度节流），8 秒 = 5 秒间隔 + 3 秒余量：
+///   正常播放中途不会被杀；App 被挂起后划掉（iOS 直接 SIGKILL，不走
+///   applicationWillTerminate，任何代码都跑不到）时，staleDate 是唯一能
+///   清残岛的手段——8 秒是底线，再短会在更新被系统节流时误杀正常播放
+///   的岛。（第 12 轮 03:43 从 15 秒收紧到 10 秒；第 22 轮第 5 件再收紧到 8 秒。）
 /// - Ending uses dismissalPolicy `.immediate`.
 final class LiveActivityManager {
 
@@ -36,6 +40,16 @@ final class LiveActivityManager {
     private(set) var authorization: IslandAuthorization = .notAllowed
 
     private var activity: Activity<LiziLyricsAttributes>?
+
+    /// 残岛清理余量（第 22 轮第 5 件）：见文件头——5 秒进度推送间隔 + 3 秒余量。
+    static let islandStaleSeconds: TimeInterval = 8
+
+    /// startActivity 的代际（第 22 轮第 5 件）：快速切歌时两个
+    /// startActivity 的 Task 会在 `await existing.end` 处交错——只清
+    /// self.activity 那一份会漏掉另一个已请求的活动，留下一个没人管的
+    /// 残岛。现在 Task 里先清系统全部活动，再查代际对不上就直接退，
+    /// 交错的旧启动不会把刚被清掉的活动又起回来。
+    private var startGeneration = 0
 
     /// 后台起岛被拦下时暂存的启动请求（回前台再起；第 20 轮）。
     private struct PendingStart {
@@ -107,11 +121,17 @@ final class LiveActivityManager {
                 fields: ["reason": "island-not-allowed", "lane": "island"])
             return
         }
-        // 第 20 轮：ContentState 超 4KB 必被 ActivityKit 拒（r19 真机 15 次
-        // Payload maximum size exceeded）；先按预算压封面，仍超就去掉封面。
+        // 第 22 轮第 3 件：起岛窗口里再加两步落盘——fittedState 之前记
+        // "island start begin"，Activity.request 之前记 "island request begin"。
+        // 死亡窗口（r21a：island start ok 之后、LX 返回之前约 2 秒）里，
+        // 下次死时 lastDeathStep 能直接落在 payload 计算 / Activity.request
+        // 这两步上，而不是只有一句 start ok。
+        DiagLog.shared.recordPlaybackStep("island start begin")
         let fitted = Self.fittedState(state, title: title, artist: artist, log: true)
         lastTitle = title
         lastArtist = artist
+        startGeneration += 1
+        let gen = startGeneration
         Task { @MainActor in
             // 第 20 轮：后台 Activity.request 必抛 Target is not foreground
             //（r19 真机 5 次）。后台不请求、只暂存，回前台再起；同一首歌只记一次。
@@ -119,12 +139,17 @@ final class LiveActivityManager {
                 self.deferStart(title: title, artist: artist, state: fitted)
                 return
             }
-            if let existing = self.activity {
-                await existing.end(nil, dismissalPolicy: .immediate)
-                self.activity = nil
+            // 第 22 轮第 5 件：清系统里全部活动（不只 self.activity 那一份——
+            // 快速切歌交错时另一个已请求的活动不在 self.activity 里，只清
+            // 自己的那份会留孤儿残岛）；清完查代际，过期的启动直接退。
+            for activity in Activity<LiziLyricsAttributes>.activities {
+                await activity.end(nil, dismissalPolicy: .immediate)
             }
+            self.activity = nil
+            guard gen == self.startGeneration else { return }
             let attributes = LiziLyricsAttributes(title: title, artist: artist)
-            let content = ActivityContent(state: fitted, staleDate: Date().addingTimeInterval(10))
+            let content = ActivityContent(state: fitted, staleDate: Date().addingTimeInterval(Self.islandStaleSeconds))
+            DiagLog.shared.recordPlaybackStep("island request begin")
             do {
                 let newActivity = try Activity.request(
                     attributes: attributes,
@@ -200,45 +225,94 @@ final class LiveActivityManager {
         return size
     }
 
-    /// 把 state 压进预算：先原样试；超了就把封面按 (96px, 0.6) → (80px, 0.5)
-    /// → (64px, 0.5) 逐档重压；仍超就去掉封面（词和进度一定能推上去）。
+    /// 把 state 压进预算（第 22 轮第 3 件：先算预算再放封面，不再先做大再砍）。
+    ///
+    /// r20 的做法是先把 120px 封面原样编一次（真机每次先算到 40–80KB），
+    /// 再逐档重压、最后丢封面——大封面的编解码与三次缩图全白跑。
+    /// 现在反过来：先把不带封面的 state 编一次得 baseSize（词 + 进度，
+    /// 只有一两百字节），剩余预算 = 3800 − baseSize；封面档位按剩余预算挑，
+    /// 每档先按 base64 膨胀（data.count × 4/3 + 16 字节余量）估算，估算
+    /// 进不去的档直接跳过（不编、不解），估算能进的才编一次确认；
+    /// 没有任何档能进就直接不放封面。baseSize 自己就超预算时也直接不放。
     /// 起岛/更新都过这一道，所以两条组装路（原生协调器与网页桥）不用各自再算。
-    /// log=true 只在起岛时记（更新每 5 秒一次，不记，免得刷诊断）。
+    /// log=true 只在起岛时记（更新每 5 秒一次，不记日志，免得刷诊断）；
+    /// 但面包屑的 calc begin/end 只在 log=true 时记（起岛窗口才需要它，
+    /// 更新路径只记 update begin/end，不再多占面包屑位置）。
     static func fittedState(_ state: LiziLyricsAttributes.ContentState, title: String, artist: String, log: Bool = false) -> LiziLyricsAttributes.ContentState {
-        let originalSize = payloadSize(title: title, artist: artist, state: state)
-        guard state.coverData != nil, originalSize > islandPayloadBudget else {
-            if log, state.coverData != nil {
-                DiagLog.shared.recordLog(category: "island",
-                    message: "island payload bytes=\(originalSize) cover kept",
-                    fields: ["reason": "island-payload-ok", "lane": "island"])
+        // 先算不带封面的 base：进度与播放态一定能推上去，封面只是添头。
+        var noCover = state
+        noCover.coverData = nil
+        let baseSize = payloadSize(title: title, artist: artist, state: noCover)
+        var calcOutcome = "dropped"
+        let calcBaseForLog = baseSize
+        if log {
+            DiagLog.shared.recordPlaybackStep("island payload calc begin base=\(baseSize)")
+        }
+        defer {
+            if log {
+                DiagLog.shared.recordPlaybackStep("island payload calc end base=\(calcBaseForLog) cover=\(calcOutcome)")
             }
+        }
+        guard state.coverData != nil else {
+            calcOutcome = "none"
             return state
+        }
+        guard baseSize <= islandPayloadBudget else {
+            if log {
+                DiagLog.shared.recordLog(category: "island",
+                    message: "island payload base over budget bytes=\(baseSize) cover dropped (base over budget)",
+                    fields: ["reason": "island-payload-base-over-budget", "lane": "island"])
+            }
+            calcOutcome = "dropped-base-over"
+            return noCover
+        }
+        let remaining = islandPayloadBudget - baseSize
+        if let data = state.coverData {
+            // 原图（协调器已下采样到 120px）先试：能进预算就原样保留，
+            // 不白白先压一档；进不去才往下走逐档重压。
+            let estimatedOriginal = baseSize + data.count * 4 / 3 + 16
+            if estimatedOriginal <= islandPayloadBudget {
+                let size = payloadSize(title: title, artist: artist, state: state)
+                if size <= islandPayloadBudget {
+                    if log {
+                        DiagLog.shared.recordLog(category: "island",
+                            message: "island payload bytes=\(baseSize)->\(size) cover kept",
+                            fields: ["reason": "island-payload-ok", "lane": "island"])
+                    }
+                    calcOutcome = "kept"
+                    return state
+                }
+            }
         }
         if let data = state.coverData, let image = UIImage(data: data) {
             for (px, quality) in [(96, CGFloat(0.6)), (80, CGFloat(0.5)), (64, CGFloat(0.5))] {
                 guard let thumb = thumbnail(image, maxSide: CGFloat(px), quality: quality) else { continue }
+                // 先估算再确认：base64 膨胀 + 16 字节余量，进不去直接跳过本档，
+                // 不做整 state 的 JSON 编码；估算能进才编一次确认。
+                let estimated = baseSize + thumb.count * 4 / 3 + 16
+                guard estimated <= islandPayloadBudget else { continue }
                 var candidate = state
                 candidate.coverData = thumb
                 let size = payloadSize(title: title, artist: artist, state: candidate)
                 if size <= islandPayloadBudget {
                     if log {
                         DiagLog.shared.recordLog(category: "island",
-                            message: "island payload bytes=\(originalSize)->\(size) cover down to \(px)px q\(quality)",
+                            message: "island payload bytes=\(baseSize)->\(size) cover down to \(px)px q\(quality)",
                             fields: ["reason": "island-payload-shrunk", "lane": "island"])
                     }
+                    calcOutcome = "shrunk-\(px)px"
                     return candidate
                 }
             }
         }
-        var dropped = state
-        dropped.coverData = nil
-        let size = payloadSize(title: title, artist: artist, state: dropped)
+        let size = payloadSize(title: title, artist: artist, state: noCover)
         if log {
             DiagLog.shared.recordLog(category: "island",
-                message: "island payload bytes=\(originalSize)->\(size) cover dropped (still over budget)",
+                message: "island payload bytes=\(baseSize)->\(size) cover dropped (no tier fits, remaining=\(remaining))",
                 fields: ["reason": "island-payload-cover-dropped", "lane": "island"])
         }
-        return dropped
+        calcOutcome = "dropped-no-tier-fits"
+        return noCover
     }
 
     /// 等比缩到最长边 px，JPEG 重压（只在 fittedState 超预算时走，不常跑）。
@@ -255,15 +329,21 @@ final class LiveActivityManager {
     }
 
     /// Pushes a new state to the running activity. No-op when none is running.
-    /// The coordinator throttles calls: only on lyric-line / track change,
-    /// or a progress refresh at most every 5 seconds.
+    /// The coordinator throttles calls: only on track change / play-state
+    /// change / liked change, or a progress refresh at most every 5 seconds
+    ///（第 22 轮第 5 件：歌词行变不再推岛——ContentState 已无歌词字段）。
     func updateActivity(state: LiziLyricsAttributes.ContentState) {
         guard let activity else { return }
+        // 第 22 轮第 3 件：更新也进面包屑（开始/结束各一步）。更新最多 5 秒
+        // 一次，面包屑是滚动 30 条，死在更新里时最后一步就是这两句之一；
+        // 起岛窗口（切歌后 2 秒内）最多只有一次更新，不会把取链的步挤掉。
+        DiagLog.shared.recordPlaybackStep("island update begin")
         // 更新同样受 4KB 限制：超了整条更新被拒，先按预算压封面（不记日志）。
         let fitted = Self.fittedState(state, title: lastTitle, artist: lastArtist)
         Task { @MainActor in
-            let content = ActivityContent(state: fitted, staleDate: Date().addingTimeInterval(10))
+            let content = ActivityContent(state: fitted, staleDate: Date().addingTimeInterval(Self.islandStaleSeconds))
             await activity.update(content)
+            DiagLog.shared.recordPlaybackStep("island update end")
         }
     }
 

@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>凝彩 · Folia</title>
+<style>
+  html,body{margin:0;height:100%;background:#101014;overflow:hidden}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #hint{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:9;
+    font:500 11px/1.5 ui-monospace,Consolas,monospace;color:rgba(220,225,245,.35);
+    letter-spacing:.08em;pointer-events:none;transition:opacity .6s;white-space:nowrap}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">等待第一句…</div>
+<script>
+"use strict";
+/* ============================================================================
+   凝彩（F02 · Folia tempera）
+   ----------------------------------------------------------------------------
+   效果来源：Folia（AGPL-3.0，作者 chthollyphile）的 tempera（凝彩）模式——
+   确定性色块构图歌词 PV：上下色块分割与分割线、鼓点上墨染晕开、景深模糊层
+   与视差。本文件只学形态与流程，按 Lizi 舞台承载协议（__c100）独立重写，
+   未复制 Folia 源码；不依赖 React / Pixi。
+   形态：画面按色块分割（双色 / 单色 / 渐变三档）；当前句压在分割线上；
+   行变（beat）时墨点在纸面晕开一圈；前后景按句错位出视差。
+   播放联动：init 换歌重排；tick 推时间；beat 触发墨染闪光。
+   ========================================================================== */
+const S = { colorMode: 'duo', inkFlash: true, depth: true };
+window.__stagePanel = {
+  title: '凝彩 · Folia',
+  hint: '色块构图歌词 PV：色块分割 + 鼓点墨染 + 景深视差。',
+  items: [
+    { key: 'colorMode', label: '配色', type: 'segment', def: 'duo', options: [
+      { v: 'duo', t: '双色' }, { v: 'mono', t: '单色' }, { v: 'gradient', t: '渐变' } ] },
+    { key: 'inkFlash', label: '鼓点墨染', type: 'switch', def: true },
+    { key: 'depth', label: '景深视差', type: 'switch', def: true },
+    { key: 'shake', label: '震动', type: 'switch', def: true }
+  ]
+};
+window.__liziShake = true;
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const hint = document.getElementById('hint');
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+resize();
+addEventListener('resize', resize);
+
+let lines = [], accent = [150, 165, 255], song = null;
+let clockT = 0, clockAt = performance.now(), playing = false;
+let inkPulse = 0, curIdx = -1;
+const now = () => clockT + (playing ? (performance.now() - clockAt) / 1000 : 0);
+const clamp01 = v => v < 0 ? 0 : v > 1 ? 1 : v;
+const rgb = a => `rgb(${a[0] | 0},${a[1] | 0},${a[2] | 0})`;
+const rgba = (a, al) => `rgba(${a[0] | 0},${a[1] | 0},${a[2] | 0},${al})`;
+const shade = (a, f) => [a[0] * f, a[1] * f, a[2] * f];
+function curIdxAt(t) { let idx = -1; for (let i = 0; i < lines.length; i++) { if (lines[i].t <= t + 0.001) idx = i; else break; } return idx; }
+function charsOf(line) {
+  if (line.chars && line.chars.length) return line.chars;
+  const cs = [...line.text], n = cs.length || 1;
+  return cs.map((c, i) => ({ c, t: line.t + (line.dur || 6) * i / n }));
+}
+function fitFont(text, px, maxW, weight) {
+  let s = px;
+  ctx.font = `${weight || 600} ${s}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  while (s > 12 && ctx.measureText(text).width > maxW) {
+    s -= 2;
+    ctx.font = `${weight || 600} ${s}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  }
+  return s;
+}
+function frame() {
+  requestAnimationFrame(frame);
+  const t = now();
+  const idx = curIdxAt(t);
+  if (idx !== curIdx) { curIdx = idx; if (S.inkFlash) inkPulse = 1; }
+  inkPulse *= 0.96;
+  const splitY = H * 0.42; // 色块分割线
+  const drift = S.depth ? Math.sin(t * 0.25) * 14 : 0;
+  // 色块背景
+  if (S.colorMode === 'gradient') {
+    const g = ctx.createLinearGradient(0, 0, W, H);
+    g.addColorStop(0, rgb(accent)); g.addColorStop(1, '#101014');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  } else if (S.colorMode === 'mono') {
+    ctx.fillStyle = rgb(shade(accent, 0.32)); ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    ctx.fillRect(0, splitY, W, H - splitY);
+  } else {
+    ctx.fillStyle = rgb(accent); ctx.fillRect(0, 0, W, splitY);
+    ctx.fillStyle = '#101014'; ctx.fillRect(0, splitY, W, H - splitY);
+  }
+  // 墨染：鼓点时在分割线附近晕开的墨点
+  if (S.inkFlash && inkPulse > 0.03) {
+    const ix = W * 0.5 + drift, iy = splitY;
+    const r = 30 + (1 - inkPulse) * Math.min(W, H) * 0.45;
+    const ig = ctx.createRadialGradient(ix, iy, 4, ix, iy, r);
+    ig.addColorStop(0, rgba([20, 20, 28], 0.5 * inkPulse));
+    ig.addColorStop(1, 'rgba(20,20,28,0)');
+    ctx.fillStyle = ig;
+    ctx.beginPath(); ctx.arc(ix, iy, r, 0, Math.PI * 2); ctx.fill();
+  }
+  // 分割线
+  ctx.fillStyle = S.colorMode === 'duo' ? 'rgba(255,255,255,0.85)' : rgba(accent, 0.9);
+  ctx.fillRect(0, splitY - 1.5, W, 3);
+  // 景深：上一句淡化在后景
+  const prev = lines[curIdx - 1];
+  if (prev && S.depth) {
+    ctx.save(); ctx.globalAlpha = 0.22; ctx.translate(drift * -0.5, 0);
+    ctx.fillStyle = '#fff';
+    const pfs = fitFont(prev.text, 30, W * 0.8, 500);
+    ctx.font = `500 ${pfs}px "PingFang SC",system-ui,sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(prev.text, W / 2, splitY - 70);
+    ctx.restore();
+  }
+  const line = lines[curIdx];
+  if (line) {
+    const chars = charsOf(line);
+    const fs = fitFont(line.text, Math.min(W * 0.085, 60), W * 0.86, 700);
+    ctx.font = `700 ${fs}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    // 当前句压在分割线上，逐字点亮
+    const totalW = ctx.measureText(line.text).width;
+    let x = W / 2 - totalW / 2;
+    chars.forEach(ch => {
+      const w = ctx.measureText(ch.c).width;
+      const sung = t >= ch.t;
+      ctx.fillStyle = sung ? '#ffffff' : rgba([255, 255, 255], S.colorMode === 'duo' ? 0.45 : 0.55);
+      if (sung) { ctx.shadowColor = S.colorMode === 'duo' ? 'rgba(0,0,0,0.4)' : rgb(accent); ctx.shadowBlur = 10; }
+      ctx.fillText(ch.c, x + w / 2, splitY + (S.depth ? drift * 0.3 : 0));
+      ctx.shadowBlur = 0;
+      x += w;
+    });
+    // 下一句预告
+    const nxt = lines[curIdx + 1];
+    if (nxt) {
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      const nfs = fitFont(nxt.text, 20, W * 0.7, 500);
+      ctx.font = `500 ${nfs}px "PingFang SC",system-ui,sans-serif`;
+      ctx.fillText(nxt.text, W / 2, splitY + fs + 44);
+    }
+    hint.style.opacity = '0';
+  } else {
+    hint.style.opacity = lines.length ? '1' : '0.5';
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+  }
+}
+requestAnimationFrame(frame);
+
+function applySetting(p) {
+  if (!p || !p.key) return;
+  const v = p.value;
+  if (p.key === 'colorMode') { const s = String(v); if (s === 'duo' || s === 'mono' || s === 'gradient') S.colorMode = s; }
+  else if (p.key === 'inkFlash') S.inkFlash = v !== false && v !== 'false';
+  else if (p.key === 'depth') S.depth = v !== false && v !== 'false';
+}
+const ping = () => { try { parent.postMessage({ __c100: 1, type: 'activity' }, '*'); } catch (_) {} };
+addEventListener('pointermove', ping, { passive: true });
+addEventListener('pointerdown', ping, { passive: true });
+addEventListener('wheel', ping, { passive: true });
+addEventListener('keydown', ping);
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.key === ' ') {
+    e.preventDefault();
+    try { parent.postMessage({ __c100: 1, type: 'key', payload: { key: 'Space' } }, '*'); } catch (_) {}
+  }
+}, true);
+addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || d.__c100 !== 1) return;
+  if (d.type === 'init') {
+    const p = d.payload || {};
+    lines = (p.lines || []).slice().sort((a, b) => a.t - b.t);
+    song = p.song || null;
+    if (p.accent) accent = p.accent;
+    curIdx = -1; inkPulse = 0; clockT = 0; clockAt = performance.now();
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+  } else if (d.type === 'tick') {
+    clockT = d.payload.time; clockAt = performance.now(); playing = !!d.payload.playing;
+  } else if (d.type === 'beat') {
+    if (S.inkFlash && window.__liziShake !== false) inkPulse = Math.min(1, 0.5 + (d.payload.level || 0) * 0.5);
+  } else if (d.type === 'setting') {
+    if (d.payload.key === 'shake') window.__liziShake = d.payload.value !== false;
+    else applySetting(d.payload);
+  }
+});
+try { parent.postMessage({ __c100: 1, type: 'ready' }, '*'); } catch (_) {}
+</script>
+</body>
+</html>

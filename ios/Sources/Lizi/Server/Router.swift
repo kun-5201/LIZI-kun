@@ -193,9 +193,12 @@ final class LiziRouter {
         //  - verify-failed：校验那一步网络错，cookie 保留、不要清。
         if path == "/api/session" {
             guard session.hasMusicU else { return .json(200, ["loggedIn": false, "reason": "no-session"]) }
+            // Folia signInRanOut 的竞守：校验在路上时用户可能刚扫码登上，
+            // 新 MUSIC_U 已落盘；只清校验的那一份，换了就留着，别把新登录一起清掉。
+            let musicUBefore = session.musicU
             do {
                 if let v = try await netease.sessionVerify() { return .json(200, v) }
-                session.clear()
+                if session.musicU == musicUBefore { session.clear() }
                 return .json(200, ["loggedIn": false, "reason": "expired"])
             } catch {
                 return .json(200, ["loggedIn": false, "reason": "verify-failed", "error": error.localizedDescription])

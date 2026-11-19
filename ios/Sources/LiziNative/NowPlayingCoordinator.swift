@@ -18,6 +18,9 @@ import UIKit
 ///
 /// 注意：刻意不用 @MainActor（见 PlaybackStore 的注释）——远程命令的回调闭包
 /// 是非隔离的，直接调 store 的方法；主线程执行由 Task { @MainActor in } 保证。
+/// 第 22 轮第 5 件（照 Moumusic NowPlayingManager）：@MainActor——
+/// Now Playing 信息与封面只在主线程上变，不再和取链任务跨线程打架。
+@MainActor
 final class NowPlayingCoordinator: ObservableObject {
     private weak var store: PlaybackStore?
     private var cancellables: Set<AnyCancellable> = []

@@ -43,7 +43,7 @@ final class StageBridge: NSObject, ObservableObject {
     /// 相机形态（ready payload 里 `camera: true`；552 烟雨江南唯一一个）：
     /// HUD 切极简，迷你播放器默认收起。
     @Published private(set) var isCamera = false
-    /// 当前形态声明的设置面板（`window.__stagePanel`；69 个已收录形态全有声明）。
+    /// 当前形态声明的设置面板（`window.__stagePanel`；85 个已收录形态全有声明）。
     @Published private(set) var panelSpec: StagePanelSpec?
     /// 形态外发的最后一条 error（仅诊断展示用，不弹窗）。
     @Published private(set) var lastError: String?
@@ -207,6 +207,14 @@ final class StageBridge: NSObject, ObservableObject {
         webView.loadFileURL(url, allowingReadAccessTo: readAccess)
         // 兜底：个别形态可能不发 ready（壳版只认 ready 才发 init，会一直空白）；
         // 2 秒后仍没 ready 就直接发一次 init（监听器在解析期已挂好，不会丢）。
+        armReadyFallback()
+    }
+
+    /// 2 秒兜底（r22a：loadCurrentFile 里调；播放页隐藏 webView 已随顶栏纠正撤下）。
+    /// 个别形态不发 ready 时，2 秒后直接取 panelSpec + 发 init + 推全部设置，不一直空白。
+    /// 只在 webView 已挂好且尚未 ready 时生效；重复调会取消上一次。
+    func armReadyFallback() {
+        guard webView != nil, !isReady else { return }
         readyFallback?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }

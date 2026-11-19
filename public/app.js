@@ -1999,6 +1999,24 @@
     { id: '662', name: '光在页边', desc: '不对称的光边诗页：歌词在左侧阅读栏逐字从光里浮起，极光与光丝只活在右侧页边，光从字背后经过', url: 'stages/662-lumen-margin.html' },
     { id: '663', name: '弹簧诗行', desc: '每字一条独立弹簧，逐字错帧破土回弹，五组空间构图随句轮换，字缘微光与液态高光条贴在壁纸引擎背景上运行', url: 'stages/663-spring-verse.html' },
     { id: '664', name: '深渊标本', desc: '一具标本压在纯黑深渊上，横切成切片、每片换成X光/热成像/全息边缘/负片，HUD锁定与引线标注，歌词是它的样本标签', url: 'stages/664-deep-specimen.html' },
+    /* r22 Folia 舞台（F01–F16）：只学 Folia 形态与流程、按 Lizi 协议独立重写；
+       cappella / still 去重未加（见 verification/r22h.cjs 与交回报告）。 */
+    { id: 'F01', name: '商籁', desc: '海报外框 + 每句一切镜头的 MG 歌词 PV', url: 'stages/F01-folia-sonnet.html' },
+    { id: 'F02', name: '凝彩', desc: '色块分割构图，鼓点墨染晕开，景深视差', url: 'stages/F02-folia-tempera.html' },
+    { id: 'F03', name: '绘光', desc: '体积光柱 + 雾 + 线稿场景，歌词被光照亮', url: 'stages/F03-folia-lumiere.html' },
+    { id: 'F04', name: '花火', desc: '亮色块歌词，烟花与贴纸沿词绽放', url: 'stages/F04-folia-hanabi.html' },
+    { id: 'F05', name: '町景', desc: '微缩街角，歌词写在 LED 招牌与跑马灯上', url: 'stages/F05-folia-machi.html' },
+    { id: 'F06', name: '隐喻', desc: '墨团融合 + 半调网屏，每句硬切机位', url: 'stages/F06-folia-metaphor.html' },
+    { id: 'F07', name: '流光', desc: '单行居中歌词，逐字点亮', url: 'stages/F07-folia-liuguang.html' },
+    { id: 'F08', name: '心象', desc: '字符散落成云，焦点字被光圈套住', url: 'stages/F08-folia-cadenza.html' },
+    { id: 'F09', name: '云阶', desc: '歌词逐行向右下错落成阶梯', url: 'stages/F09-folia-partita.html' },
+    { id: 'F10', name: '浮名', desc: '整首歌词排成文章，镜头穿行其中', url: 'stages/F10-folia-fume.html' },
+    { id: 'F11', name: '倾诉', desc: '主行水平，副行倾斜', url: 'stages/F11-folia-tilt.html' },
+    { id: 'F12', name: '回环', desc: '倾斜椭圆轨道，歌词骑环而行', url: 'stages/F12-folia-claddagh.html' },
+    { id: 'F13', name: '莫奈', desc: '左侧关键字，右侧立绘的海报舞台', url: 'stages/F13-folia-monet.html' },
+    { id: 'F14', name: '时计', desc: '左侧齿轮钟表盘，右侧歌词', url: 'stages/F14-folia-pendolo.html' },
+    { id: 'F15', name: '镜台', desc: '多层景深歌词穿行，拍点涟漪', url: 'stages/F15-folia-diorama.html' },
+    { id: 'F16', name: '雾笺', desc: '雨夜雾窗，指尖写字抹开雾面', url: 'stages/F16-folia-nebbia.html' },
   ];
 
   /* ================= 形态版本 / 用户版保留清单（2026-11-08） =================
@@ -2020,6 +2038,8 @@
     '505', '506', '508', '509', '510', '517', '518', '520', '521', '522', '524',
     '525', '540', '542', '552', '557', '559', '561', '563', '571', '572', '580', '582', '588',
     '590', '603', '604', '614', '617', '621', '627', '628', '629', '631', '663',
+    'F01', 'F02', 'F03', 'F04', 'F05', 'F06', 'F07', 'F08',
+    'F09', 'F10', 'F11', 'F12', 'F13', 'F14', 'F15', 'F16',
   ];
   const STAGE_RELEASE_IDS = new Set(STAGE_RELEASE_ORDER);
   const STAGE_RELEASE_RANK = new Map(STAGE_RELEASE_ORDER.map((id, i) => [id, i]));
@@ -3594,7 +3614,13 @@
           status.className = 'qq-qr__status is-error';
           expiredNotice = err ? ('换凭证失败，已换一张新码，请重新扫码（' + err + '）') : '二维码过期，已换一张新码，请重新扫码';
           stop();
-          setTimeout(() => startQr(true), 600);
+          // Folia：800 带 retryAfterMs 时后端在冷却期内不给新码（QQ 15 秒冷却），
+          // 等够了再换码，别 600ms 后去撞 429；没带时照旧 600ms。
+          const coolMs = (d && typeof d.retryAfterMs === 'number' && d.retryAfterMs > 0) ? d.retryAfterMs : 0;
+          if (coolMs > 0) {
+            status.textContent = `二维码过期，${Math.ceil(coolMs / 1000)} 秒后自动换一张…`;
+          }
+          setTimeout(() => startQr(true), coolMs > 0 ? coolMs + 500 : 600);
           return;
         }
         if (d.code === 802) {

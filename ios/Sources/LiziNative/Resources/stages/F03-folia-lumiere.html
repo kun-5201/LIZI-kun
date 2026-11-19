@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>绘光 · Folia</title>
+<style>
+  html,body{margin:0;height:100%;background:#05060a;overflow:hidden}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #hint{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:9;
+    font:500 11px/1.5 ui-monospace,Consolas,monospace;color:rgba(220,225,245,.35);
+    letter-spacing:.08em;pointer-events:none;transition:opacity .6s;white-space:nowrap}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">等待第一句…</div>
+<script>
+"use strict";
+/* ============================================================================
+   绘光（F03 · Folia lumiere）
+   ----------------------------------------------------------------------------
+   效果来源：Folia（AGPL-3.0，作者 chthollyphile）的 lumiere（绘光）模式——
+   舞台灯光歌词导演：体积光、雾、线稿场景，歌词被光柱照亮。本文件只学形态
+   与流程，按 Lizi 舞台承载协议（__c100）独立重写，未复制 Folia 源码；
+   不依赖 React / Pixi。
+   形态：自顶而下的两道体积光柱缓慢摆动，光柱扫过处歌词最亮；雾层漂移；
+   背景是淡色线稿（山 / 浪 / 日轮三景随句轮换）；行变时光柱亮度一跳。
+   播放联动：init 换歌重排；tick 推时间；beat 推高光柱亮度。
+   ========================================================================== */
+const S = { beam: 1, fog: 0.5, lineart: true };
+window.__stagePanel = {
+  title: '绘光 · Folia',
+  hint: '舞台灯光歌词：体积光柱 + 雾 + 线稿场景，歌词被光照亮。',
+  items: [
+    { key: 'beam', label: '光束强度', type: 'range', min: 0, max: 2, step: 0.1, def: 1 },
+    { key: 'fog', label: '雾浓度', type: 'range', min: 0, max: 1, step: 0.05, def: 0.5 },
+    { key: 'lineart', label: '线稿场景', type: 'switch', def: true },
+    { key: 'shake', label: '震动', type: 'switch', def: true }
+  ]
+};
+window.__liziShake = true;
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const hint = document.getElementById('hint');
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+resize();
+addEventListener('resize', resize);
+
+let lines = [], accent = [150, 165, 255], song = null;
+let clockT = 0, clockAt = performance.now(), playing = false;
+let beamBoost = 0, curIdx = -1;
+const now = () => clockT + (playing ? (performance.now() - clockAt) / 1000 : 0);
+const clamp01 = v => v < 0 ? 0 : v > 1 ? 1 : v;
+const rgb = a => `rgb(${a[0] | 0},${a[1] | 0},${a[2] | 0})`;
+const rgba = (a, al) => `rgba(${a[0] | 0},${a[1] | 0},${a[2] | 0},${al})`;
+function curIdxAt(t) { let idx = -1; for (let i = 0; i < lines.length; i++) { if (lines[i].t <= t + 0.001) idx = i; else break; } return idx; }
+function charsOf(line) {
+  if (line.chars && line.chars.length) return line.chars;
+  const cs = [...line.text], n = cs.length || 1;
+  return cs.map((c, i) => ({ c, t: line.t + (line.dur || 6) * i / n }));
+}
+function fitFont(text, px, maxW, weight) {
+  let s = px;
+  ctx.font = `${weight || 600} ${s}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  while (s > 12 && ctx.measureText(text).width > maxW) {
+    s -= 2;
+    ctx.font = `${weight || 600} ${s}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  }
+  return s;
+}
+function drawLineart(scene, t) {
+  ctx.save();
+  ctx.strokeStyle = rgba(accent, 0.4); ctx.lineWidth = 1.5;
+  const cy = H * 0.72, amp = H * 0.05;
+  if (scene === 0) { // 山
+    ctx.beginPath(); ctx.moveTo(0, cy);
+    for (let x = 0; x <= W; x += 8) ctx.lineTo(x, cy - Math.abs(Math.sin(x * 0.006 + t * 0.1)) * amp * 2 - 10);
+    ctx.stroke();
+  } else if (scene === 1) { // 浪
+    for (let r = 0; r < 3; r++) {
+      ctx.beginPath();
+      for (let x = 0; x <= W; x += 8) ctx.lineTo(x, cy + r * 26 + Math.sin(x * 0.01 + t * 0.6 + r) * 12);
+      ctx.stroke();
+    }
+  } else { // 日轮
+    ctx.beginPath(); ctx.arc(W * 0.5, H * 0.3, Math.min(W, H) * 0.16, 0, Math.PI * 2); ctx.stroke();
+    for (let i = 0; i < 12; i++) {
+      const a = i / 12 * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(W * 0.5 + Math.cos(a) * Math.min(W, H) * 0.2, H * 0.3 + Math.sin(a) * Math.min(W, H) * 0.2);
+      ctx.lineTo(W * 0.5 + Math.cos(a) * Math.min(W, H) * 0.26, H * 0.3 + Math.sin(a) * Math.min(W, H) * 0.26);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+function drawBeam(xTop, xBot, alpha) {
+  ctx.save();
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, rgba(accent, 0.34 * alpha));
+  g.addColorStop(1, rgba(accent, 0.02 * alpha));
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(xTop - 26, 0); ctx.lineTo(xTop + 26, 0);
+  ctx.lineTo(xBot + 90, H); ctx.lineTo(xBot - 90, H);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+function frame() {
+  requestAnimationFrame(frame);
+  const t = now();
+  const idx = curIdxAt(t);
+  if (idx !== curIdx) curIdx = idx;
+  beamBoost *= 0.95;
+  ctx.fillStyle = '#05060a'; ctx.fillRect(0, 0, W, H);
+  if (S.lineart) drawLineart(Math.max(0, curIdx) % 3, t);
+  // 两道体积光柱：自顶而下缓慢摆动
+  const sway1 = Math.sin(t * 0.35) * W * 0.12;
+  const sway2 = Math.sin(t * 0.22 + 2) * W * 0.1;
+  const bAlpha = S.beam * (0.75 + beamBoost * 0.6);
+  drawBeam(W * 0.34 + sway1, W * 0.44 + sway1 * 0.6, bAlpha);
+  drawBeam(W * 0.68 + sway2, W * 0.58 + sway2 * 0.6, bAlpha * 0.8);
+  // 雾层：横向漂移的淡色带
+  if (S.fog > 0.01) {
+    for (let i = 0; i < 3; i++) {
+      const fy = H * (0.3 + i * 0.22) + Math.sin(t * 0.2 + i * 1.7) * 10;
+      const fg = ctx.createLinearGradient(0, fy - 40, 0, fy + 40);
+      fg.addColorStop(0, 'rgba(200,210,235,0)');
+      fg.addColorStop(0.5, `rgba(200,210,235,${0.10 * S.fog})`);
+      fg.addColorStop(1, 'rgba(200,210,235,0)');
+      ctx.fillStyle = fg; ctx.fillRect(0, fy - 40, W, 80);
+    }
+  }
+  const line = lines[curIdx];
+  if (line) {
+    const chars = charsOf(line);
+    const fs = fitFont(line.text, Math.min(W * 0.085, 60), W * 0.82, 700);
+    ctx.font = `700 ${fs}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const by = H * 0.52;
+    const totalW = ctx.measureText(line.text).width;
+    let x = W / 2 - totalW / 2;
+    // 光柱中心的亮度：离光柱落点越近越亮
+    const beamX = W * 0.44 + sway1 * 0.6;
+    chars.forEach(ch => {
+      const w = ctx.measureText(ch.c).width;
+      const cxp = x + w / 2;
+      const lit = clamp01(1 - Math.abs(cxp - beamX) / (W * 0.3));
+      const sung = t >= ch.t;
+      const a = sung ? 0.55 + 0.45 * lit : 0.22 + 0.3 * lit;
+      ctx.fillStyle = sung ? rgba([255, 255, 255], Math.min(1, a + 0.15)) : rgba(accent, a);
+      if (sung && lit > 0.5) { ctx.shadowColor = rgb(accent); ctx.shadowBlur = 22; }
+      ctx.fillText(ch.c, cxp, by);
+      ctx.shadowBlur = 0;
+      x += w;
+    });
+    const nxt = lines[curIdx + 1];
+    if (nxt) {
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      const nfs = fitFont(nxt.text, 18, W * 0.7, 500);
+      ctx.font = `500 ${nfs}px "PingFang SC",system-ui,sans-serif`;
+      ctx.fillText(nxt.text, W / 2, by + fs + 40);
+    }
+    hint.style.opacity = '0';
+  } else {
+    hint.style.opacity = lines.length ? '1' : '0.5';
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+  }
+}
+requestAnimationFrame(frame);
+
+function applySetting(p) {
+  if (!p || !p.key) return;
+  const v = p.value;
+  if (p.key === 'beam') { const n = Number(v); if (isFinite(n)) S.beam = Math.min(2, Math.max(0, n)); }
+  else if (p.key === 'fog') { const n = Number(v); if (isFinite(n)) S.fog = Math.min(1, Math.max(0, n)); }
+  else if (p.key === 'lineart') S.lineart = v !== false && v !== 'false';
+}
+const ping = () => { try { parent.postMessage({ __c100: 1, type: 'activity' }, '*'); } catch (_) {} };
+addEventListener('pointermove', ping, { passive: true });
+addEventListener('pointerdown', ping, { passive: true });
+addEventListener('wheel', ping, { passive: true });
+addEventListener('keydown', ping);
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.key === ' ') {
+    e.preventDefault();
+    try { parent.postMessage({ __c100: 1, type: 'key', payload: { key: 'Space' } }, '*'); } catch (_) {}
+  }
+}, true);
+addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || d.__c100 !== 1) return;
+  if (d.type === 'init') {
+    const p = d.payload || {};
+    lines = (p.lines || []).slice().sort((a, b) => a.t - b.t);
+    song = p.song || null;
+    if (p.accent) accent = p.accent;
+    curIdx = -1; beamBoost = 0; clockT = 0; clockAt = performance.now();
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+  } else if (d.type === 'tick') {
+    clockT = d.payload.time; clockAt = performance.now(); playing = !!d.payload.playing;
+  } else if (d.type === 'beat') {
+    if (window.__liziShake !== false) beamBoost = Math.min(1, 0.4 + (d.payload.level || 0) * 0.6);
+  } else if (d.type === 'setting') {
+    if (d.payload.key === 'shake') window.__liziShake = d.payload.value !== false;
+    else applySetting(d.payload);
+  }
+});
+try { parent.postMessage({ __c100: 1, type: 'ready' }, '*'); } catch (_) {}
+</script>
+</body>
+</html>

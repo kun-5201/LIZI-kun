@@ -122,16 +122,30 @@ final class SettingsStore: ObservableObject {
     static let platformIds = ["netease", "qq", "kugou", "qishui", "bodian", "kuwo", "applemusic"]
 
     /// 大厅「我的」和顶部平台条里显示的平台。没存 = 全部；全选 = 删键
-    /// （照抄壳版 platSave）。注意：原生首页平台条本轮尚未消费这把键，
-    /// 选择只做持久化，接线在 P3 打磨项；登录、播放不受影响。
+    /// （照抄壳版 platSave）。r22j：首页平台条已消费这把键
+    /// （PlatformStripView 按它过滤；登录、播放不受影响）。
+    /// seen 表（壳版 `lizi.platforms.v1.seen`，第 14 轮）：保存时写全部
+    /// 平台 id；读时把「没见过」的 id（上次保存后才加入的新平台）默认
+    /// 并入勾选；见过表缺失时，见过 = 已存列表本身。
     @Published var visiblePlatforms: Set<String> = SettingsStore.readVisiblePlatforms() {
         didSet { Self.writeVisiblePlatforms(visiblePlatforms) }
     }
 
-    private static func readVisiblePlatforms() -> Set<String> {
+    static func readVisiblePlatforms() -> Set<String> {
         guard let data = UserDefaults.standard.data(forKey: "lizi.platforms.v1"),
               let list = try? JSONDecoder().decode([String].self, from: data),
               !list.isEmpty else { return Set(platformIds) }
+        let stored = Set(list.filter { platformIds.contains($0) })
+        guard !stored.isEmpty else { return Set(platformIds) }
+        // 新平台默认并入：见过表里没有的 id = 上次保存后才加入的平台。
+        let seen = readSeenPlatforms() ?? stored
+        return stored.union(Set(platformIds).subtracting(seen))
+    }
+
+    /// 读「见过」表（缺失返回 nil，调用方按「见过 = 已存列表本身」处理）。
+    private static func readSeenPlatforms() -> Set<String>? {
+        guard let data = UserDefaults.standard.data(forKey: "lizi.platforms.v1.seen"),
+              let list = try? JSONDecoder().decode([String].self, from: data) else { return nil }
         return Set(list.filter { platformIds.contains($0) })
     }
 
@@ -140,6 +154,11 @@ final class SettingsStore: ObservableObject {
             UserDefaults.standard.removeObject(forKey: "lizi.platforms.v1")
         } else if let data = try? JSONEncoder().encode(Array(set)) {
             UserDefaults.standard.set(data, forKey: "lizi.platforms.v1")
+        }
+        // 写勾选的同时写「见过」表（这次见过的全部平台 id），下次有新平台
+        // 加入时才分得清「新平台」和「用户主动取消的平台」。
+        if let seen = try? JSONEncoder().encode(platformIds) {
+            UserDefaults.standard.set(seen, forKey: "lizi.platforms.v1.seen")
         }
     }
 

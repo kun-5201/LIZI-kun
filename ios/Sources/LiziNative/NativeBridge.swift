@@ -161,7 +161,7 @@ if urlString.isEmpty {
 let code = (item["code"] as? NSNumber)?.intValue ?? 0
 return SongURLResult(reason: code == -110 ? "vip" : "unavailable", via: "platform")
 }
-return SongURLResult(url: URL(string: urlString),
+return SongURLResult(url: Upstream.url(from: urlString).map { Upstream.upgradedAudioURL($0) },
 actualQuality: AudioQuality.canon(platform: "netease", served: served, bitrate: br),
 isTrial: isTrial, reason: "", via: "platform", bitrate: br)
 case "qq":
@@ -199,6 +199,12 @@ return SongURLResult(reason: "unavailable", via: "platform")
 
 /// 边车 song/url 的通用解析（qq/kugou/kuwo/qishui/bodian/applemusic 同形：
 /// { url, preview, quality, reason}）。
+/// 第 22 轮第 5 件：回的地址先升 https（Upstream.upgradedAudioURL，与
+/// 探活验的地址一致——探活验升级后、播放器播 http 原址等于验一套播一套；
+/// 酷狗/酷我平台腿也在此升级，kg 第一复现平台同款修法）。
+/// 升级表只含实测支持 https 的域（.music.126.net/.qq.com/.kugou.com/
+/// .kuwo.cn/.kglink.com）；汽水 CDN 域（.365yg.com 等）未实测，不进表、
+/// 不编——汽水地址原样走直链/代理，行为与修前一致。
 private static func songURLFromSidecar(_ d: [String: Any]?, platform: String,
 quality: AudioQuality) -> SongURLResult {
 guard let d else { return SongURLResult(reason: "network", via: "platform")}
@@ -210,7 +216,7 @@ if urlString.isEmpty {
 let reason = (d["reason"] as? String) ?? (d["error"] as? String) ?? "unavailable"
 return SongURLResult(reason: reason.isEmpty ? "unavailable" : reason, via: "platform")
 }
-return SongURLResult(url: URL(string: urlString),
+return SongURLResult(url: Upstream.url(from: urlString).map { Upstream.upgradedAudioURL($0) },
 actualQuality: AudioQuality.canon(platform: platform, served: served),
 isTrial: preview, isPreview: preview,
 reason: "", via: "platform", clipStartMs: clipStartMs)
@@ -328,7 +334,16 @@ DiagLog.shared.recordPlaybackStep("lx song/url empty source=\(track.platform) id
 return nil
 }
 let served = (d["quality"] as? String) ?? ""
-return SongURLResult(url: URL(string: urlString),
+// 第 22 轮第 3 件：LX 回来的那一刻落盘——Router 的 "lx song/url start"
+// 只证明进了取链，这一笔证明桥拿到了地址；start 与 return 之间断了，
+// 就是卡在 /api/lx/song/url 的服务端一侧（脚本/探活），不是桥没等。
+DiagLog.shared.recordPlaybackStep("lx song/url return source=\(track.platform) id=\(track.id) via=lx")
+// 第 22 轮第 5 件：LX 地址先升 https 再交给播放器（与 songURLFromSidecar
+// 同款修法）：探活验的是升级后的地址，播 http 原址等于验一套播一套；
+// 酷我 发如雪那条 http://car-er.kuwo.cn 直播 "Cannot Open"、代理拉又被
+// ATS -1022 拦，根因就是播/探用的不是同一条地址。升级表见
+// Upstream.audioHTTPSSuffixes（.kuwo.cn 在表里，VM 实测 https 通）。
+return SongURLResult(url: Upstream.url(from: urlString).map { Upstream.upgradedAudioURL($0) },
 actualQuality: AudioQuality.canon(platform: "lx", served: served),
 reason: "", via: "lx")
 }

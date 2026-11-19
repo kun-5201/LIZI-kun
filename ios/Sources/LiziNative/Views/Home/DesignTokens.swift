@@ -50,6 +50,8 @@ enum LiziTokens {
     static let radius10: CGFloat = 10
     static let radius14: CGFloat = 14
     static let radius20: CGFloat = 20
+    /// r22j：壳版 `.hall-plat` 铺色面板圆角 22px。
+    static let radius22: CGFloat = 22
     static let radius28: CGFloat = 28
 }
 

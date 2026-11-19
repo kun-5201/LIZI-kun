@@ -592,7 +592,8 @@ extension KugouService {
     }
 
     /// check：GET login-user.kugou.com/v2/get_userinfo_qrcode（web 签名，带 dev）。
-    /// 状态 0/1/2/4 → 800/801/802/803；4 时收 token/userid/vip 进 jar 并补昵称头像。
+    /// 状态 0/1/2/3/4 → 800/801/802/802/803（Folia kugouProvider.checkLogin：
+    /// 2 或 3 都是已扫码；之前 3 落到默认 801「等待扫码」，扫上了也显示没扫）。
     private func loginQrCheck(key: String) async throws -> [String: Any] {
         let d = device()
         let resp = try await kgRequest(baseURL: Self.loginUserBase, path: "/v2/get_userinfo_qrcode",
@@ -602,7 +603,7 @@ extension KugouService {
                                        encryptType: "web", timeout: 25)
         let data = (resp.json?["data"] as? [String: Any]) ?? [:]
         let st = scInt(data, "status")
-        let map = [0: 800, 1: 801, 2: 802, 4: 803]
+        let map = [0: 800, 1: 801, 2: 802, 3: 802, 4: 803]
         var out: [String: Any] = ["code": map[st] ?? 801, "state": st]
         if st == 4 {
             collectSetCookies(resp.cookies)

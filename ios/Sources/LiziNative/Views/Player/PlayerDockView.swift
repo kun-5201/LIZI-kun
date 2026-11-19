@@ -2,40 +2,104 @@ import SwiftUI
 
 /// 播放页底部两件（r20，照 01:14 截图拆分；旧 `PlayerDockView` 已删）。
 ///
-/// - `PlayerControlRow`：控制行，一行居中：队列列表 | 上一首 | 播放（大，白圆底）
-///   | 下一首。模式按钮（循环/随机）不在这一行——工人 A 把它放队列面板头部了。
-/// - `PlayerProgressBar`：最底部满宽细条，无时间数字，拖动 seek。
+/// - `PlayerControlRow`：控制行，一行居中，正好 6 个（r22 定稿，无 AirPlay；
+///   岛的 AirPlay 在扩展里另一套，见 LiziNativeLiveActivity，不动这里）。
+///   两端是模式按钮：左端随机（shuffle，点按开关），右端循环（repeat / repeat.1，
+///   点按在顺序 → 全部循环 → 单曲循环之间切；两个开关重启后保留，见 PlaybackStore）。
+///   竖屏第 2 项是爱心（heart / heart.fill，已喜欢红色实心，点按调
+///   `store.toggleLike()` 进「我的喜欢」）；横屏第 2 项是三条杠队列入口
+///   （`list.bullet`，点按调调用方传的 `onOpenQueue`，只横屏传）。
+///   其余三项两屏一样：上一首 | 播放（大，白圆底）| 下一首。
+///   模式按钮（循环/随机）不在这一行——工人 A 把它放队列面板头部了。
+/// - `PlayerProgressBar`：最底部满宽细条，无时间数字，拖动 seek；播放头是
+///   圆点（r22k：审计图里进度条上有圆点，旧代码只有 2pt 白线）。
 ///
-/// 接线（工人 A 在 `PlayerView.swift` 里接，两个组件的调用方就是 PlayerView）：
-/// `PlayerControlRow(tier: tier, onOpenQueue: { … })`，
-/// `PlayerProgressBar(tier: tier)`。Home Indicator 安全区由调用方处理。
+/// 接线（r22：`PlayerControlRow(tier:)` 默认竖屏（爱心，不带 onOpenQueue）；
+/// 横屏调 `PlayerControlRow(tier:showsQueueButton:onOpenQueue:)`；
+/// `PlayerProgressBar(tier: tier)` 不变）。
+/// Home Indicator 安全区由调用方处理。
 /// 禁缩放：本文件没有任何 MagnificationGesture / 捏合手势。
 
 // MARK: - 控制行
 
-/// 控制行：队列列表 | 上一首 | 播放（大，白圆底）| 下一首，一行居中。
+/// 控制行：一行居中，正好 6 个（r22 定稿）。
+/// 竖屏：随机 | 爱心 | 上一首 | 播放（大，白圆底）| 下一首 | 循环；
+/// 横屏：随机 | 三条杠 | 上一首 | 播放 | 下一首 | 循环（第 2 项是队列入口）。
+/// 播放页控制行没有 AirPlay（r22 定稿删掉；岛展开态的 AirPlay 在扩展里
+/// 另一套，见 LiziNativeLiveActivity，不动）。
 ///
-/// - 列表图标点按回调由调用方传进来（`onOpenQueue`），这里不写死打开方式。
+/// - 随机点按调 `store.setShuffled(!store.isShuffled)`（开时图标 accent 色）。
+/// - 循环点按调 `store.cycleRepeatMode()`（顺序 → 全部循环 → 单曲循环；
+///   图标与队列面板头部同一套映射：顺序/全部循环 repeat，单曲循环 repeat.1；
+///   开时图标 accent 色）。两个开关都持久化，重启保留（见 PlaybackStore）。
+/// - 爱心点按调 `store.toggleLike()`（已喜欢显示 heart.fill 红色实心，
+///   未喜欢 heart 空心；持久化 + 喜欢 rail 都在 PlaybackStore.toggleLike() 里）。
+/// - 三条杠只在横屏（`showsQueueButton` 为真时），点按调 `onOpenQueue`。
 /// - 上一首 / 下一首 / 播放直接调 `store.previous()` / `next()` / `togglePlay()`。
 /// - 无曲目时整行 disabled。
 /// - 尺寸走分档：大播放键直径 `PlayerTokens.playSize(tier)`（行高 = 此值），
 ///   小图标字号 `PlayerTokens.controlIconSize(tier)`。
+/// - 行内间距分档：compact 16，其余档 32。6 个按钮实算：compact
+///   4×22 + 60 + 5×16 = 228 ≤ 815（横屏满宽）；standard 4×24 + 68 + 5×32
+///   = 324 ≤ 370（竖屏）；large 4×26 + 76 + 5×32 = 340 ≤ 398（竖屏）。
 struct PlayerControlRow: View {
     @EnvironmentObject private var store: PlaybackStore
 
     /// 尺寸档（调用方按实测屏宽经 `PlayerTokens.sizeTier(for:topInset:)` 传入）。
     var tier: PlayerTokens.PlayerSizeTier = .standard
-    /// 列表图标点按回调（调用方传入，如打开队列面板；不要在这里写死）。
-    var onOpenQueue: () -> Void = {}
+
+    /// 横屏时第 2 项是队列入口（三条杠）而不是爱心；竖屏默认 false（爱心）。
+    var showsQueueButton: Bool = false
+
+    /// 横屏三条杠的回调（调用方一般传 `{ showQueue.toggle() }`）；竖屏不用，默认 nil。
+    var onOpenQueue: (() -> Void)? = nil
+
+    /// 行内间距：compact 16，其余档 32。
+    private var rowSpacing: CGFloat { tier == .compact ? 16 : 32 }
+
+    /// 循环模式图标（与队列面板头部同一套映射：顺序/全部循环都用 repeat，
+    /// 单曲循环用 repeat.1；见 QueuePanelView.repeatIconName）。
+    private var repeatIconName: String {
+        switch store.repeatMode {
+        case .off: return "repeat"
+        case .all: return "repeat"
+        case .one: return "repeat.1"
+        }
+    }
+
+    /// 循环模式文案（与队列面板头部同一套：顺序 / 循环 / 单曲）。
+    private var repeatTitle: String {
+        switch store.repeatMode {
+        case .off: return "顺序"
+        case .all: return "循环"
+        case .one: return "单曲"
+        }
+    }
 
     var body: some View {
-        HStack(spacing: 32) {
-            Button(action: onOpenQueue) {
-                Image(systemName: "list.bullet")
+        HStack(spacing: rowSpacing) {
+            Button(action: { store.setShuffled(!store.isShuffled) }) {
+                Image(systemName: "shuffle")
                     .font(.system(size: PlayerTokens.controlIconSize(tier), weight: .medium))
-                    .foregroundStyle(PlayerTokens.playerForeground)
+                    .foregroundStyle(store.isShuffled ? PlayerTokens.accent : PlayerTokens.playerForeground)
             }
-            .accessibilityLabel("播放队列")
+            .accessibilityLabel(store.isShuffled ? "随机播放已开，点按关闭" : "随机播放已关，点按开启")
+
+            if showsQueueButton {
+                Button(action: { onOpenQueue?() }) {
+                    Image(systemName: "list.bullet")
+                        .font(.system(size: PlayerTokens.controlIconSize(tier), weight: .medium))
+                        .foregroundStyle(PlayerTokens.playerForeground)
+                }
+                .accessibilityLabel("打开播放队列")
+            } else {
+                Button(action: { store.toggleLike() }) {
+                    Image(systemName: store.isLiked ? "heart.fill" : "heart")
+                        .font(.system(size: PlayerTokens.controlIconSize(tier), weight: .medium))
+                        .foregroundStyle(store.isLiked ? Color.red : PlayerTokens.playerForeground)
+                }
+                .accessibilityLabel(store.isLiked ? "取消喜欢" : "喜欢")
+            }
 
             Button(action: { store.previous() }) {
                 Image(systemName: "backward.fill")
@@ -52,6 +116,13 @@ struct PlayerControlRow: View {
                     .foregroundStyle(PlayerTokens.playerForeground)
             }
             .accessibilityLabel("下一首")
+
+            Button(action: { store.cycleRepeatMode() }) {
+                Image(systemName: repeatIconName)
+                    .font(.system(size: PlayerTokens.controlIconSize(tier), weight: .medium))
+                    .foregroundStyle(store.repeatMode != .off ? PlayerTokens.accent : PlayerTokens.playerForeground)
+            }
+            .accessibilityLabel("循环模式：\(repeatTitle)，点按切换")
         }
         .frame(maxWidth: .infinity)
         .frame(height: PlayerTokens.playSize(tier))
@@ -138,13 +209,14 @@ struct PlayerProgressBar: View {
                         endPoint: .trailing
                     )
                     .frame(width: max(0, fraction * width))
-                    // 播放头：一根发亮的细线（壳版 .dock__head）。
+                    // 播放头：圆点（r22k：审计图里进度条上有圆点播放头，旧代码
+                    // 只有 2pt 白线；圆点直径 10，中心落在 fraction 处，
+                    // 两端夹住不冒出轨道外）。
                     if store.currentTrack != nil {
-                        Rectangle()
-                            .fill(Color.white.opacity(0.85))
-                            .frame(width: 2)
-                            .shadow(color: .white.opacity(0.45), radius: 8, x: 0, y: 0)
-                            .offset(x: max(0, fraction * width - 1))
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 10, height: 10)
+                            .offset(x: min(max(0, fraction * width - 5), max(0, width - 10)))
                     }
                 }
                 .frame(height: PlayerTokens.progressHeight(tier))

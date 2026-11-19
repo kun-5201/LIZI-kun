@@ -94,6 +94,14 @@ final class HomeViewModel: ObservableObject {
 
     /// 当前平台（netease / qq / kugou / qishui / bodian / kuwo / applemusic）。
     @Published var selectedPlatform: String = "netease"
+
+    /// r22j 平台管理：首页平台条显示的平台 = 设置 → 平台管理勾选的平台
+    /// （默认全部 7 个）。只读 UserDefaults（`SettingsStore
+    /// .readVisiblePlatforms`，壳版 `lizi.platforms.v1` 语义 + seen 表），
+    /// 不写、不缓存——设置页改完回首页时 viewModel 新建，读到的就是最新
+    /// 勾选。切台逻辑不动；选中平台被取消勾选时的自动切换在 HomeView
+    /// .task 里调 selectPlatform（不另写切台）。
+    var visiblePlatforms: Set<String> { SettingsStore.readVisiblePlatforms() }
     @Published var selectedSource: Source = .daily
     @Published var daily: [DailyTrack] = []
     @Published var isLoadingDaily = false
@@ -120,6 +128,18 @@ final class HomeViewModel: ObservableObject {
         return CGFloat((0.10 + clamped * 0.011) * 60)
     }
 
+    /// 首页加载代际（Moumusic HomeViewModel.loadGeneration 同款，只管首页
+    /// daily/rail 加载的过期丢弃：每次切台 +1，旧加载回来对不上代际直接丢。
+    /// 取链的 resolveGeneration 在 PlaybackStore（store 侧、闪退工人落地），
+    /// 这里不另建取链计数器——两个计数器各管各的 owner，和 Moumusic 一致：
+    /// HomeViewModel.loadGeneration 管首页，PlayerService.resolveGeneration 管取链）。
+    private var homeLoadGeneration = 0
+    /// 进行中的首页加载句柄（切台时先 cancel 再起新的；Moumusic loadTask 同款）。
+    /// daily 一条、rail 按 kind 各一条；initialLoad 的直接 await 不走这里
+    ///（启动时没东西可取消）。
+    private var dailyTask: Task<Void, Never>?
+    private var railTasks: [RailKind: Task<Void, Never>] = [:]
+
     // MARK: - 启动
 
     func initialLoad() async {
@@ -143,36 +163,91 @@ final class HomeViewModel: ObservableObject {
         }
     }
 
-    // MARK: - 平台 / 来源切换（只换数据，不拆音频：不碰 PlaybackStore）
+    // MARK: - 平台 / 来源切换（切台只换数据：Moumusic 切台不碰
+    // PlayerService 的队列与当前曲目；唯一碰播放侧的动作是取消在飞的
+    // 取链任务——经 playbackStore.advanceGeneration()，不停已在播的音频、
+    // 不清队列、不 pause、不 stop）
 
-    /// 切平台：换台就回到新台的每日推荐（照抄壳版 Hall 换台即 railReset 的行为）。
-    func selectPlatform(_ id: String) {
+    /// 切平台：唯一入口（PlatformStripView 点图标只调这里）。
+    ///
+    /// 照 Moumusic 的做法，分五步，顺序不能换：
+    /// 1. 先取消取链：Moumusic PlayerService.startPlaying 1219–1221 行
+    ///    新请求先 cancel 旧的 resolveTask/lyricsTask/translationTask，
+    ///    1260 行 resolveGeneration += 1；切台同理，先调
+    ///    `playbackStore.advanceGeneration()`（代际+1 并取消所有进行中的
+    ///    取链/歌词/音质任务）。store 侧 API 由闪退工人补齐（见交回报告）；
+    ///    未补齐前本调用编译不过。playbackStore 为 nil 时跳过取消
+    ///    （只做首页侧的取消与重建，不拦切台）。
+    /// 2. 取消进行中的首页加载 + 首页代际+1（Moumusic HomeViewModel.load：
+    ///    loadTask?.cancel() 后 loadGeneration += 1）。
+    /// 3. 再改平台并持久化（Moumusic selectHomePlatform：先写 mode 再写
+    ///    platform，成对写完才触发加载；Lizi 只有一个 platform 值，
+    ///    同样先写完再起加载，不存在半更新的一对）。
+    /// 4. 立即重建首页模型（Moumusic resetContent）：旧平台的 daily /
+    ///    rails / 详情页当场下掉，不等新数据回来才清。
+    /// 5. 起新加载（带代际守卫；旧任务回来对不上代际直接丢）。
+    /// 登录态：Moumusic 的 selectHomePlatform 不碰 AccountStore，登录态
+    /// 只在 load 时当参数传进去（loadCurrentHome 传 account.isLoggedIn）；
+    /// Lizi 同理——切台不查登录，各平台的登录分支在
+    /// NativeBridge.dailyRecommend / rail* 内部（网易需登录才有每日推荐，
+    /// 否则诚实空态），selectPlatform 不动它。
+    /// 队列 / 正在播的歌：Moumusic 切台不碰 PlayerService，队列与当前曲目
+    /// 原样保留（曲目自带来源，解析走选定的 LX 源）；Lizi 同理，这里不调
+    /// stop()/clearQueue()/pause()，正在播的歌继续播。
+    func selectPlatform(_ id: String, playbackStore: PlaybackStore? = nil) {
         guard id != selectedPlatform, LiziPlatforms.all.contains(where: { $0.id == id }) else { return }
+        playbackStore?.advanceGeneration()
+        homeLoadGeneration += 1
+        let generation = homeLoadGeneration
+        dailyTask?.cancel()
+        dailyTask = nil
+        railTasks.values.forEach { $0.cancel() }
+        railTasks = [:]
         selectedPlatform = id
         UserDefaults.standard.set(id, forKey: Self.platformKey)
         selectedSource = .daily
         UserDefaults.standard.set(Source.daily.rawValue, forKey: Self.sourceKey)
-        Task { await loadDaily() }
+        resetHomeContent()
+        dailyTask = Task { await loadDaily(generation: generation) }
+    }
+
+    /// 立即清空首页模型（Moumusic resetContent 同款）：切台瞬间旧平台的
+    /// 内容全部下掉；isLoadingDaily 置 true，等新 loadDaily 回来再落
+    /// false / 空原因。selectedRail 一并关掉——详情页属于旧平台
+    ///（RailSelection 里带旧 platform），留着会拿旧台数据继续展示。
+    private func resetHomeContent() {
+        daily = []
+        rails = [:]
+        railLoading = [:]
+        dailyEmptyReason = nil
+        selectedRail = nil
+        isLoadingDaily = true
     }
 
     func selectSource(_ source: Source) {
         selectedSource = source
         UserDefaults.standard.set(source.rawValue, forKey: Self.sourceKey)
         if source == .daily {
-            Task { await loadDaily() }
+            dailyTask?.cancel()
+            dailyTask = Task { await loadDaily() }
         } else if source == .liked {
             refreshLikedCount()
-            Task { await loadRail(.liked) }
+            railTasks[.liked]?.cancel()
+            railTasks[.liked] = Task { await loadRail(.liked) }
         } else if let kind = source.railKind {
-            Task { await loadRail(kind) }
+            railTasks[kind]?.cancel()
+            railTasks[kind] = Task { await loadRail(kind) }
         }
     }
 
     // MARK: - 四条 rails（P2）
 
     /// 拉一条 rail（当前平台；加载期间又切了台，旧结果直接丢掉，和 loadDaily 同款竞态处理）。
+    /// 代际守卫：Moumusic loadOnce 里每个 await 后都查 generation，
+    /// 对不上直接退、不碰任何状态（连 railLoading 也不碰——新加载自己会置）。
     func loadRail(_ kind: RailKind) async {
         let platform = selectedPlatform
+        let generation = homeLoadGeneration
         railLoading[kind] = true
         let result: RailResult
         switch kind {
@@ -185,8 +260,7 @@ final class HomeViewModel: ObservableObject {
         case .radio:
             result = await NativeBridge.railRadio(platform: platform)
         }
-        guard platform == selectedPlatform else {
-            railLoading[kind] = false
+        guard generation == homeLoadGeneration, platform == selectedPlatform, !Task.isCancelled else {
             return
         }
         rails[kind] = result
@@ -200,13 +274,18 @@ final class HomeViewModel: ObservableObject {
 
     // MARK: - 每日推荐
 
-    func loadDaily() async {
+    /// 每日推荐。generation：调用方传入切台时定的代际（selectPlatform），
+    /// 不传则取调用瞬间的 homeLoadGeneration（selectSource / initialLoad）。
+    /// 代际守卫：Moumusic loadOnce 里每个 await 后都查 generation，
+    /// 对不上直接退、不碰任何状态。
+    func loadDaily(generation: Int? = nil) async {
         let platform = selectedPlatform
+        let generation = generation ?? homeLoadGeneration
         isLoadingDaily = true
         dailyEmptyReason = nil
         let tracks = await NativeBridge.dailyRecommend(platform: platform)
-        // 切台竞态：加载期间又切了台，旧结果直接丢掉。
-        guard platform == selectedPlatform else { return }
+        // 切台竞态：加载期间又切了台（代际变了）或任务被取消，旧结果直接丢掉。
+        guard generation == homeLoadGeneration, platform == selectedPlatform, !Task.isCancelled else { return }
         daily = tracks
         isLoadingDaily = false
         if tracks.isEmpty {
@@ -279,7 +358,8 @@ enum LiziPlatforms {
     static let all: [Info] = [
         Info(id: "netease", name: "网易云", assetName: "PlatformNetease", monogram: "网", brandHex: 0xEA3E3C, onBrandLight: false),
         Info(id: "qq", name: "QQ 音乐", assetName: "PlatformQQ", monogram: "Q", brandHex: 0xF8C913, onBrandLight: true),
-        Info(id: "kugou", name: "酷狗", assetName: "PlatformKugou", monogram: "K", brandHex: 0x2CA2F9, onBrandLight: false),
+        // r22j：酷狗品牌色照抄壳版 PLAT_BG #3D8BFA（原来 0x2CA2F9 是旧值）。
+        Info(id: "kugou", name: "酷狗", assetName: "PlatformKugou", monogram: "K", brandHex: 0x3D8BFA, onBrandLight: false),
         Info(id: "qishui", name: "汽水", assetName: "PlatformQishui", monogram: "汽", brandHex: 0x111111, onBrandLight: false),
         Info(id: "bodian", name: "波点", assetName: "PlatformBodian", monogram: "波", brandHex: 0x04E3B4, onBrandLight: true),
         Info(id: "kuwo", name: "酷我音乐", assetName: "PlatformKuwo", monogram: "酷", brandHex: 0xF4D329, onBrandLight: true),

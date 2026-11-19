@@ -55,6 +55,11 @@ final class AnimatedArtworkManager {
     }
 
     private let workQueue = DispatchQueue(label: "lizi.animated-artwork", qos: .utility)
+    /// 方形渲染专用队列（第 22 轮第 3 件）：方形只是 1x1 备用，与竖版共用
+    /// 一条串行队时，上一首的方形渲染会把下一首的竖版挡在队外——r21a 诊断
+    /// 里竖版 ready 一次花了 31 秒，方形还在同一队里排着。两队并行，
+    /// 各挡各的：下一首的竖版不等上一首的方形。
+    private let squareQueue = DispatchQueue(label: "lizi.animated-artwork.square", qos: .utility)
     /// 编码回调专用队列：render 在 workQueue 上等 done 信号，回调必须跑在别的队列，
     /// 否则 workQueue 自己等自己，死锁。
     private let encodeQueue = DispatchQueue(label: "lizi.animated-artwork.encode", qos: .utility)
@@ -159,8 +164,16 @@ final class AnimatedArtworkManager {
         setCurrentKey(key)
         DiagLog.shared.recordPlaybackStep("routeA prepare start key=\(key)")
         if isReady(key: key) { lastGoodKey = key; onReady(); return }
+        // 第 22 轮第 3 件：记入队时间——竖版 ready 的 ms 是从块内开始算的，
+        // 排队等了多久原来量不到；31 秒到底是队里等还是渲染本身慢，
+        // 下次诊断拿这句 + ready 的 ms 一减就分得清（等超过 1 秒才记）。
+        let enqueuedAt = Date()
         workQueue.async { [weak self] in
             guard let self else { return }
+            let waitMs = Int(Date().timeIntervalSince(enqueuedAt) * 1000)
+            if waitMs >= 1000 {
+                DiagLog.shared.recordPlaybackStep("routeA queue wait key=\(key) ms=\(waitMs)")
+            }
             // 开工前再确认一次：切歌快时旧歌的渲染直接跳过。
             let stillCurrent = self.currentKeySnapshot() == key
             guard stillCurrent else { return }
@@ -169,12 +182,27 @@ final class AnimatedArtworkManager {
             // r20 之前失败在这里 `catch { continue }` 静默吞掉，锁屏变静态且无记录。
             var portraitOK = self.isReady(key: key, aspect: .portrait)
             if !portraitOK {
-                portraitOK = self.renderWithRetry(image: image, key: key, aspect: .portrait)
-                DiagLog.shared.recordPlaybackStep("routeA render \(portraitOK ? "ok" : "fail") key=\(key) aspect=portrait ms=\(Int(Date().timeIntervalSince(start) * 1000))")
-                if !portraitOK {
-                    DiagLog.shared.recordLog(category: "animated-artwork",
-                        message: "route A portrait render failed key=\(key)",
-                        fields: ["lane": "route-a-render-failed", "aspect": "portrait"])
+                let r = self.renderWithRetry(image: image, key: key, aspect: .portrait)
+                portraitOK = r.ok
+                if r.cancelled {
+                    // 第 22 轮第 3 件：切歌取消不是渲染失败——之前统一记
+                    // "render failed"，用户快速连切几首歌时诊断里全是失败，
+                    // 根本分不清是真坏还是切走了。现在单独记 cancelled。
+                    DiagLog.shared.recordPlaybackStep("routeA render cancelled key=\(key) aspect=portrait ms=\(r.ms)")
+                } else {
+                    DiagLog.shared.recordPlaybackStep("routeA render \(portraitOK ? "ok" : "fail") key=\(key) aspect=portrait ms=\(r.ms) attempts=\(r.attempts)\(portraitOK ? "" : " err=\(r.lastError ?? "-")")")
+                    if !portraitOK {
+                        DiagLog.shared.recordLog(category: "animated-artwork",
+                            message: "route A portrait render failed key=\(key) attempts=\(r.attempts) ms=\(r.ms) err=\(r.lastError ?? "-") fallback=\(self.fallbackKey(for: key) ?? "none")",
+                            fields: ["lane": "route-a-render-failed", "aspect": "portrait", "attempts": r.attempts, "ms": r.ms, "error": r.lastError ?? "", "fallback": self.fallbackKey(for: key) ?? ""])
+                    } else if r.ms > 15_000 {
+                        // 单轮渲染超过 15 秒：记慢渲染（正常几秒到二十秒，
+                        // 31 秒那次就是这档；attempts=2 说明第一轮失败后重试
+                        // 才成，attempts=1 说明单轮本身就慢）。
+                        DiagLog.shared.recordLog(category: "animated-artwork",
+                            message: "route A portrait render slow key=\(key) ms=\(r.ms) attempts=\(r.attempts)",
+                            fields: ["lane": "route-a-render-slow", "aspect": "portrait", "ms": r.ms, "attempts": r.attempts])
+                    }
                 }
             }
             if portraitOK {
@@ -190,44 +218,61 @@ final class AnimatedArtworkManager {
             } else {
                 DispatchQueue.main.async { onReady() }
             }
-            // 切歌了就别再烧方形：方形只是 1x1 备用，当前歌已经不是这首了。
-            let stillCurrentAfterPortrait = self.currentKeySnapshot() == key
-            guard stillCurrentAfterPortrait else { return }
-            // 方形尽力而为：失败只记日志，不影响已挂上的竖版；成功再回调一次
-            // （调用方补挂 1x1 键），顺带清缓存。
-            if !self.isReady(key: key, aspect: .square) {
-                let squareStart = Date()
-                if self.renderWithRetry(image: image, key: key, aspect: .square) {
-                    DiagLog.shared.recordPlaybackStep("routeA render ok key=\(key) aspect=square ms=\(Int(Date().timeIntervalSince(squareStart) * 1000))")
-                    self.pruneCache(keeping: key)
-                    DispatchQueue.main.async { onReady() }
+            // 方形改走独立的 squareQueue（见 squareQueue 注释）：方形只是
+            // 1x1 备用，当前歌已经不是这首就别再烧；是这首也只在自己的队里
+            // 跑，不占竖版队列、下一首的竖版不用等它。
+            self.squareQueue.async { [weak self] in
+                guard let self else { return }
+                guard self.currentKeySnapshot() == key else { return }
+                // 方形尽力而为：失败只记日志，不影响已挂上的竖版；成功再回调一次
+                // （调用方补挂 1x1 键），顺带清缓存。
+                if !self.isReady(key: key, aspect: .square) {
+                    let r = self.renderWithRetry(image: image, key: key, aspect: .square)
+                    if r.ok {
+                        DiagLog.shared.recordPlaybackStep("routeA render ok key=\(key) aspect=square ms=\(r.ms) attempts=\(r.attempts)")
+                        self.pruneCache(keeping: key)
+                        DispatchQueue.main.async { onReady() }
+                    } else if r.cancelled {
+                        DiagLog.shared.recordPlaybackStep("routeA render cancelled key=\(key) aspect=square ms=\(r.ms)")
+                    } else {
+                        DiagLog.shared.recordPlaybackStep("routeA render fail key=\(key) aspect=square ms=\(r.ms) attempts=\(r.attempts) err=\(r.lastError ?? "-")")
+                        DiagLog.shared.recordLog(category: "animated-artwork",
+                            message: "route A square render failed key=\(key) attempts=\(r.attempts) ms=\(r.ms) err=\(r.lastError ?? "-")",
+                            fields: ["lane": "route-a-render-failed", "aspect": "square", "attempts": r.attempts, "ms": r.ms, "error": r.lastError ?? ""])
+                    }
                 } else {
-                    DiagLog.shared.recordPlaybackStep("routeA render fail key=\(key) aspect=square ms=\(Int(Date().timeIntervalSince(squareStart) * 1000))")
-                    DiagLog.shared.recordLog(category: "animated-artwork",
-                        message: "route A square render failed key=\(key)",
-                        fields: ["lane": "route-a-render-failed", "aspect": "square"])
+                    self.pruneCache(keeping: key)
                 }
-            } else {
-                self.pruneCache(keeping: key)
             }
         }
     }
 
-    /// 单个尺寸渲染，最多两次（第一次失败就地重试一次）；返回是否成功。
+    /// 单个尺寸渲染，最多两次（第一次失败就地重试一次）；返回是否成功、
+    /// 是不是切歌取消、最后一次失败的原因、尝试次数与总耗时。
     /// 取消（切歌导致 currentKey 变了）不重试：新歌的渲染已经在队里排着，
     /// 旧歌再烧一轮纯属浪费，重试只会把新歌的视频往后拖。
-    private func renderWithRetry(image: UIImage, key: String, aspect: Aspect) -> Bool {
+    /// 第 22 轮第 3 件：之前失败原因直接吞掉（`catch { continue }`），
+    /// 诊断里只有一句 "render failed"、不知道是写不进文件、编码器起不来
+    /// 还是超时——现在把每次失败的 error 描述与耗时都带出来，下次诊断
+    /// 直接读 err= 就知道是哪种失败；31 秒慢渲染也一样，attempts=2
+    /// 说明第一轮失败后重试才成，attempts=1 说明单轮本身就慢。
+    private func renderWithRetry(image: UIImage, key: String, aspect: Aspect) -> (ok: Bool, cancelled: Bool, lastError: String?, attempts: Int, ms: Int) {
+        let start = Date()
+        var lastError: String?
+        var attempts = 0
         for _ in 1...2 {
+            attempts += 1
             do {
                 try render(image: image, key: key, aspect: aspect)
-                return true
+                return (true, false, nil, attempts, Int(Date().timeIntervalSince(start) * 1000))
             } catch RenderError.cancelled {
-                return false
+                return (false, true, nil, attempts, Int(Date().timeIntervalSince(start) * 1000))
             } catch {
+                lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 continue
             }
         }
-        return false
+        return (false, false, lastError, attempts, Int(Date().timeIntervalSince(start) * 1000))
     }
 
     /// 当前歌的视频不可用时拿什么兜底：最近一个竖版渲染成功的键（上一首的缓存），
@@ -373,12 +418,15 @@ final class AnimatedArtworkManager {
             while input.isReadyForMoreMediaData {
                 // r20：切歌取消——渲染是串行队列里最耗时的一段（竖版+方形
                 // 各 240 帧），旧歌的渲染跑满全程才会轮到新歌，锁屏就一直
-                // 挂着上一首的视频。每 24 帧（约 1 秒）看一次 currentKey，
+                // 挂着上一首的视频。每 12 帧（约半秒）看一次 currentKey，
                 // 歌已经切走了就地取消，不等跑完、也不重试（见 renderWithRetry）。
+                // 第 22 轮第 3 件：24 帧改 12 帧——单帧慢的时候（31 秒那次
+                // 每帧约 130ms）取消要等 3 秒才发现，12 帧约 1.5 秒；
+                // 方形已拆到独立队列，竖版队里只剩竖版，取消越快新歌越早开工。
                 // r21a：读 currentKey 走 NSLock（currentKeySnapshot），不再
                 // DispatchQueue.main.sync——主线程被别的活占住时编码回调
                 // 不再跟着卡（见 currentKey 注释）。
-                if frameIndex % 24 == 0, frameIndex > 0,
+                if frameIndex % 12 == 0, frameIndex > 0,
                    self.currentKeySnapshot() != key {
                     writer.cancelWriting()
                     done.signal()
@@ -476,13 +524,25 @@ final class AnimatedArtworkManager {
         return buffer
     }
 
-    private enum RenderError: Error {
+    /// 第 22 轮第 3 件：失败原因要进诊断（见 renderWithRetry），
+    /// 每种错误给一句能读的描述；writer.error 原样抛时用 AVFoundation
+    /// 自己的描述，不经过这里。
+    private enum RenderError: Error, LocalizedError {
         case cannotAddInput
         case noCGImage
         case timeout
         case failed
         /// 切歌导致当前渲染作废（currentKey 已变）：renderWithRetry 不重试。
         case cancelled
+        var errorDescription: String? {
+            switch self {
+            case .cannotAddInput: return "AVAssetWriter cannot add video input"
+            case .noCGImage: return "cover has no CGImage / zero size"
+            case .timeout: return "render timed out after 120s"
+            case .failed: return "AVAssetWriter failed (see writer.error)"
+            case .cancelled: return "cancelled (track changed)"
+            }
+        }
     }
 }
 

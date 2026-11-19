@@ -1,14 +1,24 @@
 import SwiftUI
 
-/// 首页 Hero 大卡：照抄壳版 `.hall-hero`。
+/// 首页 Hero 大卡：r22j 模板 v2（~/workspace/lizi-home-template-portrait.png /
+/// lizi-home-template-landscape.png）+ 壳版 `.hall-hero` 兜底。
 ///
-/// - 3:1 横条；min-height clamp(190px, 26vh, 260px)，
-///   max-height clamp(360px, 56vh, 620px)；圆角 3px。
+/// - 模板 v2：竖屏是首屏上半块（高 = (屏高−110)/2，402×874 档 382pt），
+///   横屏是满宽横幅（高 = (屏高−110)×9/16，932×430 档 180pt）；高度由
+///   HomeView 按模板算好传进来（`height`），不再用壳版 clamp 公式
+///   （公式保留作 `height == nil` 时的回落）。
+///   圆角 17（模板量：顶行/左列都从 16 往里收 17pt；壳版是 3px，
+///   模板为准）。标题 42pt（竖屏模板量约 42pt）/ 46pt（横屏模板量约
+///   46pt），由 HomeView 按朝向传 `titleSize`；内边距左/右 24、上/下 20
+///   （壳版 badge left 24 top 20、meta left/right 24 bottom 20）；阴影
+///   0 30/35 0.5（壳版 0 30px 70px -34px / .5，SwiftUI 无 spread，
+///   radius≈blur/2 近似）。
 /// - 显示上次播放的歌（PlaybackStore.currentTrack，空时取持久化的上次播放；
 ///   两者都没有时标题是「从下面挑一个平台开始」）。
 /// - 封面宽图铺满 + 底部渐变；左上角「上次听到 · 时间」徽章；
-///   左下角歌名 / 副标题；右下角「打开歌单」+ 播放键
-///   （播放中三角变均衡条动画，照抄壳版 .hall-hero__play-bars）。
+///   左下角歌名 / 副标题；右下角播放键（播放中三角变均衡条动画，
+///   照抄壳版 .hall-hero__play-bars）。模板里没有「打开歌单」pill，
+///   已拿掉——整卡点按就是进播放页，pill 是重复入口，功能没丢。
 /// - 右上角锁按钮：有海报时才出现；锁定 = 闭锁图标，解锁 = 开锁图标；
 ///   状态 UserDefaults 持久化（`lizi.native.hall.heroLocked`），默认解锁。
 /// - 点按整卡进播放页；双击整卡也进播放页（r20：单 / 双击都落传统
@@ -17,9 +27,14 @@ import SwiftUI
 ///   竖向滚动用 simultaneousGesture 保证不被横滑手势吃掉。
 /// - 壳版悬停才展开的歌词 / 方形封面是桌面 hover 交互，原生触屏没有 hover，
 ///   P1 不做；歌词在播放页看。
+/// - 封面只用真数据：`track?.coverURL`（正在播那首歌的封面），不用模板图。
 struct HeroCardView: View {
     let width: CGFloat
     let viewHeight: CGFloat
+    /// 模板 v2 定高（竖屏 382 / 横屏 180，932×430 档）；nil 时回落壳版 clamp 公式。
+    var height: CGFloat? = nil
+    /// 模板 v2 标题字号：竖屏 42 / 横屏 46（模板实测）。
+    var titleSize: CGFloat = 42
 
     @EnvironmentObject var playback: PlaybackStore
     @EnvironmentObject var nav: AppNavigation
@@ -32,9 +47,12 @@ struct HeroCardView: View {
         playback.currentTrack ?? viewModel.lastTrack
     }
 
-    /// CSS clamp 的 SwiftUI 版：height = clamp(width/3, minH, maxH)，
-    /// minH = clamp(26vh, 190, 260)，maxH = clamp(56vh, 360, 620)。
+    /// 模板 v2 定高优先：`height` 有值时直接用（竖屏 (屏高−110)/2、
+    /// 横屏 (屏高−110)×9/16）；nil 时回落壳版 clamp 公式
+    /// height = clamp(width/3, minH, maxH)，minH = clamp(26vh, 190, 260)，
+    /// maxH = clamp(56vh, 360, 620)。
     private var cardHeight: CGFloat {
+        if let height { return height }
         let minH = min(max(viewHeight * 0.26, 190), 260)
         let maxH = min(max(viewHeight * 0.56, 360), 620)
         return min(max(width / 3, minH), maxH)
@@ -92,7 +110,7 @@ struct HeroCardView: View {
                 HStack(alignment: .bottom, spacing: 24) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(track?.title ?? "从下面挑一个平台开始")
-                            .font(.liziDisplay(size: LiziTokens.size25))
+                            .font(.liziDisplay(size: titleSize))
                             .foregroundColor(track == nil ? LiziTokens.ink2 : .white)
                             .lineLimit(1)
                         if let track = track {
@@ -110,44 +128,32 @@ struct HeroCardView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     if track != nil {
-                        HStack(spacing: 12) {
-                            // 「打开歌单」：P1 还没有歌单详情页（P2），先跳播放页；
-                            // P2 接歌单详情时把这里改成 playlistDetail。
-                            Button(action: { nav.show(.player) }) {
-                                Text("打开歌单")
-                                    .font(.liziBody(size: LiziTokens.size13, weight: .medium))
-                                    .foregroundColor(.white.opacity(0.9))
-                                    .padding(.horizontal, 16)
-                                    .frame(height: 40)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 999)
-                                            .stroke(Color.white.opacity(0.34), lineWidth: 1)
-                                    )
-                            }
-                            Button(action: togglePlay) {
-                                ZStack {
-                                    Circle()
-                                        .fill(Color.white.opacity(0.95))
-                                        .frame(width: 52, height: 52)
-                                    if playback.isPlaying {
-                                        EQBarsView()
-                                    } else {
-                                        Image(systemName: "play.fill")
-                                            .font(.system(size: 20))
-                                            .foregroundColor(LiziTokens.ink)
-                                    }
+                        // 模板 v2：右下角只有播放键，没有「打开歌单」pill——
+                        // 整卡点按就是进播放页，pill 是重复入口（见文件头）。
+                        Button(action: togglePlay) {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.white.opacity(0.95))
+                                    .frame(width: 52, height: 52)
+                                if playback.isPlaying {
+                                    EQBarsView()
+                                } else {
+                                    Image(systemName: "play.fill")
+                                        .font(.system(size: 20))
+                                        .foregroundColor(LiziTokens.ink)
                                 }
                             }
-                            .accessibilityLabel(playback.isPlaying ? "暂停" : "播放")
                         }
+                        .accessibilityLabel(playback.isPlaying ? "暂停" : "播放")
                     }
                 }
             }
-            .padding(20)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
         }
         .frame(width: width, height: cardHeight)
-        .clipShape(RoundedRectangle(cornerRadius: 3))
-        .shadow(color: .black.opacity(0.25), radius: 30, x: 0, y: 18)
+        .clipShape(RoundedRectangle(cornerRadius: 17)) // 模板 v2 实测圆角约 17pt（壳版 3px，模板为准）
+        .shadow(color: .black.opacity(0.5), radius: 35, x: 0, y: 30)
         .contentShape(Rectangle())
         // r20 双击进播放页：双击优先、单击兜底的排他组合，一只手势包办单 / 双击。
         // - `TapGesture(count: 2).exclusively(before: TapGesture(count: 1))`：

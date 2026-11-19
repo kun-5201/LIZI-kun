@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>倾诉 · Folia</title>
+<style>
+  html,body{margin:0;height:100%;background:#0c0c10;overflow:hidden}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #hint{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:9;
+    font:500 11px/1.5 ui-monospace,Consolas,monospace;color:rgba(220,225,245,.35);
+    letter-spacing:.08em;pointer-events:none;transition:opacity .6s;white-space:nowrap}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">等待第一句…</div>
+<script>
+"use strict";
+/* ============================================================================
+   倾诉（F11 · Folia tilt）
+   ----------------------------------------------------------------------------
+   效果来源：Folia（AGPL-3.0，作者 chthollyphile）的 tilt（倾诉）模式——
+   主行水平，副行倾斜；配色四档。本文件只学形态与流程，按 Lizi 舞台承载
+   协议（__c100）独立重写，未复制 Folia 源码。
+   注意：与 Lizi 036 倾斜卡片不撞——036 是“一句词就是墙上一张卡，开唱即
+   翻面”（卡片翻面），本形态是排版倾斜（主行水平、副行斜置），去重见交回报告。
+   形态：当前句水平居中最大；上一句 / 下一句以可调角度斜置在上下；配色
+   四档（默认 / 互换 / 全主色 / 全强调色）。
+   播放联动：init 换歌重排；tick 推时间；beat 让主行亮度一跳。
+   ========================================================================== */
+const S = { colorScheme: 'default', tiltDeg: 8 };
+window.__stagePanel = {
+  title: '倾诉 · Folia',
+  hint: '主行水平，副行倾斜；配色四档。',
+  items: [
+    { key: 'colorScheme', label: '配色', type: 'segment', def: 'default', options: [
+      { v: 'default', t: '默认' }, { v: 'swap', t: '互换' },
+      { v: 'accentAll', t: '全主色' }, { v: 'primaryAll', t: '全强调色' } ] },
+    { key: 'tiltDeg', label: '倾斜角度', type: 'range', min: 0, max: 20, step: 1, def: 8 },
+    { key: 'shake', label: '震动', type: 'switch', def: true }
+  ]
+};
+window.__liziShake = true;
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const hint = document.getElementById('hint');
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+resize();
+addEventListener('resize', resize);
+
+let lines = [], accent = [150, 165, 255], song = null;
+let clockT = 0, clockAt = performance.now(), playing = false;
+let curIdx = -1, mainPulse = 0;
+const now = () => clockT + (playing ? (performance.now() - clockAt) / 1000 : 0);
+const rgb = a => `rgb(${a[0] | 0},${a[1] | 0},${a[2] | 0})`;
+const rgba = (a, al) => `rgba(${a[0] | 0},${a[1] | 0},${a[2] | 0},${al})`;
+function curIdxAt(t) { let idx = -1; for (let i = 0; i < lines.length; i++) { if (lines[i].t <= t + 0.001) idx = i; else break; } return idx; }
+function charsOf(line) {
+  if (line.chars && line.chars.length) return line.chars;
+  const cs = [...line.text], n = cs.length || 1;
+  return cs.map((c, i) => ({ c, t: line.t + (line.dur || 6) * i / n }));
+}
+function fitFont(text, px, maxW, weight) {
+  let s = px;
+  ctx.font = `${weight || 600} ${s}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  while (s > 12 && ctx.measureText(text).width > maxW) {
+    s -= 2;
+    ctx.font = `${weight || 600} ${s}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+  }
+  return s;
+}
+function schemeColors() {
+  // [主色, 副色]：默认=白/主色；互换=主色/白；全主色=主色/主色淡；全强调色=白/白淡
+  if (S.colorScheme === 'swap') return [rgb(accent), '#ffffff'];
+  if (S.colorScheme === 'accentAll') return [rgb(accent), rgba(accent, 0.6)];
+  if (S.colorScheme === 'primaryAll') return ['#ffffff', 'rgba(255,255,255,0.55)'];
+  return ['#ffffff', rgb(accent)];
+}
+function frame() {
+  requestAnimationFrame(frame);
+  const t = now();
+  const idx = curIdxAt(t);
+  if (idx !== curIdx) curIdx = idx;
+  mainPulse *= 0.94;
+  ctx.fillStyle = '#0c0c10'; ctx.fillRect(0, 0, W, H);
+  const [main, sub] = schemeColors();
+  const tilt = S.tiltDeg * Math.PI / 180;
+  const line = lines[curIdx];
+  const prev = lines[curIdx - 1], nxt = lines[curIdx + 1];
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  if (prev) {
+    ctx.save();
+    ctx.translate(W / 2, H * 0.3); ctx.rotate(-tilt);
+    ctx.fillStyle = rgba([255, 255, 255], 0.3);
+    const fs = fitFont(prev.text, 22, W * 0.7, 500);
+    ctx.font = `500 ${fs}px "PingFang SC",system-ui,sans-serif`;
+    ctx.fillText(prev.text, 0, 0);
+    ctx.restore();
+  }
+  if (line) {
+    const chars = charsOf(line);
+    const fs = fitFont(line.text, Math.min(W * 0.085, 60), W * 0.84, 700);
+    ctx.font = `700 ${fs}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+    const totalW = ctx.measureText(line.text).width;
+    let x = W / 2 - totalW / 2;
+    chars.forEach(ch => {
+      const w = ctx.measureText(ch.c).width;
+      const sung = t >= ch.t;
+      ctx.fillStyle = sung ? main : rgba([255, 255, 255], 0.3);
+      if (sung) { ctx.shadowColor = rgb(accent); ctx.shadowBlur = 10 + mainPulse * 16; }
+      ctx.fillText(ch.c, x + w / 2, H * 0.5);
+      ctx.shadowBlur = 0;
+      x += w;
+    });
+    hint.style.opacity = '0';
+  } else {
+    hint.style.opacity = lines.length ? '1' : '0.5';
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+  }
+  if (nxt) {
+    ctx.save();
+    ctx.translate(W / 2, H * 0.7); ctx.rotate(tilt);
+    ctx.fillStyle = sub;
+    ctx.globalAlpha = 0.75;
+    const fs = fitFont(nxt.text, 22, W * 0.7, 500);
+    ctx.font = `500 ${fs}px "PingFang SC",system-ui,sans-serif`;
+    ctx.fillText(nxt.text, 0, 0);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+  ctx.textAlign = 'left';
+}
+requestAnimationFrame(frame);
+
+function applySetting(p) {
+  if (!p || !p.key) return;
+  const v = p.value;
+  if (p.key === 'colorScheme') { const s = String(v); if (['default', 'swap', 'accentAll', 'primaryAll'].includes(s)) S.colorScheme = s; }
+  else if (p.key === 'tiltDeg') { const n = Number(v); if (isFinite(n)) S.tiltDeg = Math.min(20, Math.max(0, n)); }
+}
+const ping = () => { try { parent.postMessage({ __c100: 1, type: 'activity' }, '*'); } catch (_) {} };
+addEventListener('pointermove', ping, { passive: true });
+addEventListener('pointerdown', ping, { passive: true });
+addEventListener('wheel', ping, { passive: true });
+addEventListener('keydown', ping);
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.key === ' ') {
+    e.preventDefault();
+    try { parent.postMessage({ __c100: 1, type: 'key', payload: { key: 'Space' } }, '*'); } catch (_) {}
+  }
+}, true);
+addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || d.__c100 !== 1) return;
+  if (d.type === 'init') {
+    const p = d.payload || {};
+    lines = (p.lines || []).slice().sort((a, b) => a.t - b.t);
+    song = p.song || null;
+    if (p.accent) accent = p.accent;
+    curIdx = -1; clockT = 0; clockAt = performance.now();
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+  } else if (d.type === 'tick') {
+    clockT = d.payload.time; clockAt = performance.now(); playing = !!d.payload.playing;
+  } else if (d.type === 'beat') {
+    if (window.__liziShake !== false) mainPulse = Math.min(1, 0.4 + (d.payload.level || 0) * 0.6);
+  } else if (d.type === 'setting') {
+    if (d.payload.key === 'shake') window.__liziShake = d.payload.value !== false;
+    else applySetting(d.payload);
+  }
+});
+try { parent.postMessage({ __c100: 1, type: 'ready' }, '*'); } catch (_) {}
+</script>
+</body>
+</html>

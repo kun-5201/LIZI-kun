@@ -202,18 +202,20 @@ final class LiziIslandCoordinator {
     func receive(snapshot: LiziPlaybackSnapshot, fromJS: Bool = false) {
         if fromJS { lastJSSnapshotAt = Date() }
         let trackChanged = snapshot.title != lastTitle || snapshot.artist != lastArtist
-        let lineChanged = snapshot.currentLyric != lastLine
         let playChanged = snapshot.isPlaying != lastPlaying
         let likedChanged = snapshot.isLiked != lastLiked
         let coverChanged = snapshot.coverURL != lastCoverURL
         let now = Date()
         let progressDue = snapshot.isPlaying
             && now.timeIntervalSince(lastProgressUpdate) >= progressRefreshInterval
-        guard trackChanged || lineChanged || playChanged || likedChanged || progressDue || coverChanged else { return }
+        // 第 22 轮第 5 件：歌词不再上岛——ContentState 已无歌词字段，
+        // 歌词行变（lineChanged）不再推岛；更新只剩切歌、播放切换、喜欢态、
+        // 5 秒进度、封面变五路。snapshot 的歌词字段与 JS collect() 保留
+        //（播放页还要用），只不转发上岛。
+        guard trackChanged || playChanged || likedChanged || progressDue || coverChanged else { return }
 
         lastTitle = snapshot.title
         lastArtist = snapshot.artist
-        lastLine = snapshot.currentLyric
         lastPlaying = snapshot.isPlaying
         lastLiked = snapshot.isLiked
         lastProgressUpdate = now
@@ -222,12 +224,6 @@ final class LiziIslandCoordinator {
             fetchCover(urlString: snapshot.coverURL)
         }
 
-        /* 第 13 轮第 19 件：没歌词的歌显示歌名，绝不用 ♪——♪ 是一条假歌词，
-           看着像歌词没加载完，用户会以为岛坏了；歌名是这首歌真实的明确状态。
-           歌词还没拉到（换歌瞬间 currentLyric 也是 null）时同样先显示歌名，
-           词一到就被 lineChanged 推过来的真词换掉。 */
-        let current = snapshot.currentLyric ?? snapshot.title
-        currentLine = current
         let progress: Double
         if snapshot.duration > 0 {
             progress = min(max(snapshot.currentTime / snapshot.duration, 0), 1)
@@ -241,9 +237,6 @@ final class LiziIslandCoordinator {
         let coverData = snapshot.coverURL.flatMap { coverCache[$0] }
             ?? (snapshot.coverURL == nil ? Self.defaultCoverData : nil)
         let state = LiziLyricsAttributes.ContentState(
-            currentLyric: current,
-            prevLyric: snapshot.prevLyric,
-            nextLyric: snapshot.nextLyric,
             progress: progress,
             isPlaying: snapshot.isPlaying,
             duration: snapshot.duration,
@@ -263,7 +256,8 @@ final class LiziIslandCoordinator {
     /// 恢复播放时 App 还在后台，JS 快照不恢复，活动永不重起。
     /// pollNowPlaying（原生定时器，后台音频模式下仍跑）在播放中且 JS 快照
     /// 已 stale（>3 秒）时喂一个原生快照：标题/歌手/播放态/进度/封面 URL
-    /// 用原生读到的真值；歌词用上次已知行（同曲保留，切歌时 nil 即显示歌名）。
+    /// 用原生读到的真值；歌词字段仍填上次已知行（快照结构保留，播放页用），
+    /// 但第 22 轮第 5 件起歌词不再上岛，receive() 里不再读它。
     /// 暂停时不喂——让 staleDate 按设计清掉岛。
     func receiveNative(title: String, artist: String, isPlaying: Bool,
                        currentTime: Double, duration: Double,
@@ -421,7 +415,7 @@ final class LiziIslandCoordinator {
         return UIGraphicsGetImageFromCurrentImageContext()?.jpegData(compressionQuality: 0.7)
     }
 
-    /// 歌停了时收掉岛。平时靠 staleDate 10s 自动消失，这里是显式收尾。
+    /// 歌停了时收掉岛。平时靠 staleDate 8s 自动消失，这里是显式收尾。
     func endIsland() {
         liveActivity.endActivity()
         lastTitle = ""

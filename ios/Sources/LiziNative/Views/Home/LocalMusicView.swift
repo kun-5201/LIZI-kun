@@ -131,9 +131,12 @@ struct LocalMusicSectionView: View {
     }
 
     private func trackFor(_ entry: LocalMusic.Entry) -> Track {
+        // r22l 编译修：Track.init 的成员顺序是 id 在前、platform 在后
+        //（Models.swift init(id:platform:title:...)），
+        // 之前 platform 写在 id 前面，报「argument 'id' must precede 'platform'」。
         Track(
-            platform: "local",
             id: entry.id,
+            platform: "local",
             title: entry.title,
             artist: entry.artists.joined(separator: " / "),
             durationMs: Int(entry.duration * 1000)

@@ -277,7 +277,13 @@ struct PlayerView: View {
                         .clipped()
                     CoverFlowView(tier: landscapeTier, isCompact: true)
                         .scaleEffect(coverScale, anchor: .top)
-                        .frame(maxWidth: .infinity, height: coverTrack)
+                        // r22l 编译修：`.frame(maxWidth:height:)` 没有
+                        // height 这个参数（maxWidth 重载只有 min/max
+                        // ideal），报 extra argument 'height'；拆成
+                        // 两段 frame，宽取满、高度定死 coverTrack，
+                        // 与原来想表达的布局完全一致。
+                        .frame(maxWidth: .infinity)
+                        .frame(height: coverTrack)
                         .clipped()
                     topBarCapsuleButton(
                         systemName: "magnifyingglass",

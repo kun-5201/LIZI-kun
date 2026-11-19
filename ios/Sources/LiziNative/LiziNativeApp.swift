@@ -28,9 +28,12 @@ struct LiziNativeApp: App {
         // NativeIslandCoordinator / NowPlayingCoordinator 都是 @MainActor，
         // 在非隔离的 App.init 里只能用 MainActor.assumeIsolated 创建
         //（启动本来就在主线程，安全；Swift 5 语言模式下这是编译要求）。
-        let store: PlaybackStore
-        let island: NativeIslandCoordinator
-        let nowPlaying: NowPlayingCoordinator
+        // r22l 编译修：闭包里不能给 let 赋值（assumeIsolated 的闭包捕获
+        // let 后赋值是硬错），三个局部量改 var；创建方式与隔离都不变，
+        // 仍在 MainActor.assumeIsolated 里建（启动本来就在主线程）。
+        var store: PlaybackStore
+        var island: NativeIslandCoordinator
+        var nowPlaying: NowPlayingCoordinator
         MainActor.assumeIsolated {
             store = PlaybackStore()
             island = NativeIslandCoordinator(store: store)

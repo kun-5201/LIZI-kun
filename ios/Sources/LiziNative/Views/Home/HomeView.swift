@@ -112,7 +112,13 @@ struct HomeView: View {
                                 isLandscape: isLandscape,
                                 tier: PlayerTokens.sizeTier(for: outer.size, topInset: outer.safeAreaInsets.top)
                             )
-                            .padding(.horizontal, 16)
+                            // r22l 编译修：231 行 tier 类型错导致这行
+                            // dailyPanel 调用的结果类型推不出来，`.horizontal`
+                            // 跟着报「cannot infer contextual base」——
+                            // 是 231 行的级联，不是这行本身写错；写明
+                            // Edge.Set 后即使类型再出问题也不会连带误报，
+                            // 布局与数值与原来完全一致。
+                            .padding(Edge.Set.horizontal, 16)
                         }
                         .padding(.top, gapTop)
 
@@ -224,11 +230,14 @@ struct HomeView: View {
     /// pan recognizer（见 HomeCoverRingView，r21 教训后不再用 SwiftUI
     /// DragGesture），它与外层 ScrollView 竖滑共存；现在多了一层面板内
     /// ScrollView，展开手势是否仍优先，要真机验（见清单 D19）。
+    /// r22l 编译修：真类型名是 PlayerTokens.PlayerSizeTier
+    ///（PlayerTokens.swift 里 `enum PlayerSizeTier`，r20 约定名），
+    /// 之前写的 SizeTier 不存在。
     private func dailyPanel(
         width: CGFloat,
         height: CGFloat,
         isLandscape: Bool,
-        tier: PlayerTokens.SizeTier
+        tier: PlayerTokens.PlayerSizeTier
     ) -> some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 8) {

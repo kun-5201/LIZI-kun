@@ -117,25 +117,34 @@ final class StageBridge: NSObject, ObservableObject {
         self.store = store
         wakeHUD()
         startHudTimer()
-        store.$currentTrack
-            .sink { [weak self] track in
-                guard let self else { return }
-                Task { @MainActor in self.onTrackChanged(track) }
-            }
-            .store(in: &cancellables)
-        store.$currentLyricIndex
-            .sink { [weak self] idx in
-                guard let self else { return }
-                Task { @MainActor in self.onLyricIndexChanged(idx) }
-            }
-            .store(in: &cancellables)
-        store.$isPlaying
-            .dropFirst()
-            .sink { [weak self] _ in
-                guard let self else { return }
-                Task { @MainActor in self.pushInit(force: false) }
-            }
-            .store(in: &cancellables)
+        // r22l 编译修：PlaybackStore 是 @MainActor（第 22 轮第 5 件，
+        // 代际计数器设计靠它，不许摘），它的 @Published 发布者
+        // $currentTrack / $currentLyricIndex / $isPlaying 也是主隔离，
+        // 非隔离的 attach 里同步订阅报硬错。本方法只在 StageView.onAppear
+        // 里调（主线程），订阅三句包进 MainActor.assumeIsolated；
+        // 不改 attach 签名（改 @MainActor 会把错挪到 StageView 的
+        // onAppear 闭包里），不改订阅行为与回调。
+        MainActor.assumeIsolated {
+            store.$currentTrack
+                .sink { [weak self] track in
+                    guard let self else { return }
+                    Task { @MainActor in self.onTrackChanged(track) }
+                }
+                .store(in: &self.cancellables)
+            store.$currentLyricIndex
+                .sink { [weak self] idx in
+                    guard let self else { return }
+                    Task { @MainActor in self.onLyricIndexChanged(idx) }
+                }
+                .store(in: &self.cancellables)
+            store.$isPlaying
+                .dropFirst()
+                .sink { [weak self] _ in
+                    guard let self else { return }
+                    Task { @MainActor in self.pushInit(force: false) }
+                }
+                .store(in: &self.cancellables)
+        }
     }
 
     /// StageView.onDisappear 时停掉 tick（壳版 leave() 还会卸掉 iframe；
@@ -288,7 +297,10 @@ final class StageBridge: NSObject, ObservableObject {
     /// （下一句起点 = 本句结束；末句 6 秒）；YRC 逐字时间照原样带过去。
     private func lyricSchedule() -> [[String: Any]] {
         guard let store else { return [] }
-        let lines = store.lyrics
+        // r22l 编译修：store.lyrics 是 @MainActor 隔离的发布状态，
+        // 非隔离方法里同步读报硬错；本方法只在 pushInit 里调，
+        // pushInit 的调用链全在主线程（见下），包进 assumeIsolated。
+        let lines = MainActor.assumeIsolated { store.lyrics }
         return lines.enumerated().map { (i, line) in
             let start = Double(line.startMs) / 1000
             let next = (i + 1 < lines.count) ? Double(lines[i + 1].startMs) / 1000 : nil
@@ -314,10 +326,20 @@ final class StageBridge: NSObject, ObservableObject {
 
     /// init 下发（壳版 `pushInit` 的签名去重：同一首歌 + 同一份歌词 + 同一个
     /// 重音色不重复发，免得形态每收到一次就清粒子重组）。
+    ///
+    /// r22l 编译修：store.currentTrack / .lyrics / .duration 都是
+    /// @MainActor 隔离的发布状态（PlaybackStore 第 22 轮第 5 件，
+    /// 不许摘），非隔离的 pushInit 里同步读报硬错。调用链全在主线程：
+    /// attach 的 sink（Task @MainActor）、onReady（message handler 的
+    /// Task @MainActor）、ready 兜底（DispatchQueue.main）、
+    /// updateAccent 完成回调（Task @MainActor）——所以三处读都包进
+    /// MainActor.assumeIsolated；不改签名（改 @MainActor 会把错挪到
+    /// armReadyFallback 的 DispatchWorkItem 等调用点），不改去重签名与内容。
     func pushInit(force: Bool) {
         guard let store else { return }
-        let track = store.currentTrack
-        let lines = store.lyrics
+        let track = MainActor.assumeIsolated { store.currentTrack }
+        let lines = MainActor.assumeIsolated { store.lyrics }
+        let duration = MainActor.assumeIsolated { store.duration }
         let sigParts: [String] = [
             track?.id ?? "",
             String(lines.count),
@@ -340,7 +362,7 @@ final class StageBridge: NSObject, ObservableObject {
             "song": song,
             "accent": accent,
             "lines": lyricSchedule(),
-            "duration": store.duration,
+            "duration": duration,
         ])
     }
 
@@ -350,22 +372,29 @@ final class StageBridge: NSObject, ObservableObject {
         stopTick()
         tickTimer = Timer.scheduledTimer(withTimeInterval: 0.066, repeats: true) { [weak self] _ in
             guard let self, let store = self.store else { return }
-            self.post(type: "tick", payload: [
-                "time": store.progress,
-                "playing": store.isPlaying,
-            ])
-            self.tickCount += 1
-            // live 约 8Hz（壳版 120ms 节流）：原生版没有音频分析器，
-            // bpm / 频段全 0，只同步 playing；形态靠 tick + 歌词行推进。
-            if self.tickCount % 8 == 0 {
-                self.post(type: "live", payload: [
-                    "bpm": 0,
-                    "level": 0,
-                    "bass": 0,
-                    "mid": 0,
-                    "treble": 0,
+            // r22l 编译修：store.progress / .isPlaying 是 @MainActor 隔离的
+            // 发布状态；定时器建在主线程、跑在主 runloop 上，回调一定在主线
+            // 程，整段包进 MainActor.assumeIsolated（日志只报了 live 那行
+            // 的 isPlaying，但 tick 那行的 progress / isPlaying 是同一访
+            // 问模式，一并包进来，免得换个 SDK 又冒出来）。
+            MainActor.assumeIsolated {
+                self.post(type: "tick", payload: [
+                    "time": store.progress,
                     "playing": store.isPlaying,
                 ])
+                self.tickCount += 1
+                // live 约 8Hz（壳版 120ms 节流）：原生版没有音频分析器，
+                // bpm / 频段全 0，只同步 playing；形态靠 tick + 歌词行推进。
+                if self.tickCount % 8 == 0 {
+                    self.post(type: "live", payload: [
+                        "bpm": 0,
+                        "level": 0,
+                        "bass": 0,
+                        "mid": 0,
+                        "treble": 0,
+                        "playing": store.isPlaying,
+                    ])
+                }
             }
         }
     }
@@ -393,7 +422,13 @@ final class StageBridge: NSObject, ObservableObject {
         lastLyricIndex = idx
         // 壳版 beat 来自音频分析；原生版没有分析器，行变时给一拍 level 1
         //（播放中才有；震动开关关了则 level 恒 0，见 shakeOff 注释）。
-        let level: Int = (shakeOff() || store?.isPlaying != true) ? 0 : 1
+        // r22l 编译修：store.isPlaying 是 @MainActor 隔离的发布状态，
+        // 非隔离方法里同步读报硬错（`!=` 的 autoclosure 里报的）；
+        // 本方法只在 attach 的 sink 里经 Task @MainActor 调，
+        // 包进 MainActor.assumeIsolated。
+        let level: Int = MainActor.assumeIsolated {
+            (self.shakeOff() || self.store?.isPlaying != true) ? 0 : 1
+        }
         post(type: "beat", payload: ["index": idx, "level": level])
     }
 

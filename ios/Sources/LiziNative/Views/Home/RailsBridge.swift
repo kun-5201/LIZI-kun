@@ -425,7 +425,7 @@ extension NativeBridge {
         case "kugou", "kuwo", "applemusic":
             // 这三家没有「我喜欢的音乐」列表接口：只显示本地星标（P2 起 PlaybackStore
             // 同时持久化完整 Track），没有就诚实空态写清原因，不编假数据。
-            return railLocalLiked(kind: .liked, platform: platform)
+            return await railLocalLiked(kind: .liked, platform: platform)
         default:
             return railEmpty(kind: .liked, platform: platform,
                              reason: "「\(platform)」的「我喜欢」还没接通")
@@ -435,9 +435,13 @@ extension NativeBridge {
     /// 本地星标兜底（kugou / kuwo / applemusic 的喜欢 rail，标题是
     /// 「本地星标收藏」）：有星标就列出来并在前面插一张说明卡，
     /// 没有就诚实空态。
-    private static func railLocalLiked(kind: RailKind, platform: String) -> RailResult {
+    /// r22l 编译修：PlaybackStore 是 @MainActor（第 22 轮第 5 件，代际计数器
+    /// 设计靠它，不许摘），它的 static likedTracks() 也是主隔离；本函数原来是
+    /// 同步非隔离，同步调它报硬错。改成 async 后用 await 跨隔离取（调用方
+    /// railLiked 本来就是 async），不降级 store、不改返回内容。
+    private static func railLocalLiked(kind: RailKind, platform: String) async -> RailResult {
         let platformName = LiziPlatforms.all.first(where: { $0.id == platform })?.name ?? platform
-        let local = PlaybackStore.likedTracks().filter { $0.platform == platform }
+        let local = await PlaybackStore.likedTracks().filter { $0.platform == platform }
         guard !local.isEmpty else {
             let reason: String
             switch platform {

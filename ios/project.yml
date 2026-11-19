@@ -174,8 +174,11 @@ targets:
         INFOPLIST_KEY_NSSupportsLiveActivities: "YES"
         INFOPLIST_KEY_NSSupportsLiveActivitiesFrequentUpdates: "YES"
     info:
-      # 注意：不要写 info.path——壳版指向的 Sources/Lizi/Info.plist 在磁盘上
-      # 不存在；新 target 只用下面的 properties 生成 plist。
+      # info.path 是 XcodeGen 必填项（缺了整个 spec 解码失败，run 44537599094
+      # 证实）——它不是「读磁盘上已有的 plist」，而是 XcodeGen 生成工程时
+      # 把下面 properties 写成 Info.plist 的落盘路径（构建机上生成，不进提交）。
+      # 壳版 Sources/Lizi/Info.plist 同理：磁盘上不存在，构建时由 XcodeGen 生成。
+      path: Sources/LiziNative/Info.plist
       properties:
         CFBundleDisplayName: LIZI 原生
         CFBundleShortVersionString: $(MARKETING_VERSION)
@@ -211,6 +214,9 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.lty5201.lizi-native.LiziLiveActivity
         PRODUCT_NAME: LiziNativeLiveActivity
     info:
+      # info.path 是 XcodeGen 必填项（见 LiziNative 的注释）：构建机上生成，
+      # 不进提交。
+      path: Sources/LiziNativeLiveActivity/Info.plist
       properties:
         CFBundleDisplayName: LIZI 原生灵动岛
         CFBundleShortVersionString: $(MARKETING_VERSION)

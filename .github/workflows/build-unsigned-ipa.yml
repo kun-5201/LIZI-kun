@@ -99,3 +99,90 @@ jobs:
           name: lizi-ipa
           path: dist/lizi.ipa
           if-no-files-found: error
+
+  # 原生版（P0 脚手架起）：与壳版 job 完全独立的 runner / archive / artifact，
+  # 壳版 job 一行不动。原生包里没有 public/，所以不写 public/version.json、
+  # 不做前端 cache-bust；构建信息改写进原生 target 的生成 Swift 文件
+  # （LiziNativeBuildInfo，见 NativeHomeView），「关于 → 构建」读它。
+  ipa-native:
+    runs-on: macos-26-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # 构建信息（原生版）：把 commit / 构建号 / 日期写进生成文件
+      # ios/Sources/LiziNative/BuildInfo.generated.swift（构建机上生成，
+      # 不进 git 提交）。必须在 XcodeGen 之前写，否则 glob 收不到这个文件。
+      - name: Write native build info
+        run: |
+          cat > ios/Sources/LiziNative/BuildInfo.generated.swift <<EOF
+          // Generated at build time by the native job in build-unsigned-ipa.yml.
+          // Do not edit by hand; not committed.
+          import Foundation
+          enum LiziNativeBuildInfo {
+              static let commit = "$GITHUB_SHA"
+              static let build = "$GITHUB_RUN_NUMBER"
+              static let date = "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              static let shortCommit = String(commit.prefix(7))
+          }
+          EOF
+          cat ios/Sources/LiziNative/BuildInfo.generated.swift
+
+      - name: Generate Xcode project (XcodeGen)
+        run: |
+          brew install xcodegen
+          cd ios
+          xcodegen generate
+
+      - name: Archive the native iOS app (unsigned)
+        run: |
+          mkdir -p .build
+          xcodebuild archive \
+            -project ios/Lizi.xcodeproj \
+            -scheme LiziNative \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath .build/LiziNative.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS=""
+
+      - name: Verify the native app bundle
+        run: |
+          APP_PATH="$(find .build/LiziNative.xcarchive/Products/Applications -maxdepth 1 -name '*.app' -print -quit)"
+          echo "app: $APP_PATH"
+          ls "$APP_PATH"
+          echo "--- native must NOT bundle the web frontend ---"
+          test ! -d "$APP_PATH/public" || { echo "::error::public/ must not be in the native app bundle"; exit 1; }
+          echo "--- bundle id / arch ---"
+          test "$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$APP_PATH/Info.plist")" = "com.lty5201.lizi-native" || { echo "::error::native bundle id is not com.lty5201.lizi-native"; exit 1; }
+          /usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$APP_PATH/Info.plist"
+          lipo -archs "$APP_PATH/LiziNative"
+          echo "--- URL scheme must be lizinative (shell uses lizi) ---"
+          test "$(/usr/libexec/PlistBuddy -c "Print CFBundleURLTypes:0:CFBundleURLSchemes:0" "$APP_PATH/Info.plist")" = "lizinative" || { echo "::error::native URL scheme is not lizinative"; exit 1; }
+          echo "--- Live Activity extension must be embedded ---"
+          test -d "$APP_PATH/PlugIns/LiziNativeLiveActivity.appex" || { echo "::error::LiziNativeLiveActivity.appex missing in app bundle"; exit 1; }
+          test "$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$APP_PATH/PlugIns/LiziNativeLiveActivity.appex/Info.plist")" = "com.lty5201.lizi-native.LiziLiveActivity" || { echo "::error::native extension bundle id mismatch"; exit 1; }
+          /usr/libexec/PlistBuddy -c "Print NSExtension:NSExtensionPointIdentifier" "$APP_PATH/PlugIns/LiziNativeLiveActivity.appex/Info.plist"
+          echo "--- Live Activities must be declared on the main app (r16 lesson) ---"
+          test "$(/usr/libexec/PlistBuddy -c "Print NSSupportsLiveActivities" "$APP_PATH/Info.plist")" = "true" || { echo "::error::NSSupportsLiveActivities missing/false in native app Info.plist"; exit 1; }
+          test "$(/usr/libexec/PlistBuddy -c "Print NSSupportsLiveActivitiesFrequentUpdates" "$APP_PATH/Info.plist")" = "true" || { echo "::error::NSSupportsLiveActivitiesFrequentUpdates missing/false in native app Info.plist"; exit 1; }
+
+      - name: Package the native IPA
+        run: |
+          mkdir -p Payload dist
+          APP_PATH="$(find .build/LiziNative.xcarchive/Products/Applications -maxdepth 1 -name '*.app' -print -quit)"
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No .app found in archive" >&2
+            exit 1
+          fi
+          cp -R "$APP_PATH" Payload/
+          zip -qr dist/lizi-native.ipa Payload
+
+      - name: Upload the native IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lizi-native-ipa
+          path: dist/lizi-native.ipa
+          if-no-files-found: error

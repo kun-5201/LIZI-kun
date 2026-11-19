@@ -108,3 +108,112 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+  # ============ Lizi 原生版（P0 脚手架，NATIVE-REWRITE-PLAN.md §3）============
+  # 壳版 Lizi / LiziLiveActivity 一行不改；新代码全部进 Sources/LiziNative/，
+  # 新扩展视图进 Sources/LiziNativeLiveActivity/。两版 bundle ID / URL scheme
+  # 不同，可同装一台手机对照。
+  #
+  # sources 只列 Sources/LiziNative + 逐个列出的共享文件，绝不包含整个
+  # Sources/Lizi 目录（会把 WebHost / ContentView 等壳代码编进来）。
+  # 清单之外多列的 5 个文件是编译必需（缺一编不过，见各行注释）；它们只
+  # 编译进来，P0 不实例化、不启动（LocalHttpServer / LiziRouter 不跑），
+  # 第二阶段抽 Sources/LiziShared/ 时再把 HttpRequest/HttpResponse 与
+  # Upstream 从 HttpServer.swift / StaticFiles.swift 里拆出来。
+  LiziNative:
+    type: application
+    platform: iOS
+    sources:
+      - Sources/LiziNative
+      # 壳版同款图标（只含 .xcassets 资源，不含任何壳代码）。
+      - Sources/Lizi/Assets.xcassets
+      # 共享后端：7 平台服务 + LX + 歌词 + 诊断 + 会话 + 加密 + 代理 + 本地文件 + 边车。
+      - Sources/Lizi/Server/NetEase.swift
+      - Sources/Lizi/Server/QQ.swift
+      - Sources/Lizi/Server/Kugou.swift
+      - Sources/Lizi/Server/Qishui.swift
+      - Sources/Lizi/Server/Bodian.swift
+      - Sources/Lizi/Server/Kuwo.swift
+      - Sources/Lizi/Server/AppleMusic.swift
+      - Sources/Lizi/Server/LX.swift
+      - Sources/Lizi/Server/LXSources.swift
+      - Sources/Lizi/Server/LXScriptEngine.swift
+      - Sources/Lizi/Server/Lrclib.swift
+      - Sources/Lizi/Server/DiagLog.swift
+      - Sources/Lizi/Server/SessionStore.swift
+      - Sources/Lizi/Server/Crypto.swift
+      - Sources/Lizi/Server/Proxies.swift
+      - Sources/Lizi/Server/LocalFiles.swift
+      - Sources/Lizi/Server/Sidecars.swift
+      # 清单外补 1：Sidecars.swift 实例化 SpotifyService。
+      - Sources/Lizi/Server/Spotify.swift
+      # 清单外补 2：各平台服务调 Upstream.fetch（定义在 StaticFiles.swift）。
+      - Sources/Lizi/Server/StaticFiles.swift
+      # 清单外补 3：各平台服务以 HttpRequest/HttpResponse 为入参/出参
+      #（定义在 HttpServer.swift）；LocalHttpServer 本身 P0 不实例化。
+      - Sources/Lizi/Server/HttpServer.swift
+      # 清单外补 4：LocalHttpServer 的 init 签名要 LiziRouter 类型；
+      # Router 本身 P0 不实例化。
+      - Sources/Lizi/Server/Router.swift
+      # 动画插图（Ken Burns 本地生成）与灵动岛管理器。
+      - Sources/Lizi/AnimatedArtwork.swift
+      - Sources/Lizi/LiveActivityManager.swift
+      # 清单外补 5：LiveActivityManager 用 LiziLyricsAttributes（与扩展共用同一份定义）。
+      - Sources/Lizi/LiziLyricsAttributes.swift
+      # 岛上控制 Intent 同时编进 App target（照抄壳版做法）：perform() 在
+      # App 进程内跑，系统要从 App 包里发现它；扩展 target 本来就编这份文件。
+      - Sources/LiziNativeLiveActivity/LiziIslandIntents.swift
+    dependencies:
+      - target: LiziNativeLiveActivity
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lty5201.lizi-native
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # plist key 双保险（照抄第 16 轮壳版做法）：INFOPLIST_KEY_* 构建设置
+        # + 下面 info.properties 再写一遍，值一致。
+        INFOPLIST_KEY_NSSupportsLiveActivities: "YES"
+        INFOPLIST_KEY_NSSupportsLiveActivitiesFrequentUpdates: "YES"
+    info:
+      # 注意：不要写 info.path——壳版指向的 Sources/Lizi/Info.plist 在磁盘上
+      # 不存在；新 target 只用下面的 properties 生成 plist。
+      properties:
+        CFBundleDisplayName: LIZI 原生
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - audio
+        NSSupportsLiveActivities: true
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        UILaunchScreen: {}
+        ITSAppUsesNonExemptEncryption: false
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        CFBundleURLTypes:
+          - CFBundleURLName: com.lty5201.lizi-native
+            CFBundleURLSchemes:
+              - lizinative
+
+  # 原生版灵动岛扩展：只编 Sources/LiziNativeLiveActivity/ 下的文件
+  #（壳版三份的副本 + @main 入口 LiziLiveActivityBundle.swift——没有它
+  # appex 没有 WidgetBundle 入口，扩展加载不起来；与壳版同名但不同 target，
+  # 不冲突）。不写 NSExtensionPrincipalClass（壳版教训）。
+  LiziNativeLiveActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Sources/LiziNativeLiveActivity
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lty5201.lizi-native.LiziLiveActivity
+        PRODUCT_NAME: LiziNativeLiveActivity
+    info:
+      properties:
+        CFBundleDisplayName: LIZI 原生灵动岛
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension

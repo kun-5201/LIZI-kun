@@ -68,6 +68,12 @@ struct QQLoginView: View {
 
     private var pollInterval: TimeInterval { 2.5 } // Moumusic 同款
 
+    /// 网页登录兜底按钮的 label（两支 buttonStyle 共用，见 body 注释）。
+    private var webLoginLabel: some View {
+        Label(webLoginSuggested ? "扫码被 QQ 拒绝了，用网页登录（兜底）" : "扫码遇到问题？用网页登录（兜底）",
+              systemImage: "safari")
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 18) {
@@ -91,13 +97,16 @@ struct QQLoginView: View {
                 }
 
                 // 兜底入口常驻；失败/过期或后端明确指路（100035）时更醒目。
-                Button {
-                    showWebLogin = true
-                } label: {
-                    Label(webLoginSuggested ? "扫码被 QQ 拒绝了，用网页登录（兜底）" : "扫码遇到问题？用网页登录（兜底）",
-                          systemImage: "safari")
+                // 注意：.borderedProminent 与 .bordered 是两种不同具体类型，
+                // 三元写进 .buttonStyle() 编译不过（r23 首推 run 44634984120
+                // Archive 失败：ButtonStyle has no member），必须分两支写。
+                if webLoginSuggested {
+                    Button(action: { showWebLogin = true }) { webLoginLabel }
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    Button(action: { showWebLogin = true }) { webLoginLabel }
+                        .buttonStyle(.bordered)
                 }
-                .buttonStyle(webLoginSuggested ? .borderedProminent : .bordered)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .padding(.vertical, 12)

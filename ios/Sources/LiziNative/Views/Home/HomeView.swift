@@ -29,8 +29,9 @@ import SwiftUI
 /// 4. 铺色面板（壳版 `#hall-plat`，圆角 22，内边距 10）：
 ///    平台条（模板 v2：左列当前来源标题 24pt 粗体 + 7 图标 22pt 间距 5，
 ///    高 42，右端搜索）→ 来源 chips（P1 stand-in，壳版是悬停来源滚轮，
-///    P3 才换；r22j 第二件：chips 行长按 0.5s 后上下滑在 5 个来源之间切，
-///    松手确认，见 SourceChipsView.switchGesture）
+///    P3 才换；5 个来源一排 pills，点哪个切哪个；长按上下滑切换已在 r23
+///    删掉——它和 ScrollView、3D 带子的 UIKit pan 抢触摸会卡死，见
+///    SourceRailView.swift 文件头）
 ///    → 3D 封面环（HomeCoverRingView，平面跑马带常态；环的位置在面板里、
 ///    面板底色是当前平台品牌色 10% 淡 tint（壳版是平台色 Grainient 满铺；
 ///    原生浅色卡片 + 墨字要留着，只能淡 tint 近似，不做满铺深色）。

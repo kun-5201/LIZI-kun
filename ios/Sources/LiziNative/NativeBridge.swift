@@ -152,13 +152,13 @@ query: ["ids": "[\(id)]", "level": param])
 guard let items = d?["data"] as? [[String: Any]], let item = items.first else {
 return SongURLResult(reason: "unavailable", via: "platform")
 }
-let urlString = (item["url"] as? String)?? ""
-let isTrial = item["freeTrialInfo"]!= nil &&!(item["freeTrialInfo"] is NSNull)
-let br = (item["br"] as? NSNumber)?.intValue?? 0
-let served = (item["level"] as? String)?? ""
+let urlString = (item["url"] as? String) ?? ""
+let isTrial = item["freeTrialInfo"] != nil && !(item["freeTrialInfo"] is NSNull)
+let br = (item["br"] as? NSNumber)?.intValue ?? 0
+let served = (item["level"] as? String) ?? ""
 if urlString.isEmpty {
-let code = (item["code"] as? NSNumber)?.intValue?? 0
-return SongURLResult(reason: code == -110? "vip": "unavailable", via: "platform")
+let code = (item["code"] as? NSNumber)?.intValue ?? 0
+return SongURLResult(reason: code == -110 ? "vip" : "unavailable", via: "platform")
 }
 return SongURLResult(url: URL(string: urlString),
 actualQuality: AudioQuality.canon(platform: "netease", served: served, bitrate: br),
@@ -201,13 +201,13 @@ return SongURLResult(reason: "unavailable", via: "platform")
 private static func songURLFromSidecar(_ d: [String: Any]?, platform: String,
 quality: AudioQuality) -> SongURLResult {
 guard let d else { return SongURLResult(reason: "network", via: "platform")}
-let urlString = (d["url"] as? String)?? ""
-let served = (d["quality"] as? String)?? ""
-let preview = (d["preview"] as? NSNumber)?.boolValue?? false
-let clipStartMs = (d["clipStartMs"] as? NSNumber)?.intValue?? 0
+let urlString = (d["url"] as? String) ?? ""
+let served = (d["quality"] as? String) ?? ""
+let preview = (d["preview"] as? NSNumber)?.boolValue ?? false
+let clipStartMs = (d["clipStartMs"] as? NSNumber)?.intValue ?? 0
 if urlString.isEmpty {
-let reason = (d["reason"] as? String)?? (d["error"] as? String)?? "unavailable"
-return SongURLResult(reason: reason.isEmpty? "unavailable": reason, via: "platform")
+let reason = (d["reason"] as? String) ?? (d["error"] as? String) ?? "unavailable"
+return SongURLResult(reason: reason.isEmpty ? "unavailable" : reason, via: "platform")
 }
 return SongURLResult(url: URL(string: urlString),
 actualQuality: AudioQuality.canon(platform: platform, served: served),
@@ -224,7 +224,7 @@ static func cloudSongURL(track: Track) async -> SongURLResult? {
 guard track.platform == "netease" else { return nil}
 guard SessionStore.shared.hasMusicU else { return nil}
 let now = Date()
-if now.timeIntervalSince(cloudCacheAt) > 600 ||!cloudCacheLoggedIn {
+if now.timeIntervalSince(cloudCacheAt) > 600 || !cloudCacheLoggedIn {
 var songs: [[String: Any]] = []
 var loggedIn = false
 if SessionStore.shared.hasMusicU {
@@ -244,15 +244,15 @@ cloudCacheLoggedIn = loggedIn
 guard cloudCacheLoggedIn,!cloudCache.isEmpty else { return nil}
 guard let hit = findCloudSong(track, in: cloudCache) else { return nil}
 let cloudId = cloudSongId(hit)
-guard!cloudId.isEmpty else { return nil}
+guard !cloudId.isEmpty else { return nil}
 var r = await songURL(track: Track(id: cloudId, platform: "netease",
 platformKey: cloudId), quality:.lossless)
-if r.url!= nil { r.via = "cloud"}
-return r.url == nil? nil: r
+if r.url != nil { r.via = "cloud"}
+return r.url == nil ? nil : r
 }
 
 private static var cloudCache: [[String: Any]] = []
-private static var cloudCacheAt: Date =.distantPast
+private static var cloudCacheAt: Date = .distantPast
 private static var cloudCacheLoggedIn: Bool = false
 
 /// /api/user/cloud 的行解析（normalize 的形状：data 数组或 songs 数组，字段 songId/songName/artist/album）。
@@ -267,7 +267,7 @@ private static func cloudSongId(_ c: [String: Any]) -> String {
 if let s = c["songId"] as? String { return s}
 if let n = c["songId"] as? NSNumber { return n.stringValue}
 if let n = c["id"] as? NSNumber { return n.stringValue}
-return (c["id"] as? String)?? ""
+return (c["id"] as? String) ?? ""
 }
 
 private static func normCloudKey(_ s: String) -> String {
@@ -277,13 +277,13 @@ s.lowercased().components(separatedBy: CharacterSet(charactersIn: " \n-_·•()�
 private static func findCloudSong(_ track: Track, in songs: [[String: Any]]) -> [String: Any]? {
 if let byId = songs.first(where: { cloudSongId($0) == track.id}) { return byId}
 let nameKey = normCloudKey(track.title)
-guard!nameKey.isEmpty else { return nil}
-let artistKey = normCloudKey(track.artist.components(separatedBy: "/").first?? "")
+guard !nameKey.isEmpty else { return nil}
+let artistKey = normCloudKey(track.artist.components(separatedBy: "/").first ?? "")
 return songs.first { c in
-let cname = normCloudKey((c["songName"] as? String)?? (c["name"] as? String)?? "")
+let cname = normCloudKey((c["songName"] as? String) ?? (c["name"] as? String) ?? "")
 guard cname == nameKey else { return false}
-guard!artistKey.isEmpty else { return true}
-let ca = normCloudKey((c["artist"] as? String)?? (c["artists"] as? String)?? "")
+guard !artistKey.isEmpty else { return true}
+let ca = normCloudKey((c["artist"] as? String) ?? (c["artists"] as? String) ?? "")
 return ca.isEmpty || ca.contains(artistKey) || artistKey.contains(ca)
 }
 }
@@ -313,7 +313,7 @@ return nil
 }
 guard let d, (d["code"] as? NSNumber)?.intValue == 0,
 let urlString = d["url"] as? String,!urlString.isEmpty else { return nil}
-let served = (d["quality"] as? String)?? ""
+let served = (d["quality"] as? String) ?? ""
 return SongURLResult(url: URL(string: urlString),
 actualQuality: AudioQuality.canon(platform: "lx", served: served),
 reason: "", via: "lx")

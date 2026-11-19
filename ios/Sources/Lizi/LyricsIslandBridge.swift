@@ -234,6 +234,12 @@ final class LiziIslandCoordinator {
         } else {
             progress = 0
         }
+        // 第 15 轮第 1 件：没封面的歌岛上也用默认图，不留空白/黑方块。
+        // 锁屏那边早有 applyDefaultLockScreenCover()，岛这边原来取不到
+        // 就是 nil，两边不对称。封面 URL 有、但还没拉到时仍是 nil，
+        // 拉到了 didFetchCover 会补推；拉死透了 fetchCoverFrom 兜底默认图。
+        let coverData = snapshot.coverURL.flatMap { coverCache[$0] }
+            ?? (snapshot.coverURL == nil ? Self.defaultCoverData : nil)
         let state = LiziLyricsAttributes.ContentState(
             currentLyric: current,
             prevLyric: snapshot.prevLyric,
@@ -242,7 +248,7 @@ final class LiziIslandCoordinator {
             isPlaying: snapshot.isPlaying,
             duration: snapshot.duration,
             isLiked: snapshot.isLiked,
-            coverData: snapshot.coverURL.flatMap { coverCache[$0] }
+            coverData: coverData
         )
         lastState = state
         if trackChanged || !liveActivity.isRunning {
@@ -286,6 +292,17 @@ final class LiziIslandCoordinator {
         var urls: [URL] = []
         if urlString.hasPrefix("/") {
             if let u = URL(string: "http://127.0.0.1:\(port)\(urlString)") { urls.append(u) }
+            // 第 15 轮第 1 件：相对地址常是 /api/img?url=<原地址>（#np-cover
+            // 兜底）；原来只有代理一路，代理 403 即死。现在把原地址解出来
+            // 再直连一次（http 升 https，ATS 才放行）。
+            if let comps = URLComponents(string: urlString),
+               let orig = comps.queryItems?.first(where: { $0.name == "url" })?.value,
+               let rawURL = URL(string: orig),
+               rawURL.scheme == "http" || rawURL.scheme == "https",
+               var dcomps = URLComponents(url: rawURL, resolvingAgainstBaseURL: false) {
+                if dcomps.scheme == "http" { dcomps.scheme = "https" }
+                if let direct = dcomps.url { urls.append(direct) }
+            }
         } else if let rawURL = URL(string: urlString),
                   rawURL.scheme == "http" || rawURL.scheme == "https" {
             var comps = URLComponents(string: "http://127.0.0.1:\(port)/api/img")
@@ -301,19 +318,65 @@ final class LiziIslandCoordinator {
     }
 
     /// 按候选顺序拉封面：非 2xx / 坏数据就试下一路，都死透才放手。
+    /// 第 15 轮第 1 件：每一步记 DiagLog（lane + host + 状态），死透了
+    /// 上默认图——下次真机报告能区分“代理 403 → 直链也死”还是“直链根本没跑”。
     private func fetchCoverFrom(_ urls: [URL], at index: Int, urlString: String) {
-        guard index < urls.count else { fetchingCoverURL = nil; return }
+        guard index < urls.count else {
+            fetchingCoverURL = nil
+            DiagLog.shared.recordLog(category: "cover",
+                message: "island cover all lanes failed, using default: \(urlString.prefix(80))",
+                fields: ["reason": "island-cover-all-failed", "lane": "island"])
+            if let d = Self.defaultCoverData, coverCache[urlString] == nil {
+                coverCache[urlString] = d
+                if var s = lastState, lastCoverURL == urlString {
+                    s.coverData = d
+                    lastState = s
+                    pushCoverState(s)
+                }
+            }
+            return
+        }
+        let lane = urls[index].host == "127.0.0.1" ? "proxy" : "direct"
         URLSession.shared.dataTask(with: urls[index]) { [weak self] data, resp, _ in
             guard let self else { return }
-            let okStatus = (resp as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let okStatus = (200..<300).contains(status)
             if okStatus, let data, let image = UIImage(data: data),
                let thumb = Self.downsample(image, to: 120) {
+                DiagLog.shared.recordLog(category: "cover",
+                    message: "island cover ok lane=\(lane) host=\(urls[index].host ?? "")",
+                    fields: ["host": urls[index].host ?? "", "reason": "island-cover-ok", "lane": lane])
                 DispatchQueue.main.async { self.didFetchCover(thumb, urlString: urlString) }
             } else {
+                DiagLog.shared.recordLog(category: "cover",
+                    message: "island cover lane=\(lane) failed host=\(urls[index].host ?? "") status=\(status)",
+                    fields: ["host": urls[index].host ?? "", "reason": "island-cover-lane-failed", "code": status, "lane": lane])
                 DispatchQueue.main.async { self.fetchCoverFrom(urls, at: index + 1, urlString: urlString) }
             }
         }.resume()
     }
+
+    /// 岛的默认封面（第 15 轮第 1 件）：和锁屏默认图同一画法（深色渐变底 + ♪），
+    /// 下采样到 120px；没封面的歌、封面死透的歌都用它，岛上不留空白/黑方块。
+    private static let defaultCoverData: Data? = {
+        let size = CGSize(width: 1000, height: 1000)
+        let image = UIGraphicsImageRenderer(size: size).image { ctx in
+            let top = UIColor(red: 0.14, green: 0.14, blue: 0.24, alpha: 1).cgColor
+            let bottom = UIColor(red: 0.04, green: 0.04, blue: 0.09, alpha: 1).cgColor
+            let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                  colors: [top, bottom] as CFArray, locations: [0, 1])!
+            ctx.cgContext.drawLinearGradient(grad, start: .zero,
+                                             end: CGPoint(x: 0, y: size.height), options: [])
+            let note = NSAttributedString(string: "♪", attributes: [
+                .font: UIFont.systemFont(ofSize: 420),
+                .foregroundColor: UIColor.white.withAlphaComponent(0.85),
+            ])
+            let nsSize = note.size()
+            note.draw(at: CGPoint(x: (size.width - nsSize.width) / 2,
+                                  y: (size.height - nsSize.height) / 2))
+        }
+        return downsample(image, to: 120)
+    }()
 
     private func didFetchCover(_ thumb: Data, urlString: String) {
         fetchingCoverURL = nil

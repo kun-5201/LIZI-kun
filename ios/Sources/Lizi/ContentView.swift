@@ -316,31 +316,47 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
     //     addTarget 隐式启用；3) 幂等——start() 失败重试会再进这里，重复
     //     addTarget 会让一次按键触发两次（上一首连跳两首）。
     private var remoteCommandsSetup = false
+    /// 上次记远程命令诊断的时间（第 15 轮第 2 件）：复核每 2 秒跑一次，
+    /// 诊断只在状态与预期不符、首次、或距上次记满 60 秒时记一条，免得刷屏。
+    private var lastRemoteCommandDiagAt: Date = .distantPast
 
+    /// 第 15 轮第 2 件重写：去掉一次性注册限制，改为每轮 pollNowPlaying
+    /// 复核一次（reassertRemoteCommands）。根因判断：播放开始后 WebKit
+    /// 会按网页媒体会话重建 Now Playing 与命令（页面没设 MediaSession
+    /// handler → 无上一首/下一首 → 回落 ±10 秒）；一次注册拦不住重建，
+    /// 只能每轮把命令的启用/禁用状态重新断言回来。
+    /// 每次都先 removeTarget 再 addTarget：重复 addTarget 会让一次按键触发多次。
     private func setupRemoteCommands() {
-        guard !remoteCommandsSetup else { return }
-        remoteCommandsSetup = true
+        reassertRemoteCommands()
+    }
+
+    private func reassertRemoteCommands() {
         let center = MPRemoteCommandCenter.shared()
         center.skipBackwardCommand.removeTarget(nil)
         center.skipBackwardCommand.isEnabled = false
         center.skipForwardCommand.removeTarget(nil)
         center.skipForwardCommand.isEnabled = false
+        center.playCommand.removeTarget(nil)
         center.playCommand.isEnabled = true
         center.playCommand.addTarget { [weak self] _ in
             self?.clickButton("btn-play"); return .success
         }
+        center.pauseCommand.removeTarget(nil)
         center.pauseCommand.isEnabled = true
         center.pauseCommand.addTarget { [weak self] _ in
             self?.clickButton("btn-play"); return .success
         }
+        center.nextTrackCommand.removeTarget(nil)
         center.nextTrackCommand.isEnabled = true
         center.nextTrackCommand.addTarget { [weak self] _ in
             self?.clickButton("btn-next"); return .success
         }
+        center.previousTrackCommand.removeTarget(nil)
         center.previousTrackCommand.isEnabled = true
         center.previousTrackCommand.addTarget { [weak self] _ in
             self?.clickButton("btn-prev"); return .success
         }
+        center.togglePlayPauseCommand.removeTarget(nil)
         center.togglePlayPauseCommand.isEnabled = true
         center.togglePlayPauseCommand.addTarget { [weak self] _ in
             self?.clickButton("btn-play"); return .success
@@ -348,6 +364,7 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
         // 喜欢（第 12 轮第 15 件补）：锁屏全屏卡片控制行的星标。
         // 系统只在 likeCommand 启用时才在锁屏/控制中心画星标；isActive 控制实心/空心。
         // 点星标 → 切当前曲目的喜欢态（player.js 的 __liziLikeCurrent），回读结果写回 isActive。
+        center.likeCommand.removeTarget(nil)
         center.likeCommand.isEnabled = true
         center.likeCommand.localizedTitle = "喜欢"
         center.likeCommand.addTarget { [weak self] _ in
@@ -357,6 +374,22 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
                 }
             }
             return .success
+        }
+        remoteCommandsSetup = true
+        // 复核后记一条诊断（各命令实际启用状态）：状态与预期不符、首次、
+        // 或距上次记满 60 秒时才记。下次真机报告能证明命令到底开没开，
+        // 而不是只凭截图猜。
+        let states = "play=\(center.playCommand.isEnabled) pause=\(center.pauseCommand.isEnabled) next=\(center.nextTrackCommand.isEnabled) prev=\(center.previousTrackCommand.isEnabled) skipBwd=\(center.skipBackwardCommand.isEnabled) skipFwd=\(center.skipForwardCommand.isEnabled) like=\(center.likeCommand.isEnabled)"
+        let mismatch = !center.playCommand.isEnabled || !center.pauseCommand.isEnabled
+            || !center.nextTrackCommand.isEnabled || !center.previousTrackCommand.isEnabled
+            || center.skipBackwardCommand.isEnabled || center.skipForwardCommand.isEnabled
+        let now = Date()
+        if mismatch || lastRemoteCommandDiagAt == .distantPast
+            || now.timeIntervalSince(lastRemoteCommandDiagAt) >= 60 {
+            lastRemoteCommandDiagAt = now
+            DiagLog.shared.recordLog(category: "remote-commands",
+                message: "remote commands reasserted: \(states)\(mismatch ? " MISMATCH" : "")",
+                fields: ["reason": mismatch ? "remote-commands-mismatch" : "remote-commands-ok", "lane": "remote-commands"])
         }
     }
 
@@ -427,6 +460,9 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let title = obj["title"] as? String, !title.isEmpty,
                   title != "LIZI · 粒子播放器" else { return }
+            // 第 15 轮第 2 件：每轮复核一次远程命令（WebKit 播起来后会按网页
+            // 媒体会话重建 Now Playing，一次注册拦不住重建）。
+            reassertRemoteCommands()
             // 歌名 · 歌手（app.js 切歌时写的格式）
             let parts = title.split(separator: "·", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
             let track = parts.first ?? title
@@ -557,6 +593,16 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
         var urls: [URL] = []
         if raw.hasPrefix("/") {
             if let u = URL(string: "http://127.0.0.1:\(serverPort)\(raw)") { urls.append(u) }
+            // 第 15 轮第 1 件：相对地址常是 /api/img?url=<原地址>；原来只有
+            // 代理一路，代理 403 即死。把原地址解出来再直连一次（http 升 https）。
+            if let comps = URLComponents(string: raw),
+               let orig = comps.queryItems?.first(where: { $0.name == "url" })?.value,
+               let rawURL = URL(string: orig),
+               rawURL.scheme == "http" || rawURL.scheme == "https",
+               var dcomps = URLComponents(url: rawURL, resolvingAgainstBaseURL: false) {
+                if dcomps.scheme == "http" { dcomps.scheme = "https" }
+                if let direct = dcomps.url { urls.append(direct) }
+            }
         } else if let rawURL = URL(string: raw),
                   rawURL.scheme == "http" || rawURL.scheme == "https" {
             var comps = URLComponents(string: "http://127.0.0.1:\(serverPort)/api/img")
@@ -573,25 +619,38 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
     }
 
     /// 按候选顺序拉锁屏封面：非 2xx / 坏数据就试下一路，都死透才记失败+上默认图。
+    /// 第 15 轮第 1 件：每一步记 DiagLog（lane + host + 状态），下次真机报告
+    /// 能区分“代理 403 → 直链也死”还是“直链根本没跑”。
     private func fetchLockScreenArtworkFrom(_ urls: [URL], at index: Int, raw: String) {
         guard index < urls.count else {
             fetchingArtworkURL = nil
             // 封面拉不到（CDN 挂了、URL 坏了）：记一笔，60 秒内不再重复拉这条死链，
             // 直接上默认图（默认图的动态视频也照常生成，每首歌都动）。
             failedCover = (url: raw, at: Date())
+            DiagLog.shared.recordLog(category: "cover",
+                message: "lock cover all lanes failed, using default: \(raw.prefix(80))",
+                fields: ["reason": "lock-cover-all-failed", "lane": "lockscreen"])
             applyDefaultLockScreenCover()
             return
         }
+        let lane = urls[index].host == "127.0.0.1" ? "proxy" : "direct"
         URLSession.shared.dataTask(with: urls[index]) { [weak self] data, resp, _ in
             guard let self else { return }
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
             DispatchQueue.main.async {
                 // 歌已经切走了：这张旧图别再往锁屏上写，新歌那轮轮询会自己拉。
                 guard self.lastCoverURL == raw else { self.fetchingArtworkURL = nil; return }
-                let okStatus = (resp as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
+                let okStatus = (200..<300).contains(status)
                 guard okStatus, let data, let image = UIImage(data: data) else {
+                    DiagLog.shared.recordLog(category: "cover",
+                        message: "lock cover lane=\(lane) failed host=\(urls[index].host ?? "") status=\(status)",
+                        fields: ["host": urls[index].host ?? "", "reason": "lock-cover-lane-failed", "code": status, "lane": "lockscreen"])
                     self.fetchLockScreenArtworkFrom(urls, at: index + 1, raw: raw)
                     return
                 }
+                DiagLog.shared.recordLog(category: "cover",
+                    message: "lock cover ok lane=\(lane) host=\(urls[index].host ?? "")",
+                    fields: ["host": urls[index].host ?? "", "reason": "lock-cover-ok", "lane": "lockscreen"])
                 self.fetchingArtworkURL = nil
                 self.lastCoverKey = AnimatedArtworkManager.key(forCoverURL: raw)
                 let sized = Self.lockScreenSized(image)

@@ -59,8 +59,21 @@ final class LiveActivityManager {
     /// If an activity is already running it is ended first.
     func startActivity(title: String, artist: String, state: LiziLyricsAttributes.ContentState) {
         refreshAuthorization()
+        // 第 15 轮第 3 件：启动失败原来全是静默（未允许只写 lastError，
+        // 全仓无任何 UI 或诊断引用；Activity.request 抛错同样静默），
+        // 岛起不来时诊断里一行都没有。现在两条失败路都记 DiagLog，
+        // 并把 Live Activities 权限状态写进去，下次报告能看到系统允不允许。
+        let authDesc: String
+        switch authorization {
+        case .allowed: authDesc = "allowed"
+        case .notAllowed: authDesc = "notAllowed"
+        case .frequentUpdatesOffWarning: authDesc = "frequentUpdatesOff"
+        }
         guard authorization != .notAllowed else {
             lastError = "系统未允许 Live Activities，请在 iOS 设置中开启"
+            DiagLog.shared.recordLog(category: "island",
+                message: "灵动岛启动失败：系统未允许 Live Activities（auth=\(authDesc)）",
+                fields: ["reason": "island-not-allowed", "lane": "island"])
             return
         }
         Task { @MainActor in
@@ -82,6 +95,9 @@ final class LiveActivityManager {
             } catch {
                 self.lastError = "启动灵动岛失败：\(error.localizedDescription)"
                 self.isRunning = false
+                DiagLog.shared.recordLog(category: "island",
+                    message: "灵动岛 Activity.request 抛错（auth=\(authDesc)）：\(error.localizedDescription)",
+                    fields: ["reason": "island-request-failed", "lane": "island"])
             }
         }
     }

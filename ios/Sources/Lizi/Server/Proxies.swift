@@ -50,6 +50,11 @@ enum Proxies {
             return .error(400, "bad url")
         }
         guard let host = url.host, imageHostAllowed(host) else {
+            // 第 15 轮第 1 件：白名单 403 原来是静默 return，Apple Music 封面
+            // 全死在这里、诊断里一行都没有；现在记一条，下次报告能看到 host。
+            DiagLog.shared.recordLog(category: "cover",
+                message: "img proxy 403 host not allowed: \(url.host ?? "")",
+                fields: ["host": url.host ?? "", "reason": "proxy-host-not-allowed", "code": 403, "lane": "proxy"])
             return .json(403, ["error": "host not allowed"])
         }
         // http → https：第 13 轮第 2 件（日志 07:05:50，播酷狗时封面 URL 是
@@ -88,6 +93,9 @@ enum Proxies {
                 }
                 // 跟随重定向后，再校验一次最终 URL 的 host。
                 if let finalURL = http.url, let finalHost = finalURL.host, !imageHostAllowed(finalHost) {
+                    DiagLog.shared.recordLog(category: "cover",
+                        message: "img proxy 403 redirect host not allowed: \(host) -> \(finalHost)",
+                        fields: ["host": finalHost, "reason": "proxy-redirect-host-not-allowed", "code": 403, "lane": "proxy"])
                     return .json(403, ["error": "redirect host not allowed"])
                 }
                 // 先判状态再判 Content-Type：上游 403 常回 HTML 错误页，旧代码
@@ -132,6 +140,12 @@ enum Proxies {
     private static let imageHostSuffixes = [
         ".music.126.net", ".kugou.com", ".douyinpic.com", ".douyincdn.com", ".huoshanimg.com",
         ".kuwo.cn", ".scdn.co", ".spotifycdn.com", ".y.qq.com", ".qlogo.cn", ".qpic.cn",
+        // 第 15 轮第 1 件：Apple Music 封面 host is1-ssl.mzstatic.com
+        // （artworkUrl100 换 600x600bb.jpg，AppleMusic.swift:165/258/271）。
+        // 白名单里没有它时每张 AM 封面走代理必回 403；直连实测 200，
+        // 是白名单漏了，不是 URL 坏。七平台同步：这是平台无关的封面代理，
+        // 不是只给 Apple Music 开的口子（后缀匹配，其它 mzstatic 子域同理）。
+        ".mzstatic.com",
     ]
 
     private static func imageHostAllowed(_ host: String) -> Bool {

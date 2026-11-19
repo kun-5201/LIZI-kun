@@ -589,11 +589,14 @@ const EqUI = (() => {
       return;
     }
     /* 没拿到 payload（面板中途打开、取链还在跑）：按取链同款参数重查一次
-       song/url，只读实际档位。网易沿用旧路（空 data 重试一次）。 */
+       song/url，只读实际档位。网易沿用旧路（空 data 重试一次）。
+       第 15 轮第 6 件：这批重查是探针、不是播放取链，置 __liziEqProbe
+       旗标让 api.js 打上 probe=1，查完即清（重查结束后的渲染不发请求）。 */
     const seq = ++actualSeq;
     box.textContent = '查询中…';
     const qFor = (typeof window !== 'undefined' && window.__liziQualityFor) || null;
     let got = '', gotBr = 0, gotType = '';
+    window.__liziEqProbe = 1;
     try {
       if (tr.source === 'netease') {
         let item = null, tries = 0;
@@ -632,7 +635,7 @@ const EqUI = (() => {
         const d = await API.srcSongUrl(tr, qFor ? qFor(tr.source) : undefined);
         if (d && d.url) got = d.quality || '';
       }
-    } catch { got = ''; }
+    } catch { got = ''; } finally { window.__liziEqProbe = 0; }
     if (seq !== actualSeq || !root) return;
     if (!got) {
       box.innerHTML = '<b class="is-warn">查询失败</b> · 上游没有返回实际音质';

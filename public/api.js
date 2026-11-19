@@ -54,6 +54,14 @@ const API = (() => {
 
   async function call(path, params, method = 'POST', extraSignal) {
     const url = new URL('/api/' + path, location.origin);
+    // 第 15 轮第 6 件：eq-ui 探针（refreshActual 重查 song/url）打 probe=1
+    // 标记——探针请求不是播放取链，服务端在请求日志里按 ?probe=1 区分。
+    // 旗标由 eq-ui.js 在重查前后置/清，只影响这一批请求。
+    const isProbe = typeof window !== 'undefined' && window.__liziEqProbe;
+    if (isProbe) {
+      if (method === 'POST') params = { ...(params || {}), probe: '1' };
+      else url.searchParams.set('probe', '1');
+    }
     let body;
     if (method === 'POST') {
       body = JSON.stringify(params || {});

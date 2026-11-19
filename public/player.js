@@ -1478,16 +1478,64 @@ const Player = (() => {
 
   /** 诊断上报（与 B 专员约定的接口）：POST /api/diag/log {category:"audio", message}。
    *  B 的路由还没好时服务端回 404，前端 fire-and-forget、静默吞掉，绝不能影响播放。
-   *  message 只含 MediaError 码 / 上游 host / 状态机 / 原因码，不带直链 query（vkey 之类不进日志）。 */
+   *  message 只含 MediaError 码 / 上游 host / 状态机 / 原因码，不带直链 query（vkey 之类不进日志）。
+   *  第 15 轮第 6 件：加一次重试 + sendBeacon 兜底 + 计数对账。
+   *  旧版 fire-and-forget 无重试、无队列：服务端没收到时诊断直接丢，
+   *  下次报告分不清“没发”还是“没收到”。计数挂 window.__liziDiagCounts，
+   *  服务端 /api/diag/search 回 diagLogReceived，两边对账。 */
+  const __diagCounts = { sent: 0, acked: 0, failed: 0 };
+  window.__liziDiagCounts = () => ({ ...__diagCounts });
   function postDiagAudio(message) {
-    try {
-      fetch('/api/diag/log', {
+    const payload = JSON.stringify({ category: 'audio', message: String(message || '').slice(0, 500) });
+    const sendOnce = () => {
+      __diagCounts.sent += 1;
+      return fetch('/api/diag/log', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ category: 'audio', message: String(message || '').slice(0, 500) }),
+        body: payload,
         keepalive: true,
-      }).catch(() => {});
+      });
+    };
+    try {
+      sendOnce().then((res) => {
+        if (res && res.ok) { __diagCounts.acked += 1; return; }
+        throw new Error('HTTP ' + (res && res.status));
+      }).catch(() => {
+        // 一次重试（300ms 后）；还失败就改 sendBeacon（页面卸载时也能发）。
+        setTimeout(() => {
+          sendOnce().then((res) => {
+            if (res && res.ok) { __diagCounts.acked += 1; return; }
+            throw new Error('retry HTTP ' + (res && res.status));
+          }).catch(() => {
+            __diagCounts.failed += 1;
+            try {
+              if (navigator.sendBeacon) {
+                const blob = new Blob([payload], { type: 'application/json' });
+                if (navigator.sendBeacon('/api/diag/log', blob)) __diagCounts.sent += 1;
+              }
+            } catch { /* 诊断不上报不能影响播放 */ }
+          });
+        }, 300);
+      });
     } catch { /* 诊断不上报不能影响播放 */ }
+  }
+
+  /** 第 15 轮第 5 件：play() 8–10 秒超时——直链字符串 OK 不等于媒体字节能到，
+   *  CDN stall 时 play() 既不 resolve 也不 reject；超时按播放失败走兜底链，
+   *  不再静默等死。返回原 play() 的 promise，超时抛 {name:'PlayTimeoutError'}。 */
+  function playWithTimeout(el, ms = 9000) {
+    let timer = null;
+    const timeoutP = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const e = new Error('play() timeout after ' + ms + 'ms');
+        e.name = 'PlayTimeoutError';
+        reject(e);
+      }, ms);
+    });
+    return Promise.race([el.play(), timeoutP]).then(
+      (v) => { clearTimeout(timer); return v; },
+      (e) => { clearTimeout(timer); throw e; },
+    );
   }
 
   /** <audio> 报错时的真实原因（原来 sourceerror 只发 {}，界面除了「播放失败」
@@ -1535,6 +1583,17 @@ const Player = (() => {
     const src = track.source || 'netease';
 
     emit('trackchange', { track, index });
+    // 第 15 轮第 2 件：切歌时把标题/歌手写进 MediaSession metadata，
+    // 系统按它画 Now Playing（否则只有命令、没有曲目信息时也可能回落）。
+    try {
+      if ('mediaSession' in navigator && navigator.mediaSession && typeof MediaMetadata !== 'undefined') {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: track.name || '',
+          artist: Array.isArray(track.artists) ? track.artists.map((a) => a.name || a).join(' / ') : (track.artists || ''),
+          album: track.album || '',
+        });
+      }
+    } catch { /* metadata 写不上也不拦着播 */ }
     state.lyric = [];
     state.lyricIndex = -1;
     emit('lyric', { lines: [], active: -1 });
@@ -1580,6 +1639,9 @@ const Player = (() => {
 
     if (token !== state.token) {         // 期间又切歌了
       if (data.demo) URL.revokeObjectURL(data.url);
+      // 第 15 轮第 5 件：token 抢占丢弃点记一条轻量诊断——连点/切歌时
+      // 在途 load() 在取链返回后静默丢弃，旧日志里看不到这次丢弃。
+      postDiagAudio(`取链返回后 token 已变，丢弃本次 load：source=${track.source || 'netease'} id=${track.id ?? track.mid ?? track.hash ?? ''}`);
       return;
     }
 
@@ -1603,7 +1665,7 @@ const Player = (() => {
 
     if (autoplay) {
       try {
-        await sounding().play();
+        await playWithTimeout(sounding());
         // 第 10 轮诊断：audio.play() 已 resolve，记下这首走的是哪一档。
         // 真机崩溃后看 /api/diag/search，能确认崩的那首是 platform 还是 demo。
         postDiagAudio(`播放开始：source=${track.source || 'netease'} id=${track.id ?? track.mid ?? track.hash ?? ''} via=${data.via} demo=${data.demo}`);
@@ -1612,20 +1674,33 @@ const Player = (() => {
         state.playing = true;
         emit('playstate', true);
       } catch (e) {
-        // 手势拦截（NotAllowedError）不是地址问题，不重试；地址问题（error 已挂上）
-        // 且是平台/云盘/LX 地址时，先走同一条地址的代理兜底一次（第 12 轮），
+        // 第 15 轮第 5 件：play() 超时 / reject 但 audio.error 为空时也留痕。
+        // 旧逻辑全要求 audio.error 为真：AbortError（连点时 src 被改写）和
+        // NotAllowedError 之外的静默分支在诊断里一行都没有；play() 永远
+        // pending（CDN stall）时更是连 catch 都进不去——现在 9 秒超时
+        // 兜底，超时按播放失败走同一条兜底链（代理 → 下一档 → 演示音）。
+        const timedOut = !!(e && e.name === 'PlayTimeoutError');
+        const errName = (e && e.name) || '';
+        if (timedOut) {
+          postDiagAudio(`播放开始超时：source=${track.source || 'netease'} id=${track.id ?? track.mid ?? track.hash ?? ''} via=${data.via}（play() 9 秒未回，走兜底链）`);
+        } else if (e && errName !== 'NotAllowedError' && !audio.error) {
+          postDiagAudio(`play() 被拒但 audio.error 为空：name=${errName} source=${track.source || 'netease'} id=${track.id ?? track.mid ?? track.hash ?? ''} via=${data.via}`);
+        }
+        const failed = timedOut || !!audio.error;
+        // 手势拦截（NotAllowedError）不是地址问题，不重试；地址问题（error 已挂上
+        // 或 play() 超时）且是平台/云盘/LX 地址时，先走同一条地址的代理兜底一次（第 12 轮），
         // 代理也死了再按原逻辑往下一档 / 演示音。
-        if (e && e.name !== 'NotAllowedError' && audio.error && (data.via === 'platform' || data.via === 'cloud' || data.via === 'lx') && token === state.token) {
+        if (e && errName !== 'NotAllowedError' && failed && (data.via === 'platform' || data.via === 'cloud' || data.via === 'lx') && token === state.token) {
           const okProxy = await tryProxyFallback(track, token);
           if (okProxy) return { demo: data.demo };
         }
-        if (e && e.name !== 'NotAllowedError' && audio.error && (data.via === 'platform' || data.via === 'cloud') && token === state.token) {
+        if (e && errName !== 'NotAllowedError' && failed && (data.via === 'platform' || data.via === 'cloud') && token === state.token) {
           const ok = await retryWithFallback(track, token);
           if (ok) return { demo: data.demo };
         }
         // LX 地址在 play() 这一步就失败：同样改放演示音（和 error 事件同一入口，
         // fallbackToDemo 里有同步占位，两边同时触发也只放一次）。
-        if (e && e.name !== 'NotAllowedError' && audio.error && data.via === 'lx' && token === state.token) {
+        if (e && errName !== 'NotAllowedError' && failed && data.via === 'lx' && token === state.token) {
           const ok = await fallbackToDemo(track, token, data.reason || 'unavailable');
           if (ok) return { demo: true };
         }
@@ -1772,6 +1847,16 @@ const Player = (() => {
       if (el !== audio) return;
       emit('time', { cur: el.currentTime, total: el.duration || 0 });
     });
+    /* 第 15 轮第 5 件：补 stalled/suspend/waiting 监听——直链字符串 OK
+       不等于媒体字节能到，CDN stall 时 play() 既不 resolve 也不 reject、
+       error 事件也不触发；这三个事件是 stall 唯一的可见信号，各记一条诊断。 */
+    for (const ev of ['stalled', 'suspend', 'waiting']) {
+      el.addEventListener(ev, () => {
+        if (el !== audio) return;
+        const d = audioErrorDetail(el);
+        postDiagAudio(`音频${ev}：code=${d.code} host=${d.host} ns=${d.networkState} rs=${d.readyState} via=${(state.lastFetch && state.lastFetch.via) || ''}`);
+      });
+    }
     el.addEventListener('progress', () => {
       if (el !== audio) return;
       try {
@@ -1835,6 +1920,23 @@ const Player = (() => {
   }
   bindDeck(deckA);
   bindDeck(deckB);
+
+  /* 第 15 轮第 2 件：网页媒体会话——WKWebView 播起来后 WebKit 会按页面
+     MediaSession 重建 Now Playing 与命令；原来页面根本没设 handler，
+     系统只给 ±10 秒快退快进（原生侧一次注册拦不住这次重建）。
+     上一首/下一首指向 App 自己的切歌，seekbackward/seekforward 显式
+     设 null 摘掉，play/pause 直接动活动元素。七平台同步：这是播放器
+     通用行为，不分平台。 */
+  try {
+    if ('mediaSession' in navigator && navigator.mediaSession) {
+      navigator.mediaSession.setActionHandler('previoustrack', () => { try { prev(); } catch { /* ignore */ } });
+      navigator.mediaSession.setActionHandler('nexttrack', () => { try { next(); } catch { /* ignore */ } });
+      navigator.mediaSession.setActionHandler('play', () => { try { sounding().play().catch(() => {}); } catch { /* ignore */ } });
+      navigator.mediaSession.setActionHandler('pause', () => { try { sounding().pause(); } catch { /* ignore */ } });
+      navigator.mediaSession.setActionHandler('seekbackward', null);
+      navigator.mediaSession.setActionHandler('seekforward', null);
+    }
+  } catch { /* 老 WebKit 没有 mediaSession 也不拦着播 */ }
 
   /* ------------------------------------------------------------------ *
    * 前后台切换与音频中断（第 13 轮第 1 件，替换第 12 轮“只回前台恢复”）

@@ -526,6 +526,65 @@ final class LXTimerState {
     }
 }
 
+// MARK: - 可取消 continuation 桥（第 15 轮第 4 件）
+
+/// withCheckedThrowingContinuation 的“只恢复一次”包装：fulfilled / rejected /
+/// 同步抛错 / 任务取消四条路都经过它。脚本 Promise 永远不 settle 时，
+/// 旧代码的 continuation 只有三条恢复路、没有任何 Task.isCancelled 检查，
+/// TaskGroup 超时取消也停不掉它（throwing TaskGroup 要等全部子任务结束
+/// 才重新抛错），内层 20 秒、外层 30 秒都等不到结果，Router 的 await 永不返回。
+/// 现在取消时恢复一个 CancellationError，挂起的任务能结束；
+/// 挂起计数只在第一次恢复时减，诊断里能看到还挂着几个。
+private final class LXContinuationBox {
+    private let lock = NSLock()
+    private var cont: CheckedContinuation<String, Error>?
+    private var done = false
+    private(set) var cancelled = false
+
+    func set(_ c: CheckedContinuation<String, Error>) {
+        lock.lock(); cont = c; lock.unlock()
+    }
+
+    func markCancelled() {
+        lock.lock(); cancelled = true; lock.unlock()
+    }
+
+    var isCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }; return cancelled
+    }
+
+    @discardableResult
+    func resume(returning value: String) -> Bool { resumeOnce { $0.resume(returning: value) } }
+
+    @discardableResult
+    func resume(throwing error: Error) -> Bool { resumeOnce { $0.resume(throwing: error) } }
+
+    /// 取消路：先置取消旗标（jsQueue 块见了就不再调脚本），再恢复一次；
+    /// 恢复成功才记一条诊断（挂起任务数是取消后还剩的）。
+    @discardableResult
+    func cancel() -> Bool {
+        markCancelled()
+        let ok = resume(throwing: CancellationError())
+        if ok {
+            DiagLog.shared.recordLog(category: "audio",
+                message: "LX 脚本调用被取消（取消后挂起任务数=\(LXScriptInstance.pendingMusicUrlCalls)）",
+                fields: ["reason": "lx-call-cancelled", "lane": "lx"])
+        }
+        return ok
+    }
+
+    private func resumeOnce(_ f: (CheckedContinuation<String, Error>) -> Void) -> Bool {
+        lock.lock()
+        guard !done, let c = cont else { lock.unlock(); return false }
+        done = true
+        cont = nil
+        lock.unlock()
+        f(c)
+        LXScriptInstance.noteCallSettled()
+        return true
+    }
+}
+
 // MARK: - 单脚本实例（一个源脚本 = 一个独立 JSContext）
 
 /// 一个落雪源脚本的运行实例：独立 JSContext + 独立 request 处理。
@@ -537,6 +596,21 @@ final class LXScriptInstance {
 
     /// 脚本支持的档位（按从高到低回退；脚本没有 flac，flac 按 flac24bit 算）。
     static let scriptTiers = ["master", "atmos", "hires", "flac24bit", "320k", "128k"]
+
+    /// 挂起的 LX 取链任务数（第 15 轮第 4 件）：callScriptMusicUrlOnce
+    /// 开始时 +1，continuation 第一次恢复时 -1；诊断（/api/diag/search
+    /// 的 lxPendingCalls）回这个数，下次报告能看到有没有泄漏的挂起任务。
+    private static let pendingLock = NSLock()
+    private static var _pendingCalls = 0
+    static var pendingMusicUrlCalls: Int {
+        pendingLock.lock(); defer { pendingLock.unlock() }; return _pendingCalls
+    }
+    static func noteCallStarted() {
+        pendingLock.lock(); _pendingCalls += 1; pendingLock.unlock()
+    }
+    static func noteCallSettled() {
+        pendingLock.lock(); _pendingCalls = max(0, _pendingCalls - 1); pendingLock.unlock()
+    }
 
     let scriptText: String
 
@@ -639,16 +713,34 @@ final class LXScriptInstance {
         guard !songId.isEmpty else {
             throw NSError(domain: "LXScript", code: 6, userInfo: [NSLocalizedDescriptionKey: "缺少歌曲 ID"])
         }
-        var lastError: Error?
-        for tier in Self.tiersFrom(quality) {
-            do {
-                let url = try await callScriptMusicUrl(source: source, songId: songId, quality: tier, songName: songName)
-                return (url, tier)
-            } catch {
-                lastError = error
+        // 第 15 轮第 4 件：整体加总超时（25 秒）——单档 20 秒上限只管一档，
+        // 档位从高到低一路回退时总耗时原来没有上限；超时即抛错返回失败结果，
+        // 由 Router 回 code 2、播放器走平台兜底，不再靠 TaskGroup 睡眠任务
+        // “取消能停掉对方”这个不成立的前提。可取消桥接修好后，取消能真正
+        // 停掉挂起的 continuation，这一层的 group.next() 才等得到结果。
+        return try await withThrowingTaskGroup(of: (String, String).self) { group in
+            group.addTask {
+                var lastError: Error?
+                for tier in Self.tiersFrom(quality) {
+                    do {
+                        let url = try await self.callScriptMusicUrl(source: source, songId: songId, quality: tier, songName: songName)
+                        return (url, tier)
+                    } catch {
+                        lastError = error
+                    }
+                }
+                throw lastError ?? NSError(domain: "LXScript", code: 2, userInfo: [NSLocalizedDescriptionKey: "落雪脚本未返回音频链接"])
             }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 25_000_000_000)
+                throw NSError(domain: "LXScript", code: -1, userInfo: [NSLocalizedDescriptionKey: "落雪解析总超时（25 秒，挂起任务=\(Self.pendingMusicUrlCalls)）"])
+            }
+            guard let r = try await group.next() else {
+                throw NSError(domain: "LXScript", code: 2, userInfo: [NSLocalizedDescriptionKey: "落雪解析无返回"])
+            }
+            group.cancelAll()
+            return r
         }
-        throw lastError ?? NSError(domain: "LXScript", code: 2, userInfo: [NSLocalizedDescriptionKey: "落雪脚本未返回音频链接"])
     }
 
     static func tiersFrom(_ quality: String) -> [String] {
@@ -676,13 +768,29 @@ final class LXScriptInstance {
     }
 
     private func callScriptMusicUrlOnce(source: String, songId: String, quality: String, songName: String = "") async throws -> String {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
-            Self.jsQueue.async { [weak self] in
-                guard let self else {
-                    cont.resume(throwing: NSError(domain: "LXScript", code: -1, userInfo: [NSLocalizedDescriptionKey: "引擎已释放"]))
-                    return
-                }
-                do {
+        // 第 15 轮第 4 件：continuation 改可取消桥接。旧代码用裸
+        // withCheckedThrowingContinuation，脚本 Promise 永远不 settle 就
+        // 永远不恢复，TaskGroup 超时取消也停不掉它（酷狗 LX 累计 4 次
+        // start 无结果就是这么挂死的）。现在取消时经 LXContinuationBox
+        // 恢复一个 CancellationError；jsQueue 块见取消旗标就不再调脚本。
+        Self.noteCallStarted()
+        let box = LXContinuationBox()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
+                box.set(cont)
+                // 取消可能发生在 set 之前（任务进 handler 时已取消）：
+                // onCancel 那路的 resume 因 cont 还是 nil 而没恢复上，
+                // 这里补一次，免得 continuation 永远挂起。
+                if box.isCancelled { box.cancel(); return }
+                Self.jsQueue.async { [weak self] in
+                    guard let self else {
+                        box.resume(throwing: NSError(domain: "LXScript", code: -1, userInfo: [NSLocalizedDescriptionKey: "引擎已释放"]))
+                        return
+                    }
+                    // 取消已到：不再调脚本（调了也没人接结果），等 onCancel
+                    // 那路恢复；若 onCancel 已恢复过，这里直接返回即可。
+                    guard !box.isCancelled else { return }
+                    do {
                     try self.loadAssumingOnQueue()
                     guard let ctx = self.context, let handler = self.sink.requestHandler else {
                         throw NSError(domain: "LXScript", code: -1, userInfo: [NSLocalizedDescriptionKey: "落雪脚本未就绪"])
@@ -734,13 +842,13 @@ final class LXScriptInstance {
                     let fulfilled: @convention(block) (JSValue?) -> Void = { value in
                         let url = value?.toString() ?? ""
                         if url.hasPrefix("http://") || url.hasPrefix("https://") {
-                            cont.resume(returning: url)
+                            box.resume(returning: url)
                         } else {
-                            cont.resume(throwing: NSError(domain: "LXScript", code: 2, userInfo: [NSLocalizedDescriptionKey: "落雪脚本未返回音频链接"]))
+                            box.resume(throwing: NSError(domain: "LXScript", code: 2, userInfo: [NSLocalizedDescriptionKey: "落雪脚本未返回音频链接"]))
                         }
                     }
                     let rejected: @convention(block) (JSValue?) -> Void = { value in
-                        cont.resume(throwing: NSError(domain: "LXScript", code: 2, userInfo: [NSLocalizedDescriptionKey: value?.toString() ?? "落雪脚本取歌失败"]))
+                        box.resume(throwing: NSError(domain: "LXScript", code: 2, userInfo: [NSLocalizedDescriptionKey: value?.toString() ?? "落雪脚本取歌失败"]))
                     }
                     guard let f = JSValue(object: fulfilled, in: ctx),
                           let r = JSValue(object: rejected, in: ctx) else {
@@ -748,9 +856,12 @@ final class LXScriptInstance {
                     }
                     _ = promise.invokeMethod("then", withArguments: [f, r])
                 } catch {
-                    cont.resume(throwing: error)
+                    box.resume(throwing: error)
                 }
             }
+        }
+        } onCancel: {
+            box.cancel()
         }
     }
 

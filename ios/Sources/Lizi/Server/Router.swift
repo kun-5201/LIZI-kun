@@ -40,8 +40,14 @@ final class LiziRouter {
             let category = req.string("category")
             let message = req.string("message")
             guard !category.isEmpty, !message.isEmpty else {
+                // 第 15 轮第 6 件：/api/diag/log 的 400 也留痕——原来只回
+                // 状态，body 空/坏时诊断里什么都没有，分不清是没发还是发坏了。
+                DiagLog.shared.recordLog(category: "diag",
+                    message: "diag/log 400: category/message 缺失（body=\(req.body.count)B）",
+                    fields: ["reason": "diag-log-400", "code": 400, "lane": "diag"])
                 return .json(400, ["code": 400, "error": "category and message required"])
             }
+            DiagLog.shared.noteDiagLogReceived()
             var fields: [String: Any] = [:]
             for k in ["host", "reason", "lane", "detail"] {
                 let v = req.string(k)

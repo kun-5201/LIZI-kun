@@ -156,13 +156,21 @@ final class LocalHttpServer {
 
     private func handleConnection(_ conn: NWConnection) {
         conn.start(queue: .global(qos: .userInitiated))
-        Task {
+        // 第 15 轮第 4 件：连接关闭联动取消——旧代码的 Task 和连接关闭
+        // 没有任何联动，客户端断开后挂起的 LX 任务继续跑、泄漏（4 次
+        // start 至少泄漏 4 个任务）。现在连接一取消就取消这条处理任务，
+        // LX 侧的可取消桥接会恢复 continuation、结束挂起的脚本调用。
+        var task: Task<Void, Never>?
+        task = Task {
             let t0 = Date()
             do {
                 let req = try await readRequest(conn)
                 let resp = await router.handle(req)
                 try await writeResponse(conn, resp)
-                DiagLog.shared.recordRequest(method: req.method, path: req.path,
+                // 第 15 轮第 6 件：探针请求（eq-ui refreshActual 重查）
+                // 在请求日志里打 ?probe=1，别再把探针数当成播放取链数。
+                let loggedPath = req.query["probe"] == "1" ? req.path + "?probe=1" : req.path
+                DiagLog.shared.recordRequest(method: req.method, path: loggedPath,
                                              ms: Int(Date().timeIntervalSince(t0) * 1000), status: resp.status)
             } catch {
                 // 读失败也尽量回一个 400：静默关连接会让前端 fetch 直接报
@@ -173,6 +181,9 @@ final class LocalHttpServer {
                                              ms: Int(Date().timeIntervalSince(t0) * 1000), status: 400)
             }
             conn.cancel()
+        }
+        conn.stateUpdateHandler = { state in
+            if case .cancelled = state { task?.cancel() }
         }
     }
 
@@ -202,17 +213,25 @@ final class LocalHttpServer {
                         headers[k] = v
                     }
                 }
-                let contentLength = Int(headers["content-length"] ?? "0") ?? 0
-                while rest.count < contentLength {
-                    let chunk = try await receive(conn, min(65536, max(1, contentLength - rest.count)))
-                    // 对端提前关连接时 receive 会回空 Data：不抛错就会在这里
-                    // 无限空转，这个连接永远不回包，前端一直等到 60 秒超时。
-                    guard !chunk.isEmpty else {
-                        throw NSError(domain: "LiziServer", code: 5, userInfo: [NSLocalizedDescriptionKey: "eof in body"])
+                let body: Data
+                if (headers["transfer-encoding"] ?? "").lowercased().contains("chunked") {
+                    // 第 15 轮第 6 件：补 Transfer-Encoding: chunked 支持。
+                    // 旧代码全文件无 chunked 处理：分块 POST 会被读成空 body
+                    // → 400、无日志（诊断 POST 在这条路丢过两回）。
+                    body = try await readChunkedBody(conn, initial: rest)
+                } else {
+                    let contentLength = Int(headers["content-length"] ?? "0") ?? 0
+                    while rest.count < contentLength {
+                        let chunk = try await receive(conn, min(65536, max(1, contentLength - rest.count)))
+                        // 对端提前关连接时 receive 会回空 Data：不抛错就会在这里
+                        // 无限空转，这个连接永远不回包，前端一直等到 60 秒超时。
+                        guard !chunk.isEmpty else {
+                            throw NSError(domain: "LiziServer", code: 5, userInfo: [NSLocalizedDescriptionKey: "eof in body"])
+                        }
+                        rest.append(chunk)
                     }
-                    rest.append(chunk)
+                    body = rest.prefix(contentLength)
                 }
-                let body = rest.prefix(contentLength)
                 // 解析 path + query
                 let target = rawTarget.removingPercentEncoding ?? rawTarget
                 var path = target
@@ -253,12 +272,75 @@ final class LocalHttpServer {
         }
     }
 
-    private func receive(_ conn: NWConnection, _ length: Int) async throws -> Data {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
-            conn.receive(minimumIncompleteLength: 1, maximumLength: length) { data, _, _, error in
-                if let error { cont.resume(throwing: error) }
-                else { cont.resume(returning: data ?? Data()) }
+    /// 分块 body（Transfer-Encoding: chunked）：<hex-size>\r\n<data>\r\n …
+    /// 直到 0 块 + 末尾空行。块大小行可带 ;extension，忽略。总量上限 1MB，
+    /// 防畸形请求把内存撑爆。
+    private func readChunkedBody(_ conn: NWConnection, initial: Data) async throws -> Data {
+        var buf = initial
+        var out = Data()
+        while true {
+            let line = try await readLine(conn, &buf)
+            let sizeStr = line.split(separator: ";").first?.trimmingCharacters(in: .whitespaces) ?? ""
+            guard let size = Int(sizeStr, radix: 16) else {
+                throw NSError(domain: "LiziServer", code: 6, userInfo: [NSLocalizedDescriptionKey: "bad chunk size: \(sizeStr)"])
             }
+            if size == 0 {
+                // 0 块后是 trailer（若干行）+ 空行；读到空行即结束。
+                while true {
+                    let trailer = try await readLine(conn, &buf)
+                    if trailer.isEmpty { return out }
+                }
+            }
+            while buf.count < size + 2 {
+                let chunk = try await receive(conn, 65536)
+                guard !chunk.isEmpty else {
+                    throw NSError(domain: "LiziServer", code: 5, userInfo: [NSLocalizedDescriptionKey: "eof in chunked body"])
+                }
+                buf.append(chunk)
+                if buf.count > 1_048_576 + 65536 {
+                    throw NSError(domain: "LiziServer", code: 4, userInfo: [NSLocalizedDescriptionKey: "chunked body too large"])
+                }
+            }
+            out.append(buf.prefix(size))
+            buf.removeFirst(size + 2) // 数据 + 结尾 \r\n
+            if out.count > 1_048_576 {
+                throw NSError(domain: "LiziServer", code: 4, userInfo: [NSLocalizedDescriptionKey: "chunked body too large"])
+            }
+        }
+    }
+
+    /// 从 buf 里读一行（\r\n 结尾，不含 \r\n）；不够就继续 receive。
+    private func readLine(_ conn: NWConnection, _ buf: inout Data) async throws -> String {
+        while true {
+            if let r = buf.range(of: Data("\r\n".utf8)) {
+                let line = String(data: buf.subdata(in: buf.startIndex..<r.lowerBound), encoding: .utf8) ?? ""
+                buf.removeSubrange(buf.startIndex..<r.upperBound)
+                return line
+            }
+            let chunk = try await receive(conn, 65536)
+            guard !chunk.isEmpty else {
+                throw NSError(domain: "LiziServer", code: 5, userInfo: [NSLocalizedDescriptionKey: "eof in chunked header"])
+            }
+            buf.append(chunk)
+            if buf.count > 1_048_576 {
+                throw NSError(domain: "LiziServer", code: 4, userInfo: [NSLocalizedDescriptionKey: "chunked header too large"])
+            }
+        }
+    }
+
+    private func receive(_ conn: NWConnection, _ length: Int) async throws -> Data {
+        // 第 15 轮第 4 件：receive 也要能被取消——任务取消时光停掉上层
+        // Task 不够，卡在 receive 里的 continuation 永远不恢复，任务本身
+        // 泄漏。取消时直接关连接，回调带错回来、continuation 恢复。
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
+                conn.receive(minimumIncompleteLength: 1, maximumLength: length) { data, _, _, error in
+                    if let error { cont.resume(throwing: error) }
+                    else { cont.resume(returning: data ?? Data()) }
+                }
+            }
+        } onCancel: {
+            conn.cancel()
         }
     }
 

@@ -21,6 +21,10 @@ final class DiagLog {
     /// 前端上报的诊断日志（第 6 轮）：audio（播放失败 detail）/ cover（封面失败
     /// host+原因+栏位）/ probe（探活结果）。最近 100 条，设置页可查看/复制。
     private var logs: [[String: Any]] = []
+    /// 服务端收到的诊断 POST 总数（第 15 轮第 6 件）：每次 /api/diag/log
+    /// 成功入库 +1，和 JS 侧 window.__liziDiagCounts().sent 对账；
+    /// sent 涨、received 不涨就是 POST 在路上丢了。只记内存数，不落盘。
+    private(set) var diagLogReceived = 0
 
     private enum PersistKey {
         static let logs = "lizi.diagLogs"
@@ -85,6 +89,13 @@ final class DiagLog {
         }
     }
 
+    /// 服务端收到一条诊断 POST 就 +1（第 15 轮第 6 件对账用），
+    /// 在 recordLog 之前调（400 的不算，见 Router）。
+    func noteDiagLogReceived() {
+        lock.lock(); defer { lock.unlock() }
+        diagLogReceived += 1
+    }
+
     func recordLog(category: String, message: String, fields: [String: Any] = [:]) {
         lock.lock(); defer { lock.unlock() }
         var e: [String: Any] = [
@@ -131,6 +142,12 @@ final class DiagLog {
     func json() -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
         return ["lastSearch": lastSearch, "requests": requests, "events": events, "logs": logs,
-                "playbackBreadcrumb": UserDefaults.standard.stringArray(forKey: "lizi.playbackBreadcrumb") ?? []]
+                "playbackBreadcrumb": UserDefaults.standard.stringArray(forKey: "lizi.playbackBreadcrumb") ?? [],
+                // 第 15 轮第 4 件：挂起的 LX 取链任务数（>0 且一直不回零
+                // 就是有脚本 Promise 不 settle、任务泄漏了）。
+                "lxPendingCalls": LXScriptInstance.pendingMusicUrlCalls,
+                // 第 15 轮第 6 件：服务端收到的诊断 POST 数（和 JS 侧
+                // window.__liziDiagCounts().sent 对账）。
+                "diagLogReceived": diagLogReceived]
     }
 }

@@ -81,6 +81,10 @@ final class PlaybackStore: ObservableObject {
     private var wasPlayingBeforeInterruption = false
 
     private static let likedKey = "lizi.native.likedTrackIds"
+    /// P2：星标完整曲目（[Track] JSON；liked rail 用）。旧的 id 集合键不动，
+    /// 保证兼容——P2 之前点的星标只有 id、没有曲目详情，恢复不出来，
+    /// 不编假曲目；重新点一次星标（取消再点）后才有完整记录。
+    private static let likedTracksKey = "lizi.native.likedTracks"
     private static let qualityKey = "lizi.native.quality"
     private var likedIds: Set<String> {
         get {
@@ -277,12 +281,36 @@ final class PlaybackStore: ObservableObject {
     }
 
     /// 喜欢/取消喜欢当前曲目（持久化到 UserDefaults；锁屏星标由 NowPlayingCoordinator 同步）。
+    /// P2：id 集合之外，同时持久化完整 Track（liked rail 直接读，不用再反查）。
     func toggleLike() {
         guard let track = currentTrack else { return }
         var ids = likedIds
         if ids.contains(track.id) { ids.remove(track.id) } else { ids.insert(track.id) }
         likedIds = ids
         isLiked = ids.contains(track.id)
+        var tracks = Self.likedTracks()
+        if ids.contains(track.id) {
+            if !tracks.contains(where: { $0.id == track.id && $0.platform == track.platform }) {
+                tracks.append(track)
+            }
+        } else {
+            tracks.removeAll { $0.id == track.id && $0.platform == track.platform }
+        }
+        Self.saveLikedTracks(tracks)
+    }
+
+    /// 已喜欢的完整曲目列表（按点星标顺序；调用方按 platform 过滤）。
+    /// 只有 P2 之后点的星标才有完整记录，旧的 id 只有 id、恢复不出来，不编。
+    static func likedTracks() -> [Track] {
+        guard let data = UserDefaults.standard.data(forKey: likedTracksKey),
+              let tracks = try? JSONDecoder().decode([Track].self, from: data) else { return [] }
+        return tracks
+    }
+
+    private static func saveLikedTracks(_ tracks: [Track]) {
+        if let data = try? JSONEncoder().encode(tracks) {
+            UserDefaults.standard.set(data, forKey: likedTracksKey)
+        }
     }
 
     /// 跳到指定进度（秒）。

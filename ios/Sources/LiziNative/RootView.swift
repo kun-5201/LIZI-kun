@@ -28,6 +28,26 @@ struct RootView: View {
                 SearchViewWithBack()
             case .player:
                 PlayerView()
+            case .playlist(let platform, let id, let isRank):
+                DetailWithBack {
+                    PlaylistDetailView(platform: platform, id: id, isRank: isRank)
+                }
+            case .artist(let platform, let id):
+                DetailWithBack {
+                    ArtistView(platform: platform, id: id)
+                }
+            case .album(let platform, let id):
+                DetailWithBack {
+                    AlbumView(platform: platform, id: id)
+                }
+            case .myAlbums:
+                DetailWithBack {
+                    MyAlbumsView()
+                }
+            case .rail(let kind, let platform):
+                DetailWithBack {
+                    RailDetailView(kind: RailKind(rawValue: kind) ?? .featured, platform: platform)
+                }
             }
         }
         .environmentObject(nav)
@@ -94,7 +114,40 @@ private struct SearchViewWithBack: View {
     }
 }
 
-/// 音频路由选择页（照抄壳版 ContentView.AirPlayPickerSheet，P1 集成接线）：
+/// P2 内容页通用返回栏（P2-A）：照抄 SearchViewWithBack 的样式——
+/// 左上 chevron.left +「首页」，点回 .home。P2 五个新分支（歌单/歌手/
+/// 专辑/我的专辑/rail）都在外包这一层；SearchViewWithBack 原样保留不动。
+private struct DetailWithBack<Content: View>: View {
+    @EnvironmentObject var nav: AppNavigation
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button(action: { nav.show(.home) }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("首页")
+                            .font(.liziBody(size: LiziTokens.size14, weight: .medium))
+                    }
+                    .foregroundColor(LiziTokens.ink2)
+                }
+                .accessibilityLabel("回首页")
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            content
+        }
+        .background(LiziTokens.paper)
+    }
+}
+
 /// 系统路由选择器（AVRoutePickerView）。点这个按钮出系统设备列表 + 音量条——
 /// 就是用户要的“系统自带那个 AirPlay 音量面板”。
 struct NativeAirPlayPickerSheet: View {

@@ -324,12 +324,18 @@ struct Playlist: Identifiable, Codable, Hashable {
     var description: String
     /// 创建者（有才填）。
     var creator: String
+    /// 是否酷我榜单：rank 标记来自搜索/榜单字典的 rank 字段（壳版 app.js
+    /// openPlatPlaylist：p.rank 为真走 kuwoRankTracks）；为真时详情走
+    /// /api/kuwo/rank/tracks，否则走 /api/kuwo/playlist/tracks。默认 false。
+    /// 桥接搜索目前只填 tracks、不填歌单，该标记由填歌单的工人（P2-B/C/D 的
+    /// 榜单/推荐来源）从字典 rank 字段置 true。
+    var isRank: Bool
     /// 详情拉取到的曲目（列表接口不填，只有 playlistDetail 填）。
     var tracks: [Track]
 
     init(id: String = "", title: String = "", coverURL: URL? = nil,
          trackCount: Int = 0, source: String = "", description: String = "",
-         creator: String = "", tracks: [Track] = []) {
+         creator: String = "", isRank: Bool = false, tracks: [Track] = []) {
         self.id = id
         self.title = title
         self.coverURL = coverURL
@@ -337,6 +343,7 @@ struct Playlist: Identifiable, Codable, Hashable {
         self.source = source
         self.description = description
         self.creator = creator
+        self.isRank = isRank
         self.tracks = tracks
     }
 }
@@ -349,14 +356,17 @@ struct Artist: Identifiable, Codable, Hashable {
     var source: String
     /// 热门曲目（artistDetail 填；列表接口不填）。
     var hotTracks: [Track]
+    /// 专辑列表（P2 歌手页 artistAlbums 填；列表接口不填）。
+    var albums: [Album]
 
     init(id: String = "", name: String = "", coverURL: URL? = nil,
-         source: String = "", hotTracks: [Track] = []) {
+         source: String = "", hotTracks: [Track] = [], albums: [Album] = []) {
         self.id = id
         self.name = name
         self.coverURL = coverURL
         self.source = source
         self.hotTracks = hotTracks
+        self.albums = albums
     }
 }
 

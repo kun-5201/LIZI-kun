@@ -6,9 +6,13 @@ import SwiftUI
 /// 数据来源只认 NativeBridge 的已定接口；没有接口的来源一律空态，不编假数据：
 /// - 每日推荐：`NativeBridge.dailyRecommend(platform:)`——netease 需登录，
 ///   qq / kugou / kuwo / applemusic 走公开推荐，qishui / bodian 没有官方接口 → 空。
-/// - 精选 / 我收藏的歌单 / 电台：原生桥暂无对应列表接口 → 空态（P2 按平台逐个接）。
-/// - 我的喜欢：PlaybackStore 只把 id 存进 UserDefaults（见下面 likedKey），
-///   没有曲目详情可恢复，P1 只显示已喜欢的首数，列表待 P2 补全。
+/// - 精选 / 我的喜欢 / 我收藏的歌单 / 电台（P2）：`NativeBridge.railFeatured /
+///   railLiked / railMyPlaylists / railRadio`（见 Views/Home/RailsBridge.swift），
+///   逐平台映射照抄壳版 rail* 函数；需要登录的 rail 在未登录态显示诚实空态
+///   （登录迁移是 P4），没有接口的平台显示接口缺失原因，本地星标兜底的
+///   平台（kugou / kuwo / applemusic 的喜欢）读 PlaybackStore.likedTracks()。
+/// - 我的喜欢：P2 起 PlaybackStore 同时持久化完整 Track
+///   （键 "lizi.native.likedTracks"）；P2 之前点的星标只有 id，恢复不出来。
 @MainActor
 final class HomeViewModel: ObservableObject {
     /// 来源切换（P1 用横向 chips 简化；壳版的球面滚轮是 P3 打磨项）。
@@ -38,6 +42,28 @@ final class HomeViewModel: ObservableObject {
             case .radio: return "antenna.radiowaves.left.and.right"
             }
         }
+
+        /// 该来源对应的 rail（daily 没有 rail，走每日推荐跑马带）。
+        var railKind: RailKind? {
+            switch self {
+            case .daily: return nil
+            case .featured: return .featured
+            case .liked: return .liked
+            case .playlists: return .playlists
+            case .radio: return .radio
+            }
+        }
+    }
+
+    /// rail 详情页的打开目标（kind + 拉取时的平台）。
+    /// 导航缝合：工人 A 落地 AppNavigation `.rail(kind:platform:)` 后，
+    /// HomeView 把 sheet 改成 `nav.show(.rail(kind:platform:))`，本 struct
+    /// 的字段名已按该约定取，详情页 RailDetailView 的初始化器不用改。
+    struct RailSelection: Identifiable, Hashable {
+        var kind: RailKind
+        var platform: String
+
+        var id: String { "\(kind.rawValue)|\(platform)" }
     }
 
     // MARK: - 持久化键（原生版全部加 lizi.native 前缀，与壳版 localStorage 隔离）
@@ -66,6 +92,13 @@ final class HomeViewModel: ObservableObject {
     @Published var lastPlayedAt: Date?
     /// 已喜欢的曲目数（只有 id，没有详情，见文件头注释）。
     @Published var likedCount = 0
+    /// 四条 rails 的拉取结果（按 kind 存；切台 / 切来源时按需加载）。
+    @Published var rails: [RailKind: RailResult] = [:]
+    /// 四条 rails 各自的加载态。
+    @Published var railLoading: [RailKind: Bool] = [:]
+    /// 正在打开的 rail 详情页（nil = 没打开；HomeView 用 sheet 呈现，
+    /// 工人 A 落地导航 case 后改走 nav.show(.rail(...))，见 RailSelection）。
+    @Published var selectedRail: RailSelection?
 
     /// 跑马带速度（px/帧，60fps 计）：照抄壳版 app.js marqSpeedOf，
     /// 默认 24 → 0.36 px/帧（比最初写死的 0.6 慢四成）。
@@ -82,6 +115,9 @@ final class HomeViewModel: ObservableObject {
         loadLastTrack()
         refreshLikedCount()
         await loadDaily()
+        if let kind = selectedSource.railKind {
+            await loadRail(kind)
+        }
     }
 
     private func loadPersistedSelection() {
@@ -114,7 +150,40 @@ final class HomeViewModel: ObservableObject {
             Task { await loadDaily() }
         } else if source == .liked {
             refreshLikedCount()
+            Task { await loadRail(.liked) }
+        } else if let kind = source.railKind {
+            Task { await loadRail(kind) }
         }
+    }
+
+    // MARK: - 四条 rails（P2）
+
+    /// 拉一条 rail（当前平台；加载期间又切了台，旧结果直接丢掉，和 loadDaily 同款竞态处理）。
+    func loadRail(_ kind: RailKind) async {
+        let platform = selectedPlatform
+        railLoading[kind] = true
+        let result: RailResult
+        switch kind {
+        case .featured:
+            result = await NativeBridge.railFeatured(platform: platform)
+        case .liked:
+            result = await NativeBridge.railLiked(platform: platform)
+        case .playlists:
+            result = await NativeBridge.railMyPlaylists(platform: platform)
+        case .radio:
+            result = await NativeBridge.railRadio(platform: platform)
+        }
+        guard platform == selectedPlatform else {
+            railLoading[kind] = false
+            return
+        }
+        rails[kind] = result
+        railLoading[kind] = false
+    }
+
+    /// 打开一条 rail 的详情页（HomeView 用 sheet 呈现；导航 case 落地后改走 nav）。
+    func openRail(_ kind: RailKind) {
+        selectedRail = RailSelection(kind: kind, platform: selectedPlatform)
     }
 
     // MARK: - 每日推荐

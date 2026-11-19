@@ -5,9 +5,11 @@ import SwiftUI
 /// 组成：顶栏搜索框（平时收起只留图标，聚焦展开并自动获焦）+ 音源切换条
 /// （「全部」+ 7 家平台）+ 曲目列表 + 搜索历史下拉。
 /// 本页不建导航、不改 RootView：点行是播放（走 PlaybackStore），
-/// 歌手/专辑/歌单页是 P2 的活；导航由 P1-B 的 AppNavigation / RootView 负责。
+/// 歌手/专辑/歌单行点按跳 P2 内容页（P2-A 已接线：extraSections 里
+/// nav.show(.artist/.album/.playlist)，导航由 AppNavigation / RootView 负责。
 struct SearchView: View {
     @EnvironmentObject private var playback: PlaybackStore
+    @EnvironmentObject private var nav: AppNavigation
     @StateObject private var viewModel = SearchViewModel()
     @Environment(\.horizontalSizeClass) private var sizeClass
     @FocusState private var searchFocused: Bool
@@ -355,26 +357,43 @@ struct SearchView: View {
         }
     }
 
-    /// 歌单/歌手/专辑：桥接层目前只回 tracks，这些分区现在不会出现；
-    /// 一旦桥接填数据，这里按纯文本展示（P2 再接跳转，不做死按钮）。
+    /// 歌单/歌手/专辑：点按跳 P2 内容页（P2-A 接线，只加导航，不改搜索逻辑）。
+    /// 歌单行传 isRank：酷我榜单行（playlist.isRank，rank 标记来自榜单/搜索字典
+    /// 的 rank 字段）详情走 /api/kuwo/rank/tracks；其余歌单走普通详情接口。
     @ViewBuilder
     private var extraSections: some View {
         if !viewModel.artists.isEmpty {
             SearchGroupHeaderView(title: "歌手", count: viewModel.artists.count)
             ForEach(viewModel.artists) { artist in
-                SearchPlainRowView(title: artist.name, subtitle: "")
+                Button {
+                    nav.show(.artist(platform: artist.source, id: artist.id))
+                } label: {
+                    SearchPlainRowView(title: artist.name, subtitle: "")
+                }
+                .buttonStyle(.plain)
             }
         }
         if !viewModel.albums.isEmpty {
             SearchGroupHeaderView(title: "专辑", count: viewModel.albums.count)
             ForEach(viewModel.albums) { album in
-                SearchPlainRowView(title: album.title, subtitle: album.artist)
+                Button {
+                    nav.show(.album(platform: album.source, id: album.id))
+                } label: {
+                    SearchPlainRowView(title: album.title, subtitle: album.artist)
+                }
+                .buttonStyle(.plain)
             }
         }
         if !viewModel.playlists.isEmpty {
             SearchGroupHeaderView(title: "歌单", count: viewModel.playlists.count)
             ForEach(viewModel.playlists) { playlist in
-                SearchPlainRowView(title: playlist.title, subtitle: playlist.creator)
+                Button {
+                    nav.show(.playlist(platform: playlist.source, id: playlist.id,
+                                       isRank: playlist.isRank))
+                } label: {
+                    SearchPlainRowView(title: playlist.title, subtitle: playlist.creator)
+                }
+                .buttonStyle(.plain)
             }
         }
     }
@@ -420,4 +439,5 @@ struct SearchView: View {
 #Preview {
     SearchView()
         .environmentObject(PlaybackStore())
+        .environmentObject(AppNavigation())
 }

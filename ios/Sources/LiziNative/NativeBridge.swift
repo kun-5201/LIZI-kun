@@ -444,18 +444,37 @@ return false
     }
 
     /// 歌单详情（含曲目）。没有官方接口的平台返回空歌单（tracks 为空）。
-    static func playlistDetail(platform: String, id: String) async -> Playlist {
+    /// - bodian: /api/bodian/playlist/tracks（api.js bodianPlaylistTracks，
+    ///   只回 { tracks, more }，没有歌单名/封面/创建者；playlistFrom 按 tracks-only
+    ///   解析，标题为空时详情页显示平台通用名、曲目数显示已加载数）。
+    /// - kuwo 榜单（isRank=true）: /api/kuwo/rank/tracks（api.js kuwoRankTracks，
+    ///   只回 { id, total, tracks }，没有歌单名/封面；同上按 tracks-only 解析）。
+    ///   榜单标记来自搜索/榜单字典的 rank 字段（见 Playlist.isRank）。
+    /// - kugou / applemusic 的 tracks 接口同样只回曲目（kugou 另有 trackCount，
+    ///   applemusic 只有 tracks），标题/封面为空时详情页同样显示通用名 + 占位封面。
+    /// - netease / qq / qishui 回完整歌单对象（name/cover/creator/tracks）。
+    static func playlistDetail(platform: String, id: String, isRank: Bool = false) async -> Playlist {
         let path: String
+        var query: [String: String] = ["id": id]
         switch platform {
         case "netease": path = "/api/playlist/detail"
         case "qq": path = "/api/qq/playlist/detail"
         case "kugou": path = "/api/kugou/playlist/tracks"
-        case "kuwo": path = "/api/kuwo/playlist/tracks"
+        case "kuwo":
+            if isRank {
+                path = "/api/kuwo/rank/tracks"
+                query["limit"] = "50"
+            } else {
+                path = "/api/kuwo/playlist/tracks"
+            }
         case "qishui": path = "/api/qishui/playlist/detail"
+        case "bodian":
+            path = "/api/bodian/playlist/tracks"
+            query["limit"] = "50"
         case "applemusic": path = "/api/applemusic/playlist/tracks"
         default: return Playlist(id: id, source: platform)
         }
-        guard let d = await call(path: path, query: ["id": id]) else {
+        guard let d = await call(path: path, query: query) else {
             return Playlist(id: id, source: platform)
         }
         return playlistFrom(dict: d, platform: platform, id: id)
@@ -558,6 +577,10 @@ extension Track {
         guard !title.isEmpty else { return nil }
         let artist: String
         if let a = dict["artists"] as? String { artist = a }
+        else if let arr = dict["artists"] as? [String] {
+            // 汽水 / 波点曲目行就是这个形状（P2-B 发现：旧代码不认会掉成「未知歌手」）。
+            artist = arr.joined(separator: " / ")
+        }
         else if let arr = dict["artists"] as? [[String: Any]] {
             artist = arr.compactMap { $0["name"] as? String }.joined(separator: " / ")
         } else if let arr = dict["ar"] as? [[String: Any]] {

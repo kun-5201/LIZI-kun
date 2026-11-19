@@ -79,9 +79,10 @@ enum NativeBridge {
     }
 
     /// 带硬超时的异步调用（超时抛错，调用方按失败处理；LX 取链专用）。
+    /// TimeoutError 不能嵌在泛型函数里（Swift 禁止），放枚举作用域。
+    private struct TimeoutError: Error {}
     static func withTimeout<T>(seconds: TimeInterval,
                                _ op: @escaping () async throws -> T) async throws -> T {
-        struct TimeoutError: Error {}
         return try await withThrowingTaskGroup(of: T.self) { group in
             group.addTask { try await op() }
             group.addTask {

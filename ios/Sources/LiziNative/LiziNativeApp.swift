@@ -26,7 +26,7 @@ struct LiziNativeApp: App {
         self.nowPlayingCoordinator = nowPlaying
         // 岛上控制直调播放器（不再点 DOM）：previous / togglePlay / next / toggleLike。
         // Intent 在 App 进程内执行；handler 同步返回 true（已接下），动作跳到主线程执行。
-        IslandControlRelay.handler = { [weak store] action in
+        IslandControlRelay.shared.handler = { [weak store] action in
             guard let store else { return false }
             Task { @MainActor in
                 switch action {

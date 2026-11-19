@@ -69,9 +69,7 @@ struct HomeView: View {
             .background(LiziTokens.paper)
         }
         .task {
-            await MainActor.run {
-                await viewModel.initialLoad()
-            }
+            await viewModel.initialLoad()
         }
         .onChange(of: playback.currentTrack) { track in
             if let track = track {

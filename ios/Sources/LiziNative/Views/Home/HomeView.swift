@@ -20,9 +20,10 @@ import SwiftUI
 ///    Hero 高由模板公式算（竖屏 (屏高−110)/2，横屏 (屏高−110)×9/16），
 ///    面板取剩下那份（竖屏一半，横屏 (屏高−110)×7/16）。
 ///    面板内容（条 42 + chips 52 + 环带 273/291）比面板高，面板是定高窗、
-///    内容在里面竖滑（模板里面板封面本来就是齐底边裁断的）；横屏面板矮，
-///    里面顺序是条 → 环 → chips（先让封面露出来，chips 在下面滑下去才见），
-///    竖屏是条 → chips → 环。
+///    只有环在里面竖滑（r23h：条 + 竖屏 chips 钉在面板顶，不进 ScrollView，
+///    放歌后 / 手指竖滑都顶不走它们；横屏只钉条，chips 仍在环下竖滑区）。
+///    横屏面板矮，里面顺序是条 → 环 → chips（先让封面露出来，chips 在
+///    下面滑下去才见），竖屏是条 → chips → 环。
 /// 3. 首屏之外（下滑才看到，本地音乐一个像素都不许露首屏）：rails 行，
 ///    再下面是本地音乐区（文件夹卡片 + 导入按钮，见 LocalMusicView.swift）。
 ///    段间距 24；底部留白 50（16 净空 + 34 Home Indicator，底部安全区已忽略）。
@@ -235,11 +236,17 @@ struct HomeView: View {
     }
 
     /// 每日推荐铺色面板（模板 v2 定高窗，壳版 `#hall-plat` 内容）：
-    /// 圆角 22、内边距 10、底色 platTint；内容在窗内竖滑（标准档内容
+    /// 圆角 22、内边距 10、底色 platTint；只有环在窗内竖滑（标准档内容
     /// 约 403，高于竖屏面板 382、更高于横屏 140；模板里面板封面本来
     /// 就是齐底边裁断的）。竖屏顺序：条 → chips → 环；横屏顺序：条 →
     /// 环 → chips（横屏面板只有约 140 高，先让封面露出来、与模板一致；
-    /// chips 滑下面板才看到，长按切换仍可用）。
+    /// chips 在下面，滑下去才见）。
+    /// r23h：平台条 +（竖屏）chips 行钉在面板顶、不进竖滑 ScrollView——
+    /// 面板是定高窗、内容比窗高，放歌后环内容一换（每日 → 队列）或手指
+    /// 在面板里竖滑，ScrollView 的偏移会把条和 chips 顶出窗外、再也滑
+    /// 不回来（07:09 真机：条 + chips 全没了、环还在）；钉在外面后偏移
+    /// 再怎么变也顶不走它们。横屏面板只有约 140 高、模板要求先露封面，
+    /// chips 仍放环下面的竖滑区里（模板原意：滑下去才见），只钉平台条。
     /// 真机风险：面板内竖滑与环的上滑展开手势竞争——环的展开用 UIKit
     /// pan recognizer（见 HomeCoverRingView，r21 教训后不再用 SwiftUI
     /// DragGesture），它与外层 ScrollView 竖滑共存；现在多了一层面板内
@@ -253,28 +260,33 @@ struct HomeView: View {
         isLandscape: Bool,
         tier: PlayerTokens.PlayerSizeTier
     ) -> some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(spacing: 8) {
-                PlatformStripView(viewModel: viewModel)
-                if isLandscape {
-                    // 横屏先环后 chips：封面先露出来（模板 v2 横屏面板里
-                    // 一排封面卡在第一屏；chips 在下面，滑下去才见）。
-                    HomeCoverRingView(
-                        model: ringModel,
-                        dailyTracks: viewModel.daily.map { $0.track },
-                        isLoadingDaily: viewModel.isLoadingDaily,
-                        dailyEmptyReason: viewModel.dailyEmptyReason,
-                        marqueeSpeed: viewModel.marqSpeedPxPerSecond,
-                        tier: tier
-                    )
-                    SourceChipsView(viewModel: viewModel)
-                } else {
-                    SourceChipsView(viewModel: viewModel)
-                    // r21：首页 3D 封面环（平面跑马带常态 + 上滑展开全屏圆环；
-                    // 见 HomeCoverRingView 文件头视频逐帧规格）。
-                    // 内容是播放队列（非空时）或每日推荐（队列为空时），
-                    // 两份都空时不显示。环本身的实现是另一个工人的，
-                    // 本轮只动它在面板里的位置，不动 HomeCoverRingView.swift。
+        // r23h：条 +（竖屏）chips 钉在面板顶，见本函数头注释。
+        VStack(spacing: 8) {
+            PlatformStripView(viewModel: viewModel)
+            if isLandscape {
+                // 横屏先环后 chips：封面先露出来（模板 v2 横屏面板里
+                // 一排封面卡在第一屏；chips 在下面，滑下去才见）。
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: 8) {
+                        HomeCoverRingView(
+                            model: ringModel,
+                            dailyTracks: viewModel.daily.map { $0.track },
+                            isLoadingDaily: viewModel.isLoadingDaily,
+                            dailyEmptyReason: viewModel.dailyEmptyReason,
+                            marqueeSpeed: viewModel.marqSpeedPxPerSecond,
+                            tier: tier
+                        )
+                        SourceChipsView(viewModel: viewModel)
+                    }
+                }
+            } else {
+                SourceChipsView(viewModel: viewModel)
+                // r21：首页 3D 封面环（平面跑马带常态 + 上滑展开全屏圆环；
+                // 见 HomeCoverRingView 文件头视频逐帧规格）。
+                // 内容是播放队列（非空时）或每日推荐（队列为空时），
+                // 两份都空时不显示。环本身的实现是另一个工人的，
+                // 本轮只动它在面板里的位置，不动 HomeCoverRingView.swift。
+                ScrollView(.vertical, showsIndicators: false) {
                     HomeCoverRingView(
                         model: ringModel,
                         dailyTracks: viewModel.daily.map { $0.track },
@@ -285,8 +297,8 @@ struct HomeView: View {
                     )
                 }
             }
-            .padding(10)
         }
+        .padding(10)
         .frame(width: width, height: height)
         .background(platTint)
         .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius22))

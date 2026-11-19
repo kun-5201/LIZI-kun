@@ -93,7 +93,13 @@ final class HomeViewModel: ObservableObject {
     // MARK: - 状态
 
     /// 当前平台（netease / qq / kugou / qishui / bodian / kuwo / applemusic）。
-    @Published var selectedPlatform: String = "netease"
+    ///
+    /// r23h：不要写死 "netease"——RootView 按 nav.current 切页，进播放页
+    /// 就销毁 HomeView、回首页新建一个 HomeViewModel；写死默认值会让每次
+    /// 回首页的第一帧（以及持久化键缺失/非法时全程）都先变网易云红，
+    /// 面板跟着变粉（07:09 真机）。声明时就读持久化值（initialPlatform()），
+    /// loadPersistedSelection 再读一次同一份 helper，不另起事实来源。
+    @Published var selectedPlatform: String = HomeViewModel.initialPlatform()
 
     /// r22j 平台管理：首页平台条显示的平台 = 设置 → 平台管理勾选的平台
     /// （默认全部 7 个）。只读 UserDefaults（`SettingsStore
@@ -152,11 +158,20 @@ final class HomeViewModel: ObservableObject {
         }
     }
 
-    private func loadPersistedSelection() {
+    /// 读持久化平台的唯一入口（声明初值 + initialLoad 共用）：键里有合法
+    /// id 就用它，没有（新装 / 数据被清 / 旧值非法）才回落 "netease"。
+    /// 播放路径不写这把键（全仓唯一写点是 selectPlatform），所以读到的
+    /// 就是用户上次点的平台，不是播放后变的。
+    private static func initialPlatform() -> String {
         if let p = UserDefaults.standard.string(forKey: Self.platformKey),
            LiziPlatforms.all.contains(where: { $0.id == p }) {
-            selectedPlatform = p
+            return p
         }
+        return "netease"
+    }
+
+    private func loadPersistedSelection() {
+        selectedPlatform = Self.initialPlatform()
         if let raw = UserDefaults.standard.string(forKey: Self.sourceKey),
            let s = Source(rawValue: raw) {
             selectedSource = s

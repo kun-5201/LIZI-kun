@@ -11,6 +11,8 @@ import SwiftUI
 /// 队列入口竖屏点歌名块、横屏点三条杠，副标题只留歌手；
 /// 顶栏位置（顶边 59）、横屏铺满、YRC 解析一字未动；顶栏图标与接线
 /// 按本次纠正改（返回 + 搜索 + 齿轮进舞台）。
+/// r23i：顶栏再上移（竖屏圆钮顶边 120.7→39，横屏胶囊顶边 0→10；只改顶栏
+/// padding，见 windowTopInset 下的 r23i 常量与文件底「r23i 根因」）。
 /// r22 横屏重排：旧左右分栏作废（歌名在左列压到歌词上重叠，用户 05:32 截图）；
 /// 新图纸横屏 5 条：歌名左上、歌词居中、横屏文字胶囊顶栏、封面流居中顶部、
 /// 横屏铺满。竖屏布局只动控制行（爱心 + 去 AirPlay）这一件，其余一字未动。
@@ -137,6 +139,30 @@ struct PlayerView: View {
         return top > 0 ? min(top, 59) : 47
     }
 
+    /// r23i 顶栏再上移（只改顶栏 padding，不动图标与接线）：
+    /// - 目标：竖屏返回圆钮顶边 39pt（圆钮 Ø48，视觉中心 63pt，对齐首页
+    ///   图标中心线 63.2pt——07:09 首页图实测：齿轮顶 47.3pt、中心 63.2pt）。
+    /// - 垫高实测：07:13 竖屏图（1206×2622 @3x）列扫描：圆钮顶边 px y=362
+    ///   → 120.7pt，而当时 padding = windowTopInset = 59 → 容器上方还垫
+    ///   了 120.7 − 59 = 61.7 ≈ 62pt（安全区被多扣了一层；r22a 文件底已记
+    ///   geo.safeAreaInsets.top = 124 = 59 + 65，同一量级）。
+    /// - 所以 padding 不再等于安全区，要按「目标顶边 − 垫高」给：
+    ///   39 − 62 = −23（负 padding 把整列往上拉 82pt，省下的空间归弹性
+    ///   歌词区，进度条仍贴底——与 r22a 同一机制）。
+    private static let playerTopBarTargetTop: CGFloat = 39
+    private static let topBarContainerOffset: CGFloat = 62
+    private static var portraitTopPadding: CGFloat {
+        playerTopBarTargetTop - topBarContainerOffset
+    }
+
+    /// r23i 横屏胶囊顶边目标 10pt（8–12pt 档中值，贴近屏顶留一线间距）。
+    /// 横屏顶区原来没有顶部 padding（文件里唯一的 .padding(.top, 12) 是
+    /// 底部进度条的）；07:15 横屏图实测胶囊灰区 y 0–60px（1206×555，
+    /// 1.38px/pt）→ 顶边约 0pt——本次按任务书把目标值写成显式常量 10pt，
+    /// 真机以 8–12pt 验收。歌词区是弹性段，吸收这 10pt（131.6 → 121.6，
+    /// 仍 ≥ 最小高 100）。
+    private static let landscapeTopPadding: CGFloat = 10
+
     /// 横屏左右安全区（灵动岛一侧 59，另一侧 0）。每侧夹到 ≤59；两侧都 >0
     /// 且相等时分不清岛在哪侧（124/124 被垫高的情况），用界面方向定：
     /// landscapeLeft 岛在左，landscapeRight 岛在右。
@@ -197,12 +223,12 @@ struct PlayerView: View {
                     .frame(width: contentWidth)
             }
             .padding(.horizontal, PlayerTokens.sp4)
-            // 顶部走 key window 的安全区真实值（r22a：geo.safeAreaInsets.top
-            // 在真机上是 124 不是 59，顶栏被顶到 124 才出现——见文件底
-            // 「r22a 顶栏太靠下根因」。windowTopInset 夹到 ≤59，顶栏顶边回 59，
-            // 紧贴状态栏下方，灵动岛同一行高度之下、只留一点点间距；弹性歌词区
-            // 会把省下的 65pt 吃掉（180 → 245），进度条仍贴底）。
-            .padding(.top, Self.windowTopInset)
+            // r23i：顶部不再走 windowTopInset（59）——07:13 竖屏图实测：
+            // padding = 59 时圆钮顶边落在 120.7pt（列扫描 px y=362），容器
+            // 上方还垫了约 62pt。改走 portraitTopPadding（39 − 62 = −23），
+            // 顶边回 39、圆钮中心 63，对齐首页图标中心线；省下的 82pt 归
+            // 弹性歌词区，进度条仍贴底。geo.safeAreaInsets 仍不用（会被垫高）。
+            .padding(.top, Self.portraitTopPadding)
             // 细进度条：满宽（在横向 padding 的外层），与控制行隔 12，
             // 底部留 Home Indicator 安全区（有 Home Indicator 34，无则 0）。
             PlayerProgressBar(tier: tier)
@@ -316,6 +342,10 @@ struct PlayerView: View {
                     .padding(.top, 12)
                     .padding(.bottom, geo.safeAreaInsets.bottom)
             }
+            // r23i：横屏顶区加显式顶部 padding（目标胶囊顶边 10pt，见
+            // landscapeTopPadding；原来顶区无顶部 padding，歌词区弹性段
+            // 吸收这 10pt，仍 ≥ 最小高 100）。
+            .padding(.top, Self.landscapeTopPadding)
             .frame(width: contentWidth, height: screenHeight, alignment: .topLeading)
             Color.clear.frame(width: trailingInset)
         }
@@ -715,3 +745,28 @@ struct PlayerView: View {
 // - 次要问题（另立项，不在本轮改）：进度条视觉细条系统性偏上约 28pt
 //   （视觉条落在触摸区顶部：竖屏视觉顶 800 = 触摸顶，设计应为触摸顶 +28；
 //   横屏同样差约 27–28pt），疑似触摸区顶部锚定，机制未解。
+//
+// MARK: - r23i 根因（顶栏仍太靠下，用户 07:13 竖屏 / 07:15 横屏图）
+//
+// 像素实测（用户机 402×874pt，iPhone 16 Pro Max）：
+// - 竖屏 07:13 图（21ADF00C…A69C7829，1206×2622 @3x）：返回圆钮列扫描
+//   x=120px，背景 (65,57,46) → 圆钮 (131,126,120) 过渡在 px y=362 → 顶边
+//   120.7pt；圆钮灰区 bbox y 362–529px，人字中心 145pt，直径 ≈48（标准档）；
+//   灵动岛黑区 y 42–151px → 底 50.3pt；岛底→钮顶空 70.4pt。任务书写的
+//   「约 133pt」与本次列扫描 120.7pt 差约 12pt，同一量级、结论一致（≫40）。
+// - 横屏 07:15 图（094794E5…1D287F79AD53，1206×555，1.38px/pt）：返回胶囊
+//   灰区 y 0–60px → 顶边约 0pt、高 43.5pt（≈ compact 44）；中列 x=145 灰起
+//   于 y=0，搜索胶囊同。横屏顶区原来没有顶部 padding（文件里唯一的
+//   .padding(.top, 12) 是底部进度条的，不是顶栏的）。
+// - 首页 07:09 图（F1A53A76…5A9597，1206×2622 @3x）：齿轮顶 47.3pt、中心
+//   63.2pt，搜索中心 63.2pt，LIZI 字中心 58.5pt——顶栏对齐档是中心 63pt。
+//
+// 根因：r22a 只换了 padding 的口径（geo 124 → key window 59），但容器上方
+// 仍垫了约 62pt（120.7 − 59）：安全区被多扣了一层，r22a 的 124 = 59 + 65
+// 是同一量级。只改 padding 数值不拆容器，顶边只能在 59 附近打转，到不了 39。
+// r23i 修法（本文件内）：padding 按「目标顶边 − 垫高」给——竖屏 39 − 62
+// = −23（负 padding 整列上拉 82pt，弹性歌词区吃掉，进度条仍贴底）；横屏
+// 顶区加显式 padding 10（8–12pt 档中值，歌词区吸收，仍 ≥ 最小高 100）。
+// 垫高机制本身（容器那层 62pt 从哪来）未钉死，真机以圆钮中心 63pt 验收：
+// 若实测中心偏离 63 超过 ±5pt，说明垫高不是 62，按「实测顶边 − padding」
+// 重算 topBarContainerOffset 再推。

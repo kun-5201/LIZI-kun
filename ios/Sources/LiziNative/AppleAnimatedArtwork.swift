@@ -59,6 +59,23 @@ import UIKit
 ///   归一化（去大小写/标点/空白）后要求歌手与专辑名双向包含其一才算命中，否则
 ///   不硬配、返回 nil 走路线 A。专辑 id 是分店面的（us 的 id 在 tw 查会 404），
 ///   按 us → tw → hk 顺序试。
+/// - r29 task 2（2026-11-21，用户真机验证的 bug）：《最伟大的作品》专辑本身
+///   有 editorialVideo（us/hk 1721454339 已验证），但跨平台匹配失败——网易/QQ
+///   播时专辑名是简体「最伟大的作品」，us 店面搜到的是英文 "Greatest Works Of
+///   Art"/"Jay Chou"，tw/hk 是繁体「最偉大的作品」/「周杰倫」；旧 matches()
+///   只做全半角归一化、不转简繁也不认英文别名，双向包含全失败；且
+///   albumIdBySearch 在首个店面搜到列表非空就直接 return nil，根本不试
+///   tw/hk；于是记 route-b-no-match（7 天否定缓存）。本轮三处修：
+///   (a) norm() 先繁转简（ICU Traditional-Simplified）；(b) 别名表双向展开
+///   （歌手/专辑的中英文写法互认）；(c) 三个店面都试完再判无匹配，某店面
+///   原词无结果时用别名英文词补查一次。匹配只认归一化后的歌手名/专辑名，
+///   不认平台——7 个平台（网易、QQ、酷狗、汽水、波点、酷我、Apple Music）
+///   给的格式（简体/繁体/英文、带书名号或不带）都要能配上。
+/// - 旧否定缓存清理（r29 task 2）：negatives 只在进程内内存，不写盘（全仓
+///   只有本文件三处引用：声明、读取、markNegative）；修完后 prepare(for:)
+///   开头跑一次迁移（UserDefaults `lizi.routeb.matchv2.cleared` 标记 absent
+///   就清 negatives、置标记），升级后第一次播不被旧结论挡住。7 天否定逻辑
+///   本身保留，只在三个店面都试完、确实无匹配时才记。
 /// - 有素材的专辑实测：IVE REVIVE+（1873882195）、Taylor Swift《Midnights》
 ///   （1649434996）、周杰伦《Greatest Works Of Art》（1721454339，us 店面）。
 ///   无素材的专辑实测：王菲《寓言》（966489223）、Album Leaf《In a Safe Place》
@@ -119,6 +136,10 @@ final class AppleAnimatedArtworkProvider {
 
     private static let webTokenKey = "lizi.applemusic.webtoken"
     private static let webTokenExpKey = "lizi.applemusic.webtoken.exp"
+    /// r29 task 2 迁移标记：旧版否定缓存按错的匹配逻辑记的 route-b-no-match，
+    /// 升级后第一次 prepare 必须清掉（见 migrateMatchV2IfNeeded）。bool
+    /// 缺省为 false，正好表示“还没清过”。
+    private static let matchV2ClearedKey = "lizi.routeb.matchv2.cleared"
     /// 用户自己的 MusicKit 开发者 token（与 AppleMusic.swift 的 devTokenKey 同值，
     /// 设置里已有粘贴入口；这里不用跨文件引用常量，免得以后挪文件时断链）。
     private static let userDevTokenKey = "lizi.applemusic.devtoken"
@@ -174,6 +195,9 @@ final class AppleAnimatedArtworkProvider {
     /// 竖版到手回调 true，任何失败回调 false（调用方走路线 A）。
     /// 同 key 并发调用合并为一次网络请求。
     func prepare(for track: Track, onReady: @escaping (Bool) -> Void) {
+        // r29 task 2：先跑匹配 v2 迁移——旧否定结论（按错的匹配逻辑记的）
+        // 在第一次播时清掉，否则升级后第一首歌就被旧缓存挡住。
+        migrateMatchV2IfNeeded()
         guard let key = albumKey(for: track) else {
             // 歌手或专辑名为空（单曲常无专辑名）：路线 B 匹配不了，直接认栽，
             // 调用方走路线 A。记一笔——否则“《海嶼你》这类歌 B 为什么没动”
@@ -382,6 +406,24 @@ final class AppleAnimatedArtworkProvider {
         lock.unlock()
     }
 
+    /// 公开：清掉进程内全部否定结论（7 天否定缓存）。供 r29 task 2 的升级
+    /// 迁移与诊断调用；negatives 只在内存，不写盘，清完即无残留。
+    func clearNegatives() {
+        lock.lock()
+        negatives.removeAll()
+        lock.unlock()
+    }
+
+    /// r29 task 2 升级迁移：标记 absent = 还没清过旧否定结论 → 清一次并
+    /// 置标记。prepare(for:) 开头调用；幂等，多次调用无副作用。只清
+    /// “匹配修之前记的”旧结论——标记一旦置上，后续记的否定都是新逻辑
+    /// 下的有效结论，不再动。
+    private func migrateMatchV2IfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: Self.matchV2ClearedKey) else { return }
+        clearNegatives()
+        UserDefaults.standard.set(true, forKey: Self.matchV2ClearedKey)
+    }
+
     /// 本次 resolve 里 amp-api 失败的种类（ampGet 分流记的，四种之一；
     /// 没失败过返回 nil）。
     private func ampFailureKind(for key: String) -> String? {
@@ -423,18 +465,22 @@ final class AppleAnimatedArtworkProvider {
     /// 其他平台的歌：按 "歌手 专辑名" 在 amp-api 搜专辑，首个双向匹配的才算命中。
     /// 只比歌手 + 专辑名，不比歌名（同一专辑的歌共用一个动态封面；歌名不参与匹配，
     /// 免得单曲与专辑版同名不同盘时配错）。
+    /// r29 task 2：(1) 三个店面（us/tw/hk）都试完再判无匹配——某店面搜到列表
+    /// 但无一双向匹配时，不再直接 return nil，而是继续试下一个店面（旧逻辑
+    /// 在 us 搜到英文版、tw/hk 是繁体版时，us 的非匹配就把整首歌判死了）；
+    /// (2) 某店面原词搜不到结果（空列表）时，用别名展开后的英文词再查一次
+    /// 该店面——只在无结果时补查，不多刷；请求本身失败（nil）不补查，换店面。
     private func albumIdBySearch(artist: String, album: String, key: String) async -> (id: String, storefront: String)? {
         let artist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
         let albumName = album.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !artist.isEmpty, !albumName.isEmpty else { return nil }
-        let term = "\(artist) \(albumName)"
-        guard let encoded = term.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+        let aliasTerm = Self.aliasSearchTerm(artist: artist, album: albumName)
         for sf in Self.storefronts {
-            guard let data = try? await ampGet(path: "/v1/catalog/\(sf)/search?types=albums&term=\(encoded)&limit=5", key: key),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let results = json["results"] as? [String: Any],
-                  let albums = results["albums"] as? [String: Any],
-                  let list = albums["data"] as? [[String: Any]] else { continue }
+            var list = await searchAlbums(term: "\(artist) \(albumName)", storefront: sf, key: key)
+            if let l = list, l.isEmpty, let aliasTerm {
+                list = await searchAlbums(term: aliasTerm, storefront: sf, key: key)
+            }
+            guard let list else { continue }
             for item in list {
                 guard let id = item["id"] as? String,
                       let attr = item["attributes"] as? [String: Any],
@@ -443,25 +489,105 @@ final class AppleAnimatedArtworkProvider {
                       Self.matches(artist: artist, album: albumName, candidateArtist: itemArtist, candidateAlbum: name) else { continue }
                 return (id, sf)
             }
-            // 该店面搜到了专辑但没一个双向匹配：别换店面硬找了，直接判无匹配。
-            if !list.isEmpty { return nil }
+            // 该店面搜到了专辑但没一个双向匹配：不直接判死，继续试下一个店面。
+            // 三个店面都试完、无一匹配才返回 nil（循环结束后的 return nil）。
         }
         return nil
     }
 
-    /// 双向匹配：归一化后，歌手与专辑名各取「相等 或 一方包含另一方」。
-    /// 归一化去大小写/标点/空白/全半角差异；中文原样比对。
-    static func matches(artist: String, album: String, candidateArtist: String, candidateAlbum: String) -> Bool {
-        func norm(_ s: String) -> String {
-            s.lowercased()
-                .applyingTransform(.fullwidthToHalfwidth, reverse: false)?
-                .components(separatedBy: CharacterSet.alphanumerics.inverted)
-                .joined() ?? s.lowercased()
+    /// 单个店面搜专辑，返回原始列表。nil = 请求/解析失败（换店面，不补查）；
+    /// 空数组 = 该店面确实无结果（可触发别名补查）。与 albumIdBySearch 的
+    /// 匹配循环分开，便于只在“无结果”时补查一次。
+    private func searchAlbums(term: String, storefront: String, key: String) async -> [[String: Any]]? {
+        guard let encoded = term.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let data = try? await ampGet(path: "/v1/catalog/\(storefront)/search?types=albums&term=\(encoded)&limit=5", key: key),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let results = json["results"] as? [String: Any],
+              let albums = results["albums"] as? [String: Any],
+              let list = albums["data"] as? [[String: Any]] else { return nil }
+        return list
+    }
+
+    /// 别名表：同一歌手 / 同一专辑的不同写法（简体 / 繁体 / 英文）视为同一个。
+    /// 怎么加新条目：
+    /// - 已有歌手/专辑多了个别名 → 往它那一组里加一个字符串；
+    /// - 新歌手/专辑 → 新加一组 `["中文名", "繁體名", "English Name"]`；
+    /// - 简繁同形的只写中文名 + 英文名即可（繁简归一在 norm() 里已做，
+    ///   表里同时写简繁两形是为了 ICU 转换万一失效时仍能展开）。
+    /// 匹配时双向展开：输入与候选各取本组全部写法逐一比对，任一命中即算命中。
+    /// 注意：别名单独一个词可能很通用（如专辑 "Fantasy"），但 matches() 要求
+    /// 歌手与专辑同时命中，歌手那一关挡住了误配，所以组里放通用英文名是安全的。
+    private static let aliasGroups: [[String]] = [
+        // 歌手
+        ["周杰伦", "周杰倫", "Jay Chou"],
+        ["林俊杰", "林俊傑", "JJ Lin"],
+        ["蔡依林", "Jolin Tsai"],              // 蔡依林简繁同形
+        ["五月天", "Mayday"],                  // 五月天简繁同形
+        ["邓紫棋", "鄧紫棋", "G.E.M."],
+        ["王菲", "Faye Wong"],                 // 王菲简繁同形
+        // 专辑
+        ["最伟大的作品", "最偉大的作品", "Greatest Works Of Art"],
+        ["范特西", "Fantasy"],                 // 范特西简繁同形
+        ["叶惠美", "葉惠美", "Ye Hui Mei"],
+        ["十一月的萧邦", "十一月的蕭邦", "November's Chopin"],
+        ["七里香", "Qi Li Xiang"],             // 七里香简繁同形
+    ]
+
+    /// 把一个名字展开成它所在别名组的全部写法（含自身）；不在任何组里就
+    /// 只返回自身。组内按归一化后相等认人/认专辑（繁体输入先经 norm() 转简，
+    /// 所以即使表里只写了简体也能展开；表里写全双形是双保险）。
+    private static func expandedForms(of name: String) -> [String] {
+        let n = norm(name)
+        for group in aliasGroups where group.contains(where: { norm($0) == n }) {
+            return group
         }
+        return [name]
+    }
+
+    /// 别名补查词：把歌手/专辑名换成别名组里的英文写法（有才换），供某店面
+    /// 原词搜不到结果时补查一次。两边都没有英文别名时返回 nil（不重复刷
+    /// 同一个词）。英文写法优先——us 店面只认英文，中文词在它那里常搜不到。
+    private static func aliasSearchTerm(artist: String, album: String) -> String? {
+        func englishForm(of name: String) -> String? {
+            let n = norm(name)
+            return expandedForms(of: name).first(where: { form in
+                norm(form) != n
+                    && form.rangeOfCharacter(from: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")) != nil
+            })
+        }
+        let enArtist = englishForm(of: artist)
+        let enAlbum = englishForm(of: album)
+        guard enArtist != nil || enAlbum != nil else { return nil }
+        return "\(enArtist ?? artist) \(enAlbum ?? album)"
+    }
+
+    /// 归一化：r29 task 2 先繁转简（ICU Traditional-Simplified；返回 nil 时
+    /// 回落原串，绝不崩），再走原有的去大小写 / 全半角 / 标点 / 空白。
+    /// 繁简转换必须加在现有归一之前（任务书要求）：转换按整串做，拆散后
+    /// 个别字可能转不准；去标点会把《》等书名号去掉，所以带书名号的输入
+    /// （如汽水给的《最伟大的作品》）也能比上。
+    private static func norm(_ s: String) -> String {
+        let simplified = s.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? s
+        let lowered = simplified.lowercased()
+        return lowered.applyingTransform(.fullwidthToHalfwidth, reverse: false)?
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined() ?? lowered
+    }
+
+    /// 双向匹配：归一化后，歌手与专辑名各取「相等 或 一方包含另一方」。
+    /// r29 task 2：歌手与专辑名各先按别名表展开（原串 + 组内全部写法），
+    /// 任一组合命中即算命中——简体输入配英文/繁体候选、繁体输入配简体候选、
+    /// 英文输入配中文候选都能过。匹配只认归一化后的歌手名/专辑名，不认平台。
+    static func matches(artist: String, album: String, candidateArtist: String, candidateAlbum: String) -> Bool {
         func hit(_ a: String, _ b: String) -> Bool {
-            let na = norm(a), nb = norm(b)
-            guard !na.isEmpty, !nb.isEmpty else { return false }
-            return na == nb || na.contains(nb) || nb.contains(na)
+            for x in expandedForms(of: a) {
+                for y in expandedForms(of: b) {
+                    let na = norm(x), nb = norm(y)
+                    guard !na.isEmpty, !nb.isEmpty else { continue }
+                    if na == nb || na.contains(nb) || nb.contains(na) { return true }
+                }
+            }
+            return false
         }
         return hit(artist, candidateArtist) && hit(album, candidateAlbum)
     }

@@ -12,10 +12,10 @@ import SwiftUI
 /// 列表用 List（swipeActions 只在 List 行上生效，ScrollView 里不生效），
 /// 行背景透明 + 隐藏系统分隔线，沿用原来的自定义 Divider，外观不变。
 ///
-/// 头部一行小按钮（r20 从顶栏 / 传输排撤下后搬到这里，功能接原来的
-/// store 调用，一个没丢）：
-/// - 循环模式切换：点按 `store.cycleRepeatMode()`（顺序 → 全部循环 → 单曲循环）。
-/// - 随机开关：点按 `store.setShuffled(!store.isShuffled)`。
+/// 头部只留：清空（二次确认）+ 共 N 首 + 关闭 X。
+/// 模式控制（循环 / 随机）不在这里——唯一入口是底部 v4 控制行
+/// `PlayerBottomDock` 的模式键（`cycleDockMode`）；r29 task 3 删了
+/// 头部重复的那两个按钮（用户真机报「为什么是 2 个控制器」）。
 struct QueuePanelView: View {
     @EnvironmentObject private var store: PlaybackStore
 
@@ -81,20 +81,10 @@ struct QueuePanelView: View {
         }
     }
 
-    // MARK: - 头部：循环模式切换 + 随机开关 + 数量 + 关闭
+    // MARK: - 头部：清空 + 数量 + 关闭（r29 task 3：模式键只留底部 v4 dock）
 
     private var headerRow: some View {
         HStack(spacing: 8) {
-            headerButton(icon: repeatIconName, title: repeatTitle, isActive: store.repeatMode != .off) {
-                store.cycleRepeatMode()
-            }
-            .accessibilityLabel("循环模式：\(repeatTitle)，点按切换")
-
-            headerButton(icon: "shuffle", title: "随机", isActive: store.isShuffled) {
-                store.setShuffled(!store.isShuffled)
-            }
-            .accessibilityLabel(store.isShuffled ? "随机播放已开，点按关闭" : "随机播放已关，点按开启")
-
             Spacer()
 
             if !store.queue.isEmpty {
@@ -132,49 +122,6 @@ struct QueuePanelView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-    }
-
-    /// 头部小按钮：图标 + 短文字的胶囊；激活态（循环开 / 随机开）用 accent。
-    private func headerButton(
-        icon: String,
-        title: String,
-        isActive: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 13, weight: .medium))
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .foregroundStyle(isActive ? PlayerTokens.accent : PlayerTokens.playerForeground)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                isActive ? PlayerTokens.accent.opacity(0.18) : Color.white.opacity(0.12),
-                in: Capsule()
-            )
-        }
-    }
-
-    // MARK: - 循环模式图标 / 文案（旧 PlayerView 的 modeButton 逻辑原样搬来，
-    // 只是拆成独立的循环按钮 + 随机按钮，不再点按切循环、长按切随机共用一个键）
-
-    private var repeatIconName: String {
-        switch store.repeatMode {
-        case .off: return "repeat"
-        case .all: return "repeat"
-        case .one: return "repeat.1"
-        }
-    }
-
-    private var repeatTitle: String {
-        switch store.repeatMode {
-        case .off: return "顺序"
-        case .all: return "循环"
-        case .one: return "单曲"
-        }
     }
 }
 

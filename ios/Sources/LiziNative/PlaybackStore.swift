@@ -86,6 +86,11 @@ final class PlaybackStore: ObservableObject {
     // MARK: - 内部
 
     private let player = AVPlayer()
+    /// r29 task 1：Apple Music 整首播放引擎（applicationMusicPlayer）。
+    private let appleMusicPlayer = AppleMusicPlayer()
+    /// 当前是否走 Apple Music 整首引擎（true 时 pause/resume/seek/进度都走它，
+    /// AVPlayer 那边是停着的；切到非 AM 的歌 / 回落试听时清掉）。
+    private var usingAppleMusicPlayer = false
     private let proxyLoader = AudioProxyLoader()
     private var timeObserver: Any?
     private var itemStatusObservation: NSKeyValueObservation?
@@ -419,17 +424,30 @@ final class PlaybackStore: ObservableObject {
         playTask = Task { @MainActor in await playCurrent(gen: gen) }
     }
 
-    /// 恢复播放。
+    /// 恢复播放（按当前引擎分流：AM 整首引擎 / AVPlayer）。
     func resume() {
         guard currentTrack != nil else { return }
         activateSessionOnce()
-        player.play()
+        if usingAppleMusicPlayer {
+            appleMusicPlayer.resume()
+        } else {
+            player.play()
+        }
         isPlaying = true
     }
 
     /// 暂停（锁屏系统卡保留暂停态；r28 已移除灵动岛，无活动可 end）。
+    /// AM 引擎播完队列后无当前曲目：resume 已无东西可续，引擎就此脱离，
+    /// 后续 resume 走 AV 路径（不编一次从头重播）。
     func pause() {
-        player.pause()
+        if usingAppleMusicPlayer {
+            appleMusicPlayer.pause()
+            if appleMusicPlayer.nowPlayingStoreID == nil {
+                stopAppleMusicEngine()
+            }
+        } else {
+            player.pause()
+        }
         isPlaying = false
     }
 
@@ -517,8 +535,13 @@ final class PlaybackStore: ObservableObject {
         }
     }
 
-    /// 跳到指定进度（秒）。
+    /// 跳到指定进度（秒；按当前引擎分流）。
     func seek(to time: TimeInterval) {
+        if usingAppleMusicPlayer {
+            appleMusicPlayer.seek(to: time)
+            progress = max(0, min(time, duration))
+            return
+        }
         guard let item = player.currentItem, item.status == .readyToPlay else { return }
         let target = CMTime(seconds: max(0, min(time, duration)), preferredTimescale: 600)
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
@@ -581,6 +604,7 @@ final class PlaybackStore: ObservableObject {
     /// 它 resolve 回来还会调 startItem 把歌重新起播，停播等于没停。
     func stop() {
         advanceGeneration()
+        stopAppleMusicEngine()
         player.pause()
         player.replaceCurrentItem(with: nil)
         isPlaying = false
@@ -588,6 +612,13 @@ final class PlaybackStore: ObservableObject {
         loginPromptPlatform = nil
         progress = 0
         currentTrack = nil
+    }
+
+    /// 停掉 Apple Music 整首引擎（切歌到非 AM / 回落试听 / 停播时调）；
+    /// 不动队列与当前曲目，只清引擎标记。
+    private func stopAppleMusicEngine() {
+        appleMusicPlayer.stop()
+        usingAppleMusicPlayer = false
     }
 
     /// 关掉登录提示信号（登录弹窗关掉 / 登录成功后调用方调；不碰播放状态）。
@@ -640,6 +671,18 @@ final class PlaybackStore: ObservableObject {
             self.lyrics = parsed.lines
             self.currentLyricIndex = LyricsParser.currentLineIndex(lines: parsed.lines, atMs: 0)
         }
+
+        // r29 task 1：Apple Music 全曲播放（条件：applemusic + Apple ID
+        // 已登录 + 订阅有效 + store id 非空；readyForFullPlayback 里
+        // 订阅缓存过期时先现验一次，重启后也能直接播整首）。起播成功
+        // 直接 return，不走 30 秒试听链；失败（起播失败等）回落到现有
+        // resolveURL → AVPlayer 试听流程，绝不崩、绝不卡在 isLoading。
+        if await AppleMusicAuth.shared.readyForFullPlayback(track: track) {
+            if await startAppleMusicTrack(track: track, gen: gen) { return }
+            DiagLog.shared.recordPlaybackStep("am fulltrack fallback to preview source=\(track.platform) id=\(track.id) gen=\(gen)")
+        }
+        // 非 AM 全曲路径：先停掉另一个播放器（AM 引擎可能还在播上一首 AM 的歌）。
+        stopAppleMusicEngine()
 
         let result = await resolveURL(for: track, gen: gen)
         // 第 22 轮第 5 件：resolve 回来先查代际（Moumusic 同款守卫）——
@@ -715,6 +758,109 @@ final class PlaybackStore: ObservableObject {
         didRecordFirstTimeUpdate = false
         isLoading = false
         isPlaying = true
+    }
+
+    // MARK: - Apple Music 整首播放（r29 task 1）
+
+    /// 用 applicationMusicPlayer 起播一首 Apple Music 全曲。
+    /// 返回 true = 已起播（调用方直接 return，不走试听链）；false =
+    /// 起播失败，调用方回落 resolveURL → AVPlayer 试听。
+    /// isTrial 绝不给整首播放的歌打上（全曲不是试听）；actualQuality
+    /// 不填（AM 全曲的实际档位播放器不回，不编）。
+    private func startAppleMusicTrack(track: Track, gen: Int) async -> Bool {
+        guard gen == currentPlayGeneration else { return false }
+        let storeID = AppleMusicAuth.storeID(for: track)
+        guard !storeID.isEmpty else { return false }
+        // 队列里从当前下标起连续的、有 store id 的 Apple Music 曲目拼成
+        // AM 队列；遇到非 AM / 无 store id 的歌就断开——AM 播完这段即停，
+        // onPlaybackEnded 再按 PlaybackStore 自己的队列逻辑走 next()。
+        var ids: [String] = []
+        for item in queue.dropFirst(max(currentIndex, 0)) {
+            let sid = AppleMusicAuth.storeID(for: item.track)
+            guard item.track.platform == "applemusic", !sid.isEmpty else { break }
+            ids.append(sid)
+        }
+        guard !ids.isEmpty, ids[0] == storeID else { return false }
+        // 切引擎：先停 AVPlayer 那边（两个播放器绝不同时出声）。
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        isPlaying = false
+        DiagLog.shared.recordPlaybackStep("am player start source=\(track.platform) id=\(track.id) storeID=\(storeID) queueCount=\(ids.count) gen=\(gen)")
+        wireAppleMusicCallbacks(gen: gen)
+        let ok = await appleMusicPlayer.play(storeIDs: ids, startAt: 0)
+        guard ok, gen == currentPlayGeneration else {
+            DiagLog.shared.recordPlaybackStep("am player start FAIL source=\(track.platform) id=\(track.id) gen=\(gen)")
+            return false
+        }
+        usingAppleMusicPlayer = true
+        activateSessionOnce()
+        startedTrackId = track.id
+        didRecordFirstTimeUpdate = false
+        isLoading = false
+        isPlaying = true
+        DiagLog.shared.recordPlaybackStep("am player started source=\(track.platform) id=\(track.id) gen=\(gen)")
+        return true
+    }
+
+    /// 接 AM 播放器的三个回调（每首 AM 全曲起播时重接；回调里先查代际，
+    /// 旧一代的回调绝不碰新歌的状态）。
+    private func wireAppleMusicCallbacks(gen: Int) {
+        appleMusicPlayer.onProgress = { [weak self] time, dur in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.usingAppleMusicPlayer, gen == self.currentPlayGeneration else { return }
+                guard time.isFinite else { return }
+                if !self.didRecordFirstTimeUpdate, time > 0 {
+                    self.didRecordFirstTimeUpdate = true
+                    DiagLog.shared.recordPlaybackStep("am playback time update first source=\(self.currentTrack?.platform ?? "-") id=\(self.currentTrack?.id ?? "-")")
+                }
+                self.progress = time
+                if dur.isFinite, dur > 0 { self.duration = dur }
+                let idx = LyricsParser.currentLineIndex(lines: self.lyrics, atMs: Int(time * 1000))
+                if idx != self.currentLyricIndex { self.currentLyricIndex = idx }
+            }
+        }
+        appleMusicPlayer.onNowPlayingItemChanged = { [weak self] storeID in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.usingAppleMusicPlayer, gen == self.currentPlayGeneration else { return }
+                guard let storeID, !storeID.isEmpty else { return } // nil = 队列播完，等 onPlaybackEnded
+                guard let current = self.currentTrack,
+                      AppleMusicAuth.storeID(for: current) != storeID else { return } // 仍是当前这首
+                guard let idx = self.queue.firstIndex(where: { AppleMusicAuth.storeID(for: $0.track) == storeID }) else { return }
+                let track = self.queue[idx].track
+                DiagLog.shared.recordPlaybackStep("am player auto-advance source=\(track.platform) id=\(track.id) gen=\(gen)")
+                self.currentIndex = idx
+                self.currentTrack = track
+                self.progress = 0
+                self.duration = track.durationSeconds
+                self.isLiked = self.likedIds.contains(Self.likeKey(for: track))
+                self.startedTrackId = track.id
+                self.didRecordFirstTimeUpdate = false
+                self.lyrics = []
+                self.currentLyricIndex = -1
+                self.lyricsTask?.cancel()
+                self.lyricsTask = Task { @MainActor in
+                    let parsed = await NativeBridge.lyrics(for: track)
+                    guard gen == self.currentPlayGeneration, !Task.isCancelled else { return }
+                    self.lyrics = parsed.lines
+                    self.currentLyricIndex = LyricsParser.currentLineIndex(lines: parsed.lines, atMs: 0)
+                }
+            }
+        }
+        appleMusicPlayer.onPlaybackEnded = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.usingAppleMusicPlayer, gen == self.currentPlayGeneration else { return }
+                DiagLog.shared.recordPlaybackStep("am player queue ended gen=\(gen)")
+                if self.repeatMode == .one {
+                    self.seek(to: 0)
+                    self.resume()
+                } else {
+                    self.next()
+                }
+            }
+        }
     }
 
     /// 监听当前 item 的状态与结束事件（每次换 item 都重建观察，避免旧观察串台）。
@@ -961,6 +1107,8 @@ final class PlaybackStore: ObservableObject {
     // MARK: - 进度（AVPlayer periodic time observer 驱动）
 
     private func handleTimeUpdate(_ time: CMTime) {
+        // AM 整首引擎期间进度由 AppleMusicPlayer 的 0.5s timer 推，这里不碰。
+        guard !usingAppleMusicPlayer else { return }
         guard let item = player.currentItem, item.status == .readyToPlay else { return }
         let seconds = time.seconds
         guard seconds.isFinite else { return }

@@ -908,15 +908,15 @@ struct PlayerView: View {
         .accessibilityHint("点按打开播放队列")
     }
 
-    /// 状态行是否真的占高（r26）：失败原因文案，或至少一个角标（实际音质 /
-    /// 试听 / 演示音）时为真。只按可见内容判定——有曲目但三个角标条件全不
-    /// 成立时 HStack 为空，不计入（该瞬态仍走旧 8/10 间距，不溢出，见文件底
+    /// 状态行是否真的占高（r26）：失败原因文案，或至少一个角标（试听 /
+    /// 演示音）时为真。只按可见内容判定——有曲目但两个角标条件全不
+    /// 成立时角标行整行不渲染，不计入（r29：实际音质角标已删，见
+    /// statusCapsules；该瞬态仍走旧 8/10 间距，不溢出，见文件底
     /// r26 总账注）。
     private var hasStatusRow: Bool {
         if store.errorMessage != nil { return true }
         guard store.currentTrack != nil else { return false }
-        return store.actualQuality != nil
-            || store.currentTrack?.isTrial == true
+        return store.currentTrack?.isTrial == true
             || store.isDemo
     }
 
@@ -971,8 +971,11 @@ struct PlayerView: View {
         return track.artist.isEmpty ? track.platform : track.artist
     }
 
-    /// 状态角标：只在有内容时出现 —— 实际音质（显示 = 实际返回档位，绝不显示
-    /// 请求档位）、试听、演示音。取链失败的原因由下面的 error 行明示，不静默。
+    /// 状态角标：只在有内容时出现 —— 试听、演示音。取链失败的原因由下面的
+    /// error 行明示，不静默。r29：歌名下方中间的实际音质角标已删（用户真机
+    /// 报「中间的杜比全景声显示也删除」），音质入口只剩底部第 3 排的音质
+    /// 芯片（PlayerBottomDock，点开 9 档选择器），actualQuality 取链与
+    /// 状态本身不动。
     /// 无曲目时什么都不显示（空态只有「未在播放」+ 副标题）。
     /// r26：compactStyle 只由竖屏 titleTexts 在 compact 档传 true（角标行
     /// 压缩：胶囊字 11→10、纵向 padding 2→1，行上间距 4→2；角标行总增量
@@ -1003,18 +1006,20 @@ struct PlayerView: View {
                     }
                 }
         } else if store.currentTrack != nil {
-            HStack(spacing: 6) {
-                if let quality = store.actualQuality {
-                    statusCapsule(quality.displayName, compactStyle: squeeze)
+            // r29：实际音质角标已删（只删显示，取链/状态不动）；角标行只剩
+            // 试听/演示。两个条件全不成立时整行不渲染——旧代码空 HStack +
+            // 上间距会留 6pt 幽灵高，删角标后这是常态（普通曲目），必须收掉。
+            if store.currentTrack?.isTrial == true || store.isDemo {
+                HStack(spacing: 6) {
+                    if store.currentTrack?.isTrial == true {
+                        statusCapsule("试听", compactStyle: squeeze)
+                    }
+                    if store.isDemo {
+                        statusCapsule("演示音", compactStyle: squeeze)
+                    }
                 }
-                if store.currentTrack?.isTrial == true {
-                    statusCapsule("试听", compactStyle: squeeze)
-                }
-                if store.isDemo {
-                    statusCapsule("演示音", compactStyle: squeeze)
-                }
+                .padding(.top, squeeze ? 2 : 4)
             }
-            .padding(.top, squeeze ? 2 : 4)
         }
     }
 
@@ -1072,7 +1077,8 @@ struct PlayerView: View {
 // （实账），本段数字只对 02/04/06 变体与横屏仍有效，不要拿本段数去核默认版式。
 // 段间距已按该总账对齐：顶栏→封面 6，封面→歌词区 8，歌词区→歌名块 8，
 // 歌名块→控制行 10，控制行→进度条 12。歌名块高 = titleSize×1.25 + 2
-// + subtitleSize×1.3；状态角标行（音质/试听/演示）有内容时再 +22。
+// + subtitleSize×1.3；状态角标行（r29 起只剩试听/演示，实际音质角标
+// 已删）有内容时再 +22。
 // 进度条按外框 32 计（视觉细条 4，触摸区 32，见 PlayerProgressBar.touchHeight），
 // 不是 4。r27：顶栏直径改固定 49pt（实测值，见 topBar 注释），三档总账各变
 // +5/+1/−3pt（compact 636→641、standard 779→780、large 854→851），仍全未超高；
@@ -1148,9 +1154,12 @@ struct PlayerView: View {
 //   歌词区 326；r25 已过，本轮不动。
 //   横屏：landscapeTitleTexts 传 compactStyle: false，titleBlock 只在
 //   竖屏用，横屏总账与胶囊顶边 10pt 一字不动。
-//   注：有曲目但三个角标条件全不成立时 HStack 为空，仍有上间距 4 + 间距
-//   2 = 6pt 幽灵高（旧代码即如此），固定段 511、歌词区 156 ≥ 150，不
-//   溢出；本轮不碰（瞬态，曲目质量一到即有角标）。
+//   注：r29 之前，有曲目但三个角标条件全不成立时 HStack 为空，仍有上间
+//   距 4 + 间距 2 = 6pt 幽灵高（固定段 511、歌词区 156 ≥ 150，不溢出；
+//   当时是瞬态，曲目质量一到即有角标）。r29 删了实际音质角标后无角标
+//   成了常态，statusCapsules 已改成两条件全不成立时整行不渲染，幽灵高
+//   归零；上面「角标态破 10pt」的旧账只对试听/演示角标出现时仍有效，
+//   普通曲目（无试听/演示）固定段 505、歌词区实得 162。
 //
 // r27 v4 底部三排（只改竖屏默认版式；02/04/06 变体与横屏仍用旧控制行 +
 // 细进度条，总账不动）：默认版式里 PlayerControlRow（68/60/76）+ 最底部

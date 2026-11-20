@@ -1,10 +1,8 @@
 import SwiftUI
 
-/// Apple Music 登录（r23e）：公开 API 匿名可用 + 开发者 token 粘贴入口。
+/// Apple Music 登录（r23e 建，r29 task 1 加 Apple ID 登录 + 整首播放）。
 ///
 /// 后端事实（AppleMusic.swift，不改）：
-/// - 没有其他登录方式：token 入口是唯一登录方式。本视图只有 token
-///   粘贴框 + 「保存 token」。
 /// - GET /api/applemusic/status（或 login/status）：
 ///   loggedIn = 开发者 token 经 catalog 校验有效；vip = 订阅有效
 ///   （另需 user token）；无 token 时 loggedIn=false，但搜索/推荐/歌单/
@@ -14,9 +12,12 @@ import SwiftUI
 ///   非 JWT 格式都回 loggedIn:false + error。
 /// - 开发者 token 是 ES256 JWT（kid + iss，6 个月 exp），用 Apple Developer
 ///   门户创建的 MusicKit key（.p8）签发，要付费开发者账号。
-/// - 即使 token 有效，songUrl 回的仍是 30 秒试听（previewUrl）：
-///   整首播放要原生 MusicKit 播放器，本轮未接——本视图绝不承诺整首播放。
-/// - logout（/api/applemusic/logout）清掉开发者 token 和 user token。
+/// - r29 task 1：Apple ID 登录（AppleMusicAuth：MusicKit 授权优先、
+///   StoreKit 兜底取 user token）+ 整首播放（AppleMusicPlayer：
+///   applicationMusicPlayer 按 store id 建队列）。登录且订阅有效时
+///   Apple Music 的歌播整首，否则仍是 30 秒试听。
+/// - logout（/api/applemusic/logout）清掉开发者 token 和 user token；
+///   本视图登出时还调 AppleMusicAuth.signOut() 清内存里的 user token。
 ///
 /// 接口契约（r23a 共享底座提供，本文件只调用、不自建）：
 /// - NativeBridge.call(path:method:body:)：带 JSON body 的重载，
@@ -34,6 +35,10 @@ struct AppleMusicLoginView: View {
     @State private var tokenValid = false
     @State private var subscriptionValid = false
     @State private var statusError = ""
+    // r29 task 1：Apple ID 登录态（user token 在盘上即 true；订阅现验）。
+    @State private var appleIDLoggedIn = false
+    @State private var appleIDSubscribed = false
+    @State private var appleIDBusy = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -60,13 +65,15 @@ struct AppleMusicLoginView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    Text("搜索走 Apple Music catalog；播放仍是 30 秒试听，整首播放需要原生 MusicKit 播放器（本轮未接）。")
+                    Text(appleIDLoggedIn && appleIDSubscribed
+                        ? "已登录 Apple ID 且订阅有效：Apple Music 的歌走原生播放器播整首。"
+                        : "搜索走 Apple Music catalog；播放仍是 30 秒试听，整首播放需要 Apple ID 登录 + 有效订阅（见下）。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
                     Text("未配置开发者 token（匿名可用）")
                         .font(.caption)
-                    Text("可搜索、看推荐/歌单、看歌词；播放是 30 秒试听。整首播放需要 Apple Developer 账号的 MusicKit 开发者 token，现在没有。")
+                    Text("可搜索、看推荐/歌单、看歌词；播放是 30 秒试听。整首播放需要 Apple ID 登录 + 有效订阅（见下）。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if !statusError.isEmpty {
@@ -79,6 +86,35 @@ struct AppleMusicLoginView: View {
                     Button("登出（清除已存 token）") { Task { await logout() } }
                         .disabled(isBusy)
                         .buttonStyle(.bordered)
+                }
+            }
+
+            Divider()
+
+            // 中段：Apple ID 登录（r29 task 1；开发者 token 仍是 MusicKit
+            // 必须的部分，粘贴区在下面原样保留）。
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Apple ID 登录")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                if appleIDLoggedIn {
+                    Text("Apple ID 已登录")
+                        .font(.caption)
+                    Text(appleIDSubscribed ? "订阅有效，可整首播放" : "未验证到订阅（整首播放不可用）")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("未登录（整首播放需要 Apple ID 登录 + 有效订阅）")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("先向系统请求 MusicKit 授权；未签名 IPA 无 MusicKit 能力、授权可能被拒，被拒时自动改走 StoreKit 兜底。登录只在本机存 user token，不上传、不显示完整值。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if !appleIDLoggedIn {
+                    Button("用 Apple ID 登录") { Task { await signInWithAppleID() } }
+                        .disabled(isBusy || appleIDBusy)
+                        .buttonStyle(.borderedProminent)
                 }
             }
 
@@ -109,7 +145,10 @@ struct AppleMusicLoginView: View {
             }
         }
         .padding()
-        .task { await refreshStatus() }
+        .task {
+            await refreshStatus()
+            await syncAppleIDState()
+        }
     }
 
     // MARK: - 状态（以 status 接口为准）
@@ -126,6 +165,32 @@ struct AppleMusicLoginView: View {
             tokenValid = (d["loggedIn"] as? Bool) ?? false
             subscriptionValid = (d["vip"] as? Bool) ?? false
             statusError = (d["error"] as? String) ?? ""
+        }
+    }
+
+    // MARK: - Apple ID 登录（r29 task 1）
+
+    private func signInWithAppleID() async {
+        await MainActor.run { appleIDBusy = true; isBusy = true }
+        defer { Task { @MainActor in appleIDBusy = false; isBusy = false } }
+        let result = await AppleMusicAuth.shared.signIn()
+        await refreshStatus()
+        await MainActor.run {
+            appleIDLoggedIn = AppleMusicAuth.shared.isLoggedIn
+            appleIDSubscribed = AppleMusicAuth.shared.subscriptionValid
+            message = result.message
+            messageIsError = !result.success
+        }
+    }
+
+    /// 同步 Apple ID 登录态（打开页 / 刷新后调：user token 在盘上时
+    /// 登录态即 true；订阅现验一次，300 秒缓存内不重复发请求）。
+    private func syncAppleIDState() async {
+        let loggedIn = AppleMusicAuth.shared.isLoggedIn
+        let sub = loggedIn ? await AppleMusicAuth.shared.verifySubscription() : false
+        await MainActor.run {
+            appleIDLoggedIn = loggedIn
+            appleIDSubscribed = sub
         }
     }
 
@@ -182,9 +247,14 @@ struct AppleMusicLoginView: View {
     private func logout() async {
         await MainActor.run { isBusy = true }
         defer { Task { @MainActor in isBusy = false } }
+        // 先清 Apple ID 登录态（user token：UserDefaults + 内存缓存），
+        // 再走后端登出（同时清开发者 token 和 user token）。
+        AppleMusicAuth.shared.signOut()
         await LoginStore.logout(platform: "applemusic")
         await refreshStatus()
         await MainActor.run {
+            appleIDLoggedIn = false
+            appleIDSubscribed = false
             if tokenValid {
                 message = "登出后 token 仍有效，请重试"
                 messageIsError = true

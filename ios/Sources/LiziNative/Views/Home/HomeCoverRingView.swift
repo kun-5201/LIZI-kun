@@ -243,6 +243,49 @@ import UIKit
 ///   做法，原生用深色渐变 + music.note），FlatRingCard 与 RingCardView 共用
 ///   DefaultCoverArt；URL 有但加载失败的白占位在 CoverImageView.swift 里，
 ///   本文件动不了，见交回残留。
+///
+/// r31（2026-11-21，环跟着面板走，用户 05:37 已定，不等截图直接做）：
+/// - 根因：`ringCenterY` 从 ring.js 照搬了 cy 上下限夹取
+///   （顶栏底 + 卡高×0.55 + 12 / 屏底 − 卡高×0.55 − 52 − 下坠），
+///   竖屏上限 663pt、横屏上限 194pt；Hero 拖大后带心约 775pt、横屏
+///   带心约 433pt，都被钉回上限，环与带子脱节——用户原话「中心钉在
+///   屏幕 0.5/0.48 不动」。变暗中心也固定在 UnitPoint(0.5, 0.48)，
+///   卡片动了、光晕不动，脱节更明显。
+/// - 改法（只动定位）：`ringCenterY` 去夹取，环中心 = stripCenter
+///   （横向 panelRect 本来就是 stripCenter.x，纵向现在也是），
+///   没量到才回落屏高 ×0.62；变暗中心改成同一个环中心
+///   （body 里 ringCy/ringCx 一处算出，卡片与光晕同锚点）；
+///   命中测试与 ringLayer 共用 ringCenterY，点按盒跟着走。
+///   夹取删除后，带子被滚到屏顶/屏底边缘时环跟着过去（可能半遮顶栏
+///   或出屏），这是「跟着面板走」的本意；环开着时覆盖层挡住触摸，
+///   本来也滚不动页面、拖不了分界手柄，面板动只剩旋转与布局变化。
+/// - 不动：转动机制（跟手 perPixel、110ms 采样 ±1400°/s、τ=1.08s 投影 +
+///   弹簧 118 吸附、只露正面、收回时机）、展开手势（跑马带左右拖动，
+///   不要上滑）、变暗三档、一次 3 张、面板裁切。驱动见
+///   verification/r31-ring.cjs。
+///
+/// r31（2026-11-21，跑马带平滑 + 其余 5 个来源也走卡片跑马带，见 HomeView.swift）：
+/// - 驱动：30Hz Timer → CADisplayLink（本文件 `startFlatTimer` /
+///   `tickFlat(dt:)`）。用户原话「跑马灯都不走，一直一卡一卡的」——
+///   根因是驱动，不是速度值（24px/s 验算没错）：
+///   ① 30Hz 下每步 0.8px，在 60/120Hz 屏上每帧都是一次离散跳变，
+///   肉眼就是一顿一顿；② Timer 回调还要经 `Task { @MainActor in }`
+///   跳一次主线程，调度抖动会丢步、停滞；③ flatOffsetX 是本模型
+///   （环状态机）的 @Published，每跳都让整个环视图重新求值
+///   （播放进度 0.25s 也在推同一批观察者），主线程一挤就卡。
+///   改成 display link 后每帧一步（60Hz 约 0.4px、120Hz 约 0.2px），
+///   步长按真实帧间隔 dt（link.timestamp 差，上限夹 0.1s）算，
+///   丢帧后下一步自动补上，位移严格按速度×时间走；回调经弱引用
+///   代理跳主线程（display link 强持 target，不用代理模型永远不释放，
+///   见 `FlatDisplayLinkProxy`）。初画停 2.5s、松手 1.2s 恢复、
+///   10s 看门狗、环开着停带、速度 24px/s 一律不动。
+///   取色已核过：AlbumToneExtractor 是 32×32 采样 + k=4 最多 10 轮，
+///   毫秒级，且只在切歌时跑一次，不是卡顿来源，不动它；
+///   实现是 offset 位移（不是 ScrollView 编程式滚动），没有 layout
+///   跳变；回卷只按一份宽度归一化，不跳整张卡宽。
+/// - DefaultCoverArt 去掉 private：其余 5 个来源的跑马带卡片共用同一份
+///   默认封面（见 HomeView.swift `RailMarqueeCardView`）。环的几何、
+///   开环触发（只剩平面带横向拖动）、收回、变暗一律不动。
 
 // MARK: - 状态机
 
@@ -278,18 +321,21 @@ final class HomeCoverRingModel: ObservableObject {
     @Published var flatDwellUntil = Date().addingTimeInterval(2.5)
     /// 平面带按压开始的时间（非 Published：只给 tickFlat 的看门狗读）。
     var flatDraggingSince: Date?
-    /// 平面跑马带驱动（r26，见文件头）：模型自持的 30Hz Timer，一次创建、
-    /// `.common` 模式；block 只持 weak self。模型释放时 deinit 停表——
-    /// Timer 经 RunLoop.main.add 后由 RunLoop 强持有，模型走了它不会跟着
-    /// 走；HomeView 每次切页回来都重建（RootView `.home` 分支新建
-    /// HomeView → 新 HomeCoverRingModel），不停表就会每回首页漏一个
-    /// 30Hz 空转 Timer（每 33ms 空跑一个 Task）。
-    private var flatTimer: Timer?
+    /// 平面跑马带驱动（r31：r26 的 30Hz Timer → CADisplayLink，见文件头）：
+    /// 一次创建、`.common` 模式；display link 经 RunLoop 强持，模型走了
+    /// 它不会跟着走——回调走弱引用代理（`FlatDisplayLinkProxy`），不让
+    /// link 强持模型造成循环引用；HomeView 每次切页回来都重建
+    /// （RootView `.home` 分支新建 HomeView → 新 HomeCoverRingModel），
+    /// 模型释放时 deinit 停表，不停每回首页漏一个空转驱动。
+    /// 上一帧时间戳（回调算 dt 用；0 = 还没走过第一帧）。
+    private var flatDisplayLink: CADisplayLink?
+    private var flatLinkProxy: FlatDisplayLinkProxy?
+    private var flatLastTimestamp: CFTimeInterval = 0
 
-    /// 模型走时停掉自己的 Timer（r26 补，见上面 flatTimer 注释）：
+    /// 模型走时停掉自己的 display link（r26 补 Timer 版，r31 同款）：
     /// 不停，RunLoop 会一直强持它空转；停了，下次回首页新模型重新
     /// startFlatTimer，不影响跑马带恢复。
-    deinit { flatTimer?.invalidate() }
+    deinit { flatDisplayLink?.invalidate() }
     /// 平面带上的按压判定（非 Published：只在手势闭包里读写，不驱动渲染）。
     var stripPress: StripPress?
 
@@ -444,22 +490,40 @@ final class HomeCoverRingModel: ObservableObject {
     // MARK: 平面跑马带
 
     /// 驱动只建一次（幂等；syncInputs 首行即调，首个 sync 就是 onAppear）。
-    /// r26：不用 View 结构体的 `Timer.publish(...).autoconnect()`——它每次
-    /// body 重算都重建 publisher 并重新订阅，33ms 倒计时反复重启，计时器
-    /// 可能永远等不到触发（r25 的断点 1，见文件头）。模型自持 Timer 不随
-    /// body 重建；`.common` 模式：页面滚动（tracking mode）时也照走，
-    /// 与旧 publisher 的 `.common` 同款。`Task { @MainActor in }` 跳主
-    /// 线程调 tickFlat（与 closeRing / scheduleHoldClose 同款写法）。
+    /// r31：r26 的模型自持 30Hz Timer → CADisplayLink（见文件头）——
+    /// View 结构体的 `Timer.publish(...).autoconnect()` 不能用（r25 断点 1：
+    /// 每次 body 重算都重建 publisher 并重新订阅，33ms 倒计时反复重启，
+    /// 计时器可能永远等不到触发）；30Hz Timer 同样不能用（用户 2026-11-21
+    /// 「一卡一卡」：0.8px/步的离散跳变 + Task 跳主线程的调度抖动）。
+    /// display link 跟屏幕刷新同步、`.common` 模式（页面滚动时也走，
+    /// 与旧 Timer 的 `.common` 同款）；回调经弱引用代理进主线程
+    /// （`FlatDisplayLinkProxy`，display link 强持 target，不代理就漏），
+    /// 步长在 tickFlat 里按真实帧间隔 dt 算。
     func startFlatTimer() {
-        guard flatTimer == nil else { return }
-        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tickFlat() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        flatTimer = timer
+        guard flatDisplayLink == nil else { return }
+        let proxy = FlatDisplayLinkProxy(model: self)
+        let link = CADisplayLink(target: proxy, selector: #selector(FlatDisplayLinkProxy.fired(_:)))
+        link.add(to: .main, forMode: .common)
+        flatLinkProxy = proxy
+        flatDisplayLink = link
     }
 
-    func tickFlat() {
+    /// display link 回调（主线程）：按真实帧间隔 dt 推进跑马带。
+    /// dt 从 link.timestamp 差算（不是回调到达时间，所以 Task 跳主线程
+    /// 的几毫秒延迟不扭曲步长）；第一帧没有上一帧，用 1/60s 起步。
+    /// r31 前是 30Hz Timer：每步 0.8px 离散跳变，肉眼一顿一顿。
+    fileprivate func flatDisplayLinkFired(_ link: CADisplayLink) {
+        let dt: CFTimeInterval
+        if flatLastTimestamp == 0 {
+            dt = 1.0 / 60.0
+        } else {
+            dt = link.timestamp - flatLastTimestamp
+        }
+        flatLastTimestamp = link.timestamp
+        tickFlat(dt: dt)
+    }
+
+    func tickFlat(dt: CFTimeInterval = 1.0 / 60.0) {
         // r26 看门狗：flatDragging 只由 stripTouchBegan 置起、只由
         // stripTouchEnded 清掉；一旦某次触摸的 ended 没走到模型（识别器
         // .failed、触摸被系统取消、触摸层中途被拆掉），旗子就永远卡住、
@@ -474,7 +538,13 @@ final class HomeCoverRingModel: ObservableObject {
         }
         guard !tracks.isEmpty, flatSetWidth > 0, !flatDragging,
               ringPhase == .closed, Date() >= flatDwellUntil else { return }
-        flatOffsetX = normalizedFlat(flatOffsetX - marqueeSpeed / 30)
+        // r31：步长 = 速度 × 真实帧间隔。dt 夹取：后台回来 / 卡顿后第
+        // 一帧 timestamp 差可能很大，不夹会一次跳几十 px（跳变）；
+        // 夹到 0.1s 后一步最多 2.4px，肉眼仍是连续的；dt <= 0
+        // （时钟异常）时不动，不倒走。60Hz 约 0.4px/步、120Hz 约 0.2px/步。
+        let clamped = min(max(dt, 0), 0.1)
+        guard clamped > 0 else { return }
+        flatOffsetX = normalizedFlat(flatOffsetX - marqueeSpeed * CGFloat(clamped))
     }
 
     /// 把偏移收进 (-setWidth, 0]，两份循环无缝（DailyMarqueeView 同款）。
@@ -853,22 +923,21 @@ final class HomeCoverRingModel: ObservableObject {
         effectiveRadius() * facing * sin(5 * .pi / 180)
     }
 
-    /// 环中心纵坐标（r26-3D，壳版 openRing 的 cy 上下限，原样照搬）：
-    /// 默认带子中心（stripCenter 还没量到时回落屏高 ×0.62，r24 同款）；
-    /// 上限 = 顶栏底 + 卡高×0.55 + 12，下限 = 屏底 − 卡高×0.55 − 52 − 下坠
-    /// （下坠取满半径 R·sin5°，与壳版 tiltDrop 同值）。
-    /// 平时带子在屏中部不触发；带子被滚到屏顶附近才把环往下夹，不再顶到
-    /// 顶栏/灵动岛底下。`topEdge` = 顶栏底边（HomeView 顶栏：竖屏 31+64、
-    /// 横屏 0+64，调用方传）。
+    /// 环中心纵坐标（r31，用户 2026-11-21 05:37 已定：环跟着面板走）：
+    /// 就是带子中心 stripCenter.y，不再夹取——r26-3D 从 ring.js 照搬的
+    /// 上下限（顶栏底 + 卡高×0.55 + 12 / 屏底 − 卡高×0.55 − 52 − 下坠）
+    /// 在这里作废：Hero 拖大后带心约 775pt、横屏带心约 433pt，都远超
+    /// 旧上限（竖屏 663 / 横屏 194），环会被钉在固定高度、与带子脱节
+    /// （用户原话「中心钉在屏幕 0.5/0.48 不动」就是这副样子）。
+    /// stripCenter 还没量到时回落屏高 ×0.62（r24 同款）；`topEdge`
+    /// 不再用于夹取，保留参数免得改两处调用点（ringLayer / hitTestRingCard）。
+    /// 锚点是活的：stripCenter 是 @Published，带子每动一帧（滚动、
+    /// 拖分界手柄改尺寸、旋转）都经 StripCenterKey 偏好重报，body 重算，
+    /// 环中心跟着走；不经 withAnimation，没有插值滞留与跳变。
+    /// 命中测试与 ringLayer 用同一个函数，点按盒与眼睛看到的卡片一致。
     func ringCenterY(screenHeight: CGFloat, topEdge: CGFloat) -> CGFloat {
-        var cy = stripCenter.y > 0 ? stripCenter.y : screenHeight * 0.62
-        let minCy = topEdge + ringCardHeight * 0.55 + 12
-        let maxCy = screenHeight - ringCardHeight * 0.55 - 52
-            - ringRadius * sin(5 * .pi / 180)
-        cy = max(cy, minCy)
-        cy = min(cy, maxCy)
-        if cy < minCy { cy = minCy }
-        return cy
+        _ = topEdge
+        return stripCenter.y > 0 ? stripCenter.y : screenHeight * 0.62
     }
 
     /// 面板横向范围（r30 v5：侧卡由面板圆角 mask 裁切，不溢出面板外）：
@@ -888,8 +957,8 @@ final class HomeCoverRingModel: ObservableObject {
     /// r24：纵向锚点与 ringLayer 同款回落——stripCenter 还没量到时
     /// （如按钮在布局前被点到）用屏高 ×0.62，不再拿 y=0 去比（那会让
     /// 点卡永远判空）；screenHeight 不传时回落 0，即只信 stripCenter。
-    /// r26-3D：纵坐标与 ringLayer 用同一个 `ringCenterY`（含上下限夹取），
-    /// 再按槽位加各自的 `tiltDrop`（-5° 下坠，越靠两侧越小），命中盒与
+    /// r26-3D：纵坐标与 ringLayer 用同一个 `ringCenterY`（r31 起不夹取，
+    /// 跟带子走），再按槽位加各自的 `tiltDrop`（-5° 下坠，越靠两侧越小），命中盒与
     /// 眼睛看到的卡片位置一致；不加下坠时前排卡的命中盒会比实物高 20pt。
     func hitTestRingCard(at point: CGPoint, screenWidth: CGFloat, screenHeight: CGFloat? = nil, topEdge: CGFloat = 95) -> Int? {
         // r30：面板外的点按不算点卡（侧卡被面板裁掉的部分看不见，点那里
@@ -1150,11 +1219,13 @@ private struct FlatRingCard: View {
     }
 }
 
-/// 没封面的默认封面（r30，FlatRingCard / RingCardView 共用）：
+/// 没封面的默认封面（r30，FlatRingCard / RingCardView 共用；
+/// r31：去掉 private，其余 5 个来源的跑马带卡片共用同一份，
+/// 见 HomeView.swift `RailMarqueeCardView`）：
 /// 深色渐变底 + music.note，绝不摆白卡。壳版 `.mring__card.is-empty`
 /// 是深色底 +「无封面」字；原生占位图标沿用 music.note（CoverImageView
 /// 同款图标），只把白底换成与深场面板/变暗后环面同色的深色渐变。
-private struct DefaultCoverArt: View {
+struct DefaultCoverArt: View {
     let iconSize: CGFloat
 
     var body: some View {
@@ -1177,6 +1248,24 @@ private struct FlatSetWidthKey: PreferenceKey {
     }
 }
 
+/// r31：display link 回调代理。CADisplayLink 强持 target，模型直接当
+/// target 会循环引用、deinit 永远不走（r26 Timer 漏表同款泄漏）；代理
+/// 只弱持模型，模型释放时 deinit 停表，link 随模型一起释放。
+/// 回调在主线程 RunLoop 上触发，跳主线程用 `Task { @MainActor in }`
+/// （与 r26 Timer 版同款写法）；dt 从 link.timestamp 算，不受这
+/// 几毫秒延迟影响。
+private final class FlatDisplayLinkProxy: NSObject {
+    weak var model: HomeCoverRingModel?
+
+    init(model: HomeCoverRingModel) {
+        self.model = model
+    }
+
+    @objc func fired(_ link: CADisplayLink) {
+        Task { @MainActor in self.model?.flatDisplayLinkFired(link) }
+    }
+}
+
 private struct StripCenterKey: PreferenceKey {
     static var defaultValue: CGRect = .zero
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
@@ -1195,9 +1284,16 @@ struct HomeRingOverlayView: View {
 
     var body: some View {
         GeometryReader { geo in
+            // r31：环锚点（变暗中心与环中心同点）——横向面板中心、
+            // 纵向带子中心，见 ringCenterY / panelRect；面板动，锚点就动。
+            // 旧的固定屏中心 (0.5, 0.48) 只在尺寸量不到时作回落。
+            let ringTopEdge: CGFloat = geo.size.width > geo.size.height ? 64 : 95
+            let ringCy = model.ringCenterY(screenHeight: geo.size.height, topEdge: ringTopEdge)
+            let ringCx = model.panelRect(screenWidth: geo.size.width).centerX
             ZStack {
-                // 全屏径向变暗（壳版 .mring 背景；中心 50% 48%）。
-                radialScrim(size: geo.size)
+                // 全屏径向变暗（r31：中心跟环走，不再是固定 50% / 48%；
+                // 三档 0.36/0.58/0.78 与半径不动）。
+                radialScrim(size: geo.size, centerX: ringCx, centerY: ringCy)
                 // 拖动时顶部再暗一档（视频：拖动时顶部大卡片变暗；常态开环
                 // 已有上面的径向变暗，这一层只在手指转环时出现）。
                 LinearGradient(
@@ -1241,9 +1337,13 @@ struct HomeRingOverlayView: View {
         .ignoresSafeArea()
     }
 
-    private func radialScrim(size: CGSize) -> some View {
+    private func radialScrim(size: CGSize, centerX: CGFloat, centerY: CGFloat) -> some View {
         let dark = Color(red: 9 / 255, green: 10 / 255, blue: 16 / 255)
         let darker = Color(red: 5 / 255, green: 6 / 255, blue: 10 / 255)
+        // r31：变暗中心 = 环中心（调用方按 stripCenter 算出）；尺寸量不到时
+        // 回落屏中心 (0.5, 0.48)。三档与半径见下，不动。
+        let ux = size.width > 0 ? centerX / size.width : 0.5
+        let uy = size.height > 0 ? centerY / size.height : 0.48
         // r28：0.36/0.58/0.78——39.6s 新视频整页实测 0.42 倍（f_001 均值
         // 121.3 → f_050 51.4）；旧 0.40/0.70/0.88 按面积均值算约 0.26 倍，
         // 太暗（Hero 区实测 0.40 倍、顶栏 0.31 倍，新值约 0.49/0.33，见交回）。
@@ -1253,7 +1353,7 @@ struct HomeRingOverlayView: View {
                 .init(color: dark.opacity(0.58), location: 0.56),
                 .init(color: darker.opacity(0.78), location: 1),
             ]),
-            center: UnitPoint(x: 0.5, y: 0.48),
+            center: UnitPoint(x: ux, y: uy),
             startRadius: 0,
             endRadius: max(size.width, size.height) * 0.62
         )
@@ -1261,7 +1361,7 @@ struct HomeRingOverlayView: View {
 
     /// 圆柱环：容器框在环中心（平面带中心），卡按世界角排布；
     /// 容器整体 rotateX(-5°)（壳版 camera 同款），转轴就是环中心。
-    /// r26-3D：纵向锚点走 `ringCenterY`（ring.js 上下限夹取）；每张卡再
+    /// r26-3D：纵向锚点走 `ringCenterY`（r31 起不夹取，环中心 = 带子中心）；每张卡再
     /// 下坠各自的 `tiltDrop`（相机 -5°，正前方约 20pt、两侧渐小）——
     /// 原生之前 z=0 平面排布、容器旋转不产生下坠，环整体比视频高约 20pt。
     /// r30 v5：环层按面板宽框住 + 圆角 22 裁切（dailyPanel 同值），侧卡

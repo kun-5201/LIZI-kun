@@ -52,7 +52,7 @@ enum NativeBridge {
         var isPreview: Bool
         /// 失败原因（vip / unavailable / login / region / drm / network；成功时为空）。
         var reason: String
-        /// 这条地址从哪来（platform / cloud / lx / demo / local）。
+        /// 这条地址从哪来（platform / cloud / lx / local）。
         var via: String
         /// 实际码率 bps（上游给了才有）。
         var bitrate: Int

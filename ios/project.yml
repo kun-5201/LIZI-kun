@@ -228,6 +228,12 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # r28：灵动岛已移除，NSSupportsLiveActivities 相关 key 全删（构建设置与
         # 下面 info.properties 两处都删）。
+        # r31：Apple Music 登录闪退根因——全仓缺 NSAppleMusicUsageDescription，
+        # signIn 直调 MusicAuthorization.request() 时系统在弹框前直接杀进程
+        #（SIGABRT，不回 .denied）；StoreKit 弹框同样要这个 key。按壳版
+        # NSSupportsLiveActivities 双写惯例：构建设置 + 下面 info.properties
+        # 各写一遍，值一致。
+        INFOPLIST_KEY_NSAppleMusicUsageDescription: "Apple Music 登录与整首播放需要访问你的 Apple Music 资料"
     info:
       # info.path 是 XcodeGen 必填项（缺了整个 spec 解码失败，run 44537599094
       # 证实）——它不是「读磁盘上已有的 plist」，而是 XcodeGen 生成工程时
@@ -244,6 +250,10 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UIBackgroundModes:
           - audio
+        # r31：Apple Music 授权说明（见上面 settings 注释）：缺这个 key 时
+        # 系统弹授权框前直接杀进程（SIGABRT），StoreKit 兜底路同样崩；
+        # 构建设置里再写一遍（INFOPLIST_KEY_…），双保险，值一致。
+        NSAppleMusicUsageDescription: "Apple Music 登录与整首播放需要访问你的 Apple Music 资料"
         # P3-D 打磨：Fraunces 随包字体注册（族名 Fraunces；文件见
         # Sources/LiziNative/Fonts/，resources 负责拷进包）。
         # 字体进包后 DesignTokens.liziDisplay 用 Font.custom("Fraunces")。

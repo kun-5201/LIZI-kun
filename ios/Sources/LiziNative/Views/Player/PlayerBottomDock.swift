@@ -145,7 +145,7 @@ struct PlayerBottomDock: View {
     }
 
     /// 下载键（DownloadStore.shared；图标按状态换：空闲箭头 / 下载中环形
-    /// 进度 / 下完勾 / 失败红三角点按重试；演示音与试听片段不下载，
+    /// 进度 / 下完勾 / 失败红三角点按重试；试听片段不下载，
     /// 见 DownloadStore；本地歌直接显示勾）。
     private var downloadCell: some View {
         let track = store.currentTrack
@@ -160,7 +160,7 @@ struct PlayerBottomDock: View {
         }) {
             downloadIcon(state: state)
         }
-        .disabled(track == nil || store.isDemo)
+        .disabled(track == nil)
         .accessibilityLabel(downloadAccessibilityLabel(state: state))
         .accessibilityValue(downloadAccessibilityValue(state: state))
     }

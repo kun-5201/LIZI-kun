@@ -74,8 +74,8 @@ final class HomeViewModel: ObservableObject {
     @Published var lastTrack: Track?
     @Published var lastPlayedAt: Date?
 
-    /// 跑马带速度（px/s；30Hz 定时器每跳走 `marqueeSpeed / 30`，
-    /// 见 HomeCoverRingView.tickFlat，所以本值本身就是 px/s）。
+    /// 跑马带速度（px/s；r31 起 display link 每帧走 `速度 × 真实帧间隔 dt`，
+    /// 见 HomeCoverRingView.tickFlat(dt:)，所以本值本身就是 px/s）。
     /// r28：壳版 app.js marqSpeedOf 的斜率是 0.011，默认 24 →
     /// (0.10 + 24×0.011)×60 = 21.84 px/s；规格（ring.js
     /// MARQUEE_SPEED）要 24 px/s，斜率改 0.0125：

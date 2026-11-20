@@ -5,8 +5,9 @@ import Foundation
 /// 播放状态机（P1 填实）：AVPlayer 封装 + 队列 + 取链编排器。
 ///
 /// 取链编排（照抄壳版 public/player.js fetchTrackUrl 的顺序）：
-/// - 有会员（已登录 AND 有 VIP 信号）→ 平台官方 → 已登录个人云盘 → LX → 演示音
-/// - 没会员（没登录 / 登录了但没会员 / 状态取不到）→ LX 先 → 平台 → 云盘 → 演示音
+/// - 有会员（已登录 AND 有 VIP 信号）→ 平台官方 → 已登录个人云盘 → LX
+/// - 没会员（没登录 / 登录了但没会员 / 状态取不到）→ LX 先 → 平台 → 云盘
+///   （r31：提示音兜底已删，全失败直接报错，保持静默，不出声）
 ///   （LX 先是为了拿整首：没会员时官方常只给 30 秒试听；LX 拿不到再回官方，
 ///   但 VIP 歌的试听地址直接拒掉，不放试听片段）
 /// - 波点：r26 起走 LX（bd 映射已开；但赞助源与 LX 官方源今天都不声明
@@ -58,8 +59,6 @@ final class PlaybackStore: ObservableObject {
     @Published private(set) var loginPromptPlatform: String?
     /// 当前曲目的实际音质档位（显示音质 = 这个，绝不显示请求的档位）。
     @Published private(set) var actualQuality: AudioQuality?
-    /// 是否正在放演示音（取链全失败时的最后一档；不是真歌，UI 要标出来）。
-    @Published private(set) var isDemo: Bool = false
     /// 当前歌词行（官方 → LRCLIB；无词时为空，UI 显示歌名）。
     @Published private(set) var lyrics: [LyricLine] = []
     /// 当前歌词行下标；无词 / 还没开始时为 -1。
@@ -136,7 +135,6 @@ final class PlaybackStore: ObservableObject {
     private var fallbackRetried = false
     /// r26：LX 死链降档重试只做一次（见 handlePlaybackFailure 2a）。
     private var lxDowngradeRetried = false
-    private var demoTried = false
     private var currentAssetURL: URL?
     private var audioSessionActivated = false
     private var wasPlayingBeforeInterruption = false
@@ -649,7 +647,6 @@ final class PlaybackStore: ObservableObject {
         proxyTried = false
         fallbackRetried = false
         lxDowngradeRetried = false
-        demoTried = false
         // 第 22 轮第 5 件：入口第一步就记 "play start"（带 gen）——之前它
         // 记在 @Published 赋值之后，tap→entry 之间是黑洞；现在分两步：
         // entry（Task 调度到了）与 state set（赋值完成），死在哪一段
@@ -658,7 +655,6 @@ final class PlaybackStore: ObservableObject {
         isLoading = true
         errorMessage = nil
         loginPromptPlatform = nil
-        isDemo = false
         actualQuality = nil
         progress = 0
         duration = track.durationSeconds
@@ -706,7 +702,7 @@ final class PlaybackStore: ObservableObject {
             return
         }
         guard let result, let url = result.url else {
-            // 取链全失败：不放演示音冒充，直接报错（演示音只在播放阶段兜底，见 handlePlaybackFailure）。
+            // 取链全失败：直接报错（r31：提示音兜底已删，失败即静默报错，不出声）。
             isLoading = false
             isPlaying = false
             errorMessage = result?.reason ?? "unavailable"
@@ -734,7 +730,7 @@ final class PlaybackStore: ObservableObject {
     /// 面包屑（startItem begin / set src / play called / item ready /
     /// item failed / 首次进度），崩在播放启动段时下次诊断直接定位到步；
     /// 非 http(s)/代理/file 的地址直接拒掉（LX 只回 http(s)，平台只回
-    /// http(s)，演示音是 file——别的 scheme 进 AVPlayer 没有意义，
+    /// http(s)，本地文件是 file——别的 scheme 进 AVPlayer 没有意义，
     /// 只会把失败推迟到 item failed，还不如在这里明说）。
     private func startItem(url: URL, track: Track, gen: Int) async {
         // 播放生命周期认 currentPlayGeneration（开始播那首歌的那一代），
@@ -937,13 +933,14 @@ final class PlaybackStore: ObservableObject {
     }
 
     /// 地址进了播放器才发现是死的（代理 502/403、解码失败）时的重试链
-    /// （照抄 player.js tryProxyFallback + retryWithFallback + 演示音兜底）：
+    /// （照抄 player.js tryProxyFallback + retryWithFallback；
+    /// r31：提示音兜底已删）：
     /// 1) 同一条地址走音频代理再试一次（每首只一次）；
     /// 2a：LX 死链降一档再试 LX（r26：QQ 的 flac24bit 链实测 403、320k
-    ///   是活的；旧代码重跑同档只会拿到同一条死链，再直接掉演示音）；
+    ///   是活的；旧代码重跑同档只会拿到同一条死链，再直接报错）；
     /// 2b：按优先级往下一档重试一次（platform → cloud/LX；LX 死链且无档
     ///   可降时走平台腿——lx-first 时平台腿还没跑过，只跳 LX 不跳平台）；
-    /// 3) 再失败放演示音（界面照常走完，角标 reason 说清真正原因）。
+    /// 3) 再失败直接报错（errorMessage 显示真正原因，保持静默，不出声）。
     private func handlePlaybackFailure(gen: Int) async {
         guard gen == currentPlayGeneration, let track = currentTrack else { return }
         // 1) 代理兜底（直链失败可能是 CDN 临时抽风 / CORS 抖动）。
@@ -990,17 +987,9 @@ final class PlaybackStore: ObservableObject {
                 return
             }
         }
-        // 3) 演示音兜底（第 11 轮第 8 件：取链失败走演示音、播放失败也走演示音）。
-        // demoTried 护栏：演示音本身播失败时不再重进这一档，否则死循环。
-        if !demoTried, let demoURL = DemoTone.url(), gen == currentPlayGeneration {
-            demoTried = true
-            DiagLog.shared.recordPlaybackStep("play FAIL, fallback to demo source=\(track.platform) id=\(track.id) reason=\(lastFetchReason)")
-            isDemo = true
-            actualQuality = nil
-            errorMessage = nil
-            await startItem(url: demoURL, track: track, gen: gen)
-            return
-        }
+        // 3) r31：提示音兜底已删——全档重试耗尽后不再合成/播放任何提示音，
+        // 直接落到下面的失败终态（isPlaying = false + errorMessage = 真正
+        // 原因，PlayerView 红字照常显示），保持静默。
         isLoading = false
         isPlaying = false
         errorMessage = lastFetchReason.isEmpty ? "unavailable" : lastFetchReason
@@ -1115,8 +1104,7 @@ final class PlaybackStore: ObservableObject {
     }
 
     /// r27 下载用：复用播放取链整条编排（resolveURL：官方 → 云盘 → LX；
-    /// 演示音不在 resolveURL 里，取链全失败时只回失败原因、不回演示音地址，
-    /// 所以下载永远拿不到演示音，不用另判）。
+    /// 取链全失败时只回失败原因、不回地址，下载按失败处理）。
     /// 不推进代际（不取消在播任务）：用当前 resolveGeneration 快照；
     /// 取链中途切歌导致代际变化时 resolveURL 因 gen 对不上回 nil，
     /// 下载按失败处理，用户重试。质量走 preferredQuality（resolveURL 内定）。

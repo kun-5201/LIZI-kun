@@ -12,10 +12,10 @@ import SwiftUI
 ///   非 JWT 格式都回 loggedIn:false + error。
 /// - 开发者 token 是 ES256 JWT（kid + iss，6 个月 exp），用 Apple Developer
 ///   门户创建的 MusicKit key（.p8）签发，要付费开发者账号。
-/// - r29 task 1：Apple ID 登录（AppleMusicAuth：MusicKit 授权优先、
-///   StoreKit 兜底取 user token）+ 整首播放（AppleMusicPlayer：
-///   applicationMusicPlayer 按 store id 建队列）。登录且订阅有效时
-///   Apple Music 的歌播整首，否则仍是 30 秒试听。
+/// - r29 task 1：Apple ID 登录（r31 起 AppleMusicAuth 只走 StoreKit：先预读
+///   授权状态，已授权直接取 user token，未定才弹框，被拒直接提示）+ 整首播放
+///   （AppleMusicPlayer：applicationMusicPlayer 按 store id 建队列）。登录且
+///   订阅有效时 Apple Music 的歌播整首，否则仍是 30 秒试听。
 /// - logout（/api/applemusic/logout）清掉开发者 token 和 user token；
 ///   本视图登出时还调 AppleMusicAuth.signOut() 清内存里的 user token。
 ///
@@ -107,7 +107,7 @@ struct AppleMusicLoginView: View {
                     Text("未登录（整首播放需要 Apple ID 登录 + 有效订阅）")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("先向系统请求 MusicKit 授权；未签名 IPA 无 MusicKit 能力、授权可能被拒，被拒时自动改走 StoreKit 兜底。登录只在本机存 user token，不上传、不显示完整值。")
+                    Text("直接向系统请求 Apple Music 访问授权（StoreKit；MusicKit 路已停用，未签名 IPA 没有 MusicKit 能力）。授权被拒时直接提示，不会闪退。登录只在本机存 user token，不上传、不显示完整值。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -171,8 +171,12 @@ struct AppleMusicLoginView: View {
     // MARK: - Apple ID 登录（r29 task 1）
 
     private func signInWithAppleID() async {
-        await MainActor.run { appleIDBusy = true; isBusy = true }
-        defer { Task { @MainActor in appleIDBusy = false; isBusy = false } }
+        // r31：同步防重入 guard——检查与置位之间无 await，主线程上连续执行，
+        // 两次快点时第二个 Task 进来看到的已是 busy=true，直接返回，不会
+        // 各起一个登录 Task；按钮的 .disabled(isBusy || appleIDBusy) 是第二层。
+        guard !appleIDBusy && !isBusy else { return }
+        appleIDBusy = true; isBusy = true
+        defer { appleIDBusy = false; isBusy = false }
         let result = await AppleMusicAuth.shared.signIn()
         await refreshStatus()
         await MainActor.run {

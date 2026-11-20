@@ -4,9 +4,8 @@ import Foundation
 ///
 /// 复用现有链路，不另造：
 /// - 取链：`PlaybackStore.resolveURLForDownload`（播放取链整条编排：
-///   官方 → 云盘 → LX；演示音不在取链里，全失败只回失败原因，下载永远
-///   拿不到演示音；试听片段 / 30 秒预览（isTrial / isPreview）也拒收，
-///   不把半首歌当整首存下来）。
+///   官方 → 云盘 → LX；全失败只回失败原因；试听片段 / 30 秒预览
+///   （isTrial / isPreview）也拒收，不把半首歌当整首存下来）。
 /// - 落盘：`LocalMusic.importFiles`（Documents/LocalMusic/ + index.json，
 ///   与文件 App 导入同一套；导完自然出现在本地音乐列表里，可播）。
 ///   文件名用「歌手 - 歌名.扩展名」（去非法字符），标题优先读内嵌元数据，
@@ -85,19 +84,14 @@ final class DownloadStore: NSObject, ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: Self.downloadedKey) }
     }
 
-    /// 开始下载（调用方在 Task 里调；演示音不进这里——取链本身不回演示音，
-    /// 这里再守一道：store.isDemo 时直接失败，不发起请求）。
+    /// 开始下载（调用方在 Task 里调；r31：提示音已删，取链本身不回
+    /// 提示音地址，旧的状态守卫随提示音一并删除）。
     @MainActor
     func start(track: Track, store: PlaybackStore) async {
         let key = Self.key(for: track)
         guard track.platform != "local" else { return }
         if case .downloading = states[key] { return }
         if isDownloaded(key: key) { return }
-        // isDemo 是 @MainActor 状态，start 本身已是 @MainActor，直接读。
-        guard !store.isDemo else {
-            setState(key: key, state: .failed("演示音不能下载"))
-            return
-        }
         setState(key: key, state: .downloading(0))
         // 取链：整条播放编排（官方 → 云盘 → LX），不用平台腿单点。
         // r27 构建修（run 44773480205）：guard-let 的 else 分支里 result 不在

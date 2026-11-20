@@ -190,50 +190,7 @@ final class AudioProxyLoader: NSObject, AVAssetResourceLoaderDelegate {
     }
 }
 
-// MARK: - 演示音（取链全失败时的最后一档）
-
-/// 演示音生成器：平台 → 云盘 → LX 全失败时，播一段本地合成的提示音（不是真歌，
-/// UI 按 `isDemo == true` + reason 显示「为什么不是真歌」，绝不假装在放原曲）。
-/// 照抄壳版 player.js 的兜底语义（取链失败走演示音、播放失败也走演示音），
-/// 但原生版没有现成的演示音频文件，改为运行时合成一段 40 秒正弦提示音写进 Caches，
-/// 只生成一次、重复用。
-enum DemoTone {
-    private static let fileName = "lizi-demo-tone.wav"
-
-    /// 演示音文件 URL（不存在时现场合成；合成失败返回 nil，调用方报播放失败）。
-    static func url() -> URL? {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-        guard let dir else { return nil }
-        let file = dir.appendingPathComponent(fileName)
-        if FileManager.default.fileExists(atPath: file.path) { return file }
-        guard let data = renderWAV(seconds: 40, frequency: 440, sampleRate: 22050) else { return nil }
-        do {
-            try data.write(to: file, options: [.atomic])
-            return file
-        } catch {
-            return nil
-        }
-    }
-
-    /// 16-bit 单声道 WAV：低音量正弦（0.15），40 秒。
-    private static func renderWAV(seconds: Int, frequency: Double, sampleRate: Int) -> Data? {
-        let count = seconds * sampleRate
-        var pcm = Data(capacity: count * 2)
-        for i in 0..<count {
-            let t = Double(i) / Double(sampleRate)
-            // 每 4 秒一个音节起伏，避免持续长音刺耳。
-            let gate = 0.5 + 0.5 * sin(2 * Double.pi * Double(i) / Double(sampleRate * 4))
-            let sample = sin(2 * Double.pi * frequency * t) * 0.15 * gate
-            var v = Int16(max(-1, min(1, sample)) * Double(Int16.max))
-            pcm.append(Data(bytes: &v, count: 2))
-        }
-        var wav = Data()
-        func u32(_ n: UInt32) { var v = n.littleEndian; wav.append(Data(bytes: &v, count: 4)) }
-        func u16(_ n: UInt16) { var v = n.littleEndian; wav.append(Data(bytes: &v, count: 2)) }
-        wav.append(Data("RIFF".utf8)); u32(UInt32(36 + pcm.count)); wav.append(Data("WAVE".utf8))
-        wav.append(Data("fmt ".utf8)); u32(16); u16(1); u16(1)
-        u32(UInt32(sampleRate)); u32(UInt32(sampleRate * 2)); u16(2); u16(16)
-        wav.append(Data("data".utf8)); u32(UInt32(pcm.count)); wav.append(pcm)
-        return wav
-    }
-}
+// r31：提示音生成器已删（用户 2026-11-21 05:40 决定：播放失败不再播
+// 提示音）。平台 → 云盘 → LX 全失败后直接报错，保持静默，不出声。
+// 旧生成器（运行时合成 40 秒正弦提示音写进 Caches）连同调用点已整段
+// 删除，不留死代码。

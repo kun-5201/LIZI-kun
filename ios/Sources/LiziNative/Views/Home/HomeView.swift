@@ -32,6 +32,23 @@ import UIKit
 /// （栏头 28pt 撤掉后内容区多出 36pt 余量，`panelContentH` 公式不动）。
 /// 本地音乐仍在面板下方、首屏可见，不动。
 ///
+/// r31（用户 2026-11-21 05:33 + 跑马带卡顿追加）：6 个来源切到哪一个，
+/// 面板里都要显示成卡片、跑马带一直自动滚。
+/// - 现状（r30）：只有每日推荐是环/跑马带卡片；其余 5 栏是
+///   `RailSourceListView` 的竖向列表（曲目 = TrackRowView 56pt 行，
+///   歌单/电台 = 56pt 横行），没有跑马带——切过去卡片没了、带子停了。
+///   本轮把 5 栏改成与每日带同款的横向卡片跑马带（`RailMarqueeView`，
+///   卡 = 封面 + 名 + 副标题；曲目卡点播，歌单/电台卡就是集合本身，
+///   点进详情/电台页；分组说明卡不进带子），加载/失败/空态三态、
+///   「查看全部」、混列脚注原样保留；面板头、取色、本地音乐、3D 环不动。
+/// - 跑马带卡顿同修（见 HomeCoverRingView.swift 文件头 r31 节）：
+///   驱动从 30Hz Timer（0.8px/步离散跳变 + Task 跳主线程抖动）改成
+///   CADisplayLink + 真实帧间隔 dt（60Hz 约 0.4px/步、120Hz 约 0.2px/步），
+///   环平面带与 rail 带共用这一套；rail 驱动归 HomeView 所有
+///   （`railMarqueeDriver` @StateObject），`.id(selectedSource)` 只重建
+///   sourceContent、驱动不重建，切来源后 offset 不归零、不重停 2.5s，
+///   接着滚。3D 环还是只手滑展开、不自动开，不动。
+///
 /// r28（用户 2026-11-21 01:52：39.6s 套壳视频逐帧重做，见
 /// verification/shell-video-39s-home-3d.md；另 01:57「环只手滑展开」、
 /// 01:58「面板跟专辑取色」两条澄清）：
@@ -90,7 +107,7 @@ import UIKit
 ///    平台条（r30：左列当前来源标题 19pt 粗体 + 7 图标 26pt 间距 5，
 ///    高 48，右端搜索 19pt；点标题弹来源小菜单）
 ///    → 来源内容（每日推荐 = 3D 封面环 HomeCoverRingView，平面跑马带常态；
-///    其余来源 = rail 列表 RailSourceListView），同一块圆角面板里，
+///    其余来源 = rail 卡片跑马带 RailSourceListView），同一块圆角面板里，
 ///    顺序与壳版 bar → marquee 一致。
 ///    面板底色 r28 起按在播专辑取色（`AlbumTone`，见文件头 r28 节；
 ///    旧「平台品牌色 10% 淡 tint」已作废）。
@@ -111,6 +128,11 @@ struct HomeView: View {
     @StateObject private var viewModel = HomeViewModel()
     /// 首页环状态机（r21）：平面带与全屏环覆盖层共用（见 HomeCoverRingView 文件头）。
     @StateObject private var ringModel = HomeCoverRingModel()
+    /// r31：rail 来源跑马带驱动（`RailMarqueeDriver`，CADisplayLink + dt，
+    /// 与环平面带同款）。归 HomeView 所有：dailyPanel 的
+    /// `.id(viewModel.selectedSource)` 只重建 sourceContent，驱动不重建，
+    /// 切来源后带子接着滚（offset 不归零、不重停 2.5s，见 `noteContentChanged`）。
+    @StateObject private var railMarqueeDriver = RailMarqueeDriver()
     /// 本地音乐区块显示开关（#48：键与 `SettingsStore.localMusicShown`
     /// 同键 `lizi.local.show`，默认开；@AppStorage 直接监听 UserDefaults
     /// 变化，设置页拨开关后回首页即生效，不依赖 SettingsStore 实例）。
@@ -275,7 +297,7 @@ struct HomeView: View {
                             .padding(.horizontal, 16)
 
                             // 铺色面板（壳版 `#hall-plat`）：平台条 → 来源内容
-                            // （每日推荐 = 环/跑马带，其余来源 = rail 列表），
+                            // （每日推荐 = 环/跑马带，其余来源 = rail 卡片跑马带），
                             // 同一块圆角面板里，顺序与壳版 bar → marquee 一致。
                             // 圆角 22、内边距 10（壳版 `.hall-plat` / plat-face）；
                             // 底色 = 当前平台品牌色 10% 淡 tint（壳版是平台色满铺，
@@ -485,8 +507,10 @@ struct HomeView: View {
                 isDark: panelTone.isDark,
                 onSourceMenuTap: { sourceMenuShown = true }
             )
-            // r30 来源内容：每日推荐 = 环/跑马带，其余 5 栏 = rail 列表
-            // （原 HomeRailPageView，原样搬进本文件 RailSourceListView）。
+            // r30 来源内容：每日推荐 = 环/跑马带，其余 5 栏 = rail 卡片跑马带
+            // （原 HomeRailPageView，原样搬进本文件 RailSourceListView；
+            // r31：列表行改成与每日带同款的横向卡片跑马带，见 RailSourceListView
+            // 文件头注释）。
             // 来源切换不走翻页手势：菜单点选即切；面板内竖滑归外层
             // ScrollView 滚整页，横滑归环。
             sourceContent(tier: tier)
@@ -514,7 +538,7 @@ struct HomeView: View {
     }
 
     /// r30 来源内容：一次只显示一个来源。每日推荐走修好的环/跑马带，
-    /// 其余 5 栏走 rail 列表（取数见 `HomeViewModel.loadRailPage`，
+    /// 其余 5 栏走 rail 卡片跑马带（取数见 `HomeViewModel.loadRailPage`，
     /// 首次访问拉取、之后缓存，喜欢栏每次切回都重拉）。
     @ViewBuilder
     private func sourceContent(
@@ -524,7 +548,15 @@ struct HomeView: View {
         case .daily:
             dailyRingContent(tier: tier)
         case .featured, .collections, .liked, .created, .radio:
-            RailSourceListView(viewModel: viewModel)
+            // r31：卡宽与环平面带同档（compact 180 / standard 190 / large 209，
+            // 见 HomeCoverRingModel.flatCard），6 个来源卡片同尺寸；
+            // isDark 跟面板取色走；跑马带驱动归 HomeView 所有（切来源不重建）。
+            RailSourceListView(
+                viewModel: viewModel,
+                cardWidth: tier == .compact ? 180 : tier == .standard ? 190 : 209,
+                isDark: panelTone.isDark,
+                marqueeDriver: railMarqueeDriver
+            )
         }
     }
 
@@ -601,30 +633,30 @@ struct HomeView: View {
         }
     }
 
-    /// r30：原 `HomeRailPagerView.swift` 里的 `HomeRailPageView`，随翻页器
-    /// 文件删除原样搬进本文件、只改名（`railPage` → `selectedSource`），
-    /// 行/三态/点按行为一行不改。
-    ///
-    /// 每日推荐之外的 5 栏（精选 / 用户收藏 / 喜欢的歌曲 / 用户创建的歌单 / 电台）
-    /// 在面板里的样子。栏里条目的形状照壳版 `public/app.js` 的 marqCardHtml
-    /// （约 12344–12400 行）1:1 抄（只换容器为一次一栏，不搬壳版代码；
-    /// 行组件复用 RailDetailView 同款，不另起形状）：
-    /// - 曲目行 = 封面 + 歌名 + 歌手·专辑 + 时长（TrackRowView，与 RailDetailView 同款）；
-    /// - 歌单/电台卡 = 封面 56 + 名字 + 创建者·数量 + chevron
-    ///   （与 RailDetailView 的 playlistCardRow / stationCardRow 同款；
-    ///   壳版卡上还有「歌单/电台」小签，副标题已写清数量/创建者，这里不另贴签）；
+    /// r31：面板里 5 个 rail 来源（精选 / 用户收藏 / 喜欢的歌曲 /
+    /// 用户创建的歌单 / 电台）改成与每日推荐同款的横向卡片跑马带
+    /// （`RailMarqueeView`），不再是竖向列表。r30 的列表行（曲目 =
+    /// TrackRowView 56pt 行，歌单/电台 = 56pt 横行）已删：
+    /// - 曲目卡 = 封面 + 歌名 + 歌手（环平面带 FlatRingCard 同款形状，
+    ///   卡宽与环同档），点一张播一首（setQueue 整份曲目）；
+    /// - 歌单/电台卡 = 该集合本身（封面 + 名字 + 创建者·数量），
+    ///   点一张进歌单详情 / 电台页，不显示成文字列表；
     /// - 分组说明卡（网易「我创建的歌单 / 我收藏的歌单」、Apple Music
-    ///   「官方热门歌单（非本人收藏）」、本地星标说明）= 12pt 小字行，不可点
-    ///   （壳版 marq__card--group 同款）。
+    ///   「官方热门歌单（非本人收藏）」、本地星标说明）不是内容，
+    ///   不进跑马带（壳版 marq__card--group 同款说明只在详情页出现）；
+    /// - 跑马带在 5 栏里都一直自动向左滚（24px/s，与每日带一致），
+    ///   切来源后接着滚（驱动归 HomeView 所有，不重建；内容换了只归一化
+    ///   偏移，不归零、不重停，见 `RailMarqueeDriver.noteContentChanged`）。
     /// - 平台返回类型本来就不同（见 RailsBridge 文件头）：网易/QQ/波点精选=歌单、
     ///   酷狗/汽水精选=曲目、酷我精选=排行榜（歌单）；空态文案原样保留
     ///   （如「这一层没有歌曲」「这一层没有歌单」与各平台诚实原因）。
     ///
-    /// 面板是定高窗：最多放 3 条可点条目（竖屏内容区约 255pt，行约 68–72pt，
-    /// 再加「查看全部」一行正好放下；横屏面板只有约 140 高，栏头 + 条占掉
-    /// 大半后 rail 栏只剩约一行的位置、其余裁断是模板原意），其余走底部
-    /// 「查看全部」进 RailDetailView 整页。
-    /// 点行行为与 RailDetailView 一致：曲目点播（setQueue 整份曲目，含分组卡
+    /// 面板是定高窗：跑马带一排卡（卡高 = 卡宽 + 52，与环平面带同高）
+    /// + 底部「查看全部」进 RailDetailView 整页（带子滚动看全量，
+    /// 不再只放 3 条）；横屏面板只有约 140 高，栏头 + 条占掉
+    /// 大半后 rail 栏只剩约一行的位置、其余裁断是模板原意，
+    /// 与每日推荐横屏同款。
+    /// 点卡行为与 RailDetailView 一致：曲目点播（setQueue 整份曲目，含分组卡
     /// 之后的全部曲目）、歌单卡进歌单详情页（.playlist 路由）、电台频道卡
     /// 进电台整页（.rail radio；频道下钻在详情页里点，面板不另做下钻层；
     /// 波点电台本身就是曲目，点行直接播）。
@@ -636,8 +668,12 @@ struct HomeView: View {
         @EnvironmentObject private var playback: PlaybackStore
         @EnvironmentObject private var nav: AppNavigation
 
-        /// 面板里最多放几条可点条目（分组说明卡不占名额；见本结构体头注释）。
-        private static let maxRows = 3
+        /// 跑马带卡宽（与环平面带同档，调用方按 tier 传；见 sourceContent）。
+        let cardWidth: CGFloat
+        /// 面板深场（调用方按专辑取色 field 传；卡片字色跟它走，与环卡同款）。
+        let isDark: Bool
+        /// 跑马带驱动（归 HomeView 所有，切来源不重建，见文件头 r31 节）。
+        @ObservedObject var marqueeDriver: RailMarqueeDriver
 
         private var page: HomeRailPage { viewModel.selectedSource }
         private var platform: String { viewModel.selectedPlatform }
@@ -657,23 +693,26 @@ struct HomeView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
 
-        // MARK: - 列表层
+        // MARK: - 卡片跑马带层（r31：竖向列表改成与每日带同款的横向卡片跑马带）
 
         private var entriesView: some View {
             let entries = viewModel.railEntries(for: page)
-            let tracks = entries.compactMap { entry -> Track? in
-                if case .track(let track) = entry { return track }
-                return nil
-            }
-            let shown = visibleEntries(entries)
+            let cards = marqueeCards(entries: entries)
             let total = entries.filter { entry in
                 if case .groupHeader = entry { return false }
                 return true
             }.count
             return VStack(alignment: .leading, spacing: 0) {
-                ForEach(shown) { entry in
-                    entryRow(entry, tracks: tracks)
-                }
+                RailMarqueeView(
+                    cards: cards,
+                    cardWidth: cardWidth,
+                    isDark: isDark,
+                    driver: marqueeDriver,
+                    speed: viewModel.marqSpeedPxPerSecond
+                )
+                // 卡高 = 卡宽 + 52（封面 + 间距 7 + 16pt 名行 + 间距 7 + 14pt
+                // 副标题行，与环平面带 flatHeight 同高）。
+                .frame(height: cardWidth + 52)
                 if viewModel.isMixedPlaylistsPage(page) {
                     Text("该平台接口不区分自建与收藏，两页显示同一份歌单。")
                         .font(.liziBody(size: LiziTokens.size12))
@@ -685,49 +724,44 @@ struct HomeView: View {
             }
         }
 
-        /// 面板里放得下的条目（按顺序取最多 maxRows 条可点条目，路过的
-        /// 分组说明卡一并带上、不占名额；超出的走「查看全部」）。
-        private func visibleEntries(_ entries: [RailEntry]) -> [RailEntry] {
-            var out: [RailEntry] = []
-            var count = 0
-            for entry in entries {
-                if case .groupHeader = entry { out.append(entry); continue }
-                guard count < Self.maxRows else { break }
-                out.append(entry)
-                count += 1
+        /// 面板卡片（r31）：把该栏条目展平成一张张卡——曲目卡（封面 + 歌名 +
+        /// 歌手）与集合卡（歌单/电台本身：封面 + 名字 + 创建者·数量）同一形状；
+        /// 分组说明卡（groupHeader）不是内容、不进带子。点按行为与旧列表行一致
+        /// （曲目点播 / 歌单进详情 / 电台进整页）。
+        private func marqueeCards(entries: [RailEntry]) -> [RailMarqueeCard] {
+            let tracks = entries.compactMap { entry -> Track? in
+                if case .track(let track) = entry { return track }
+                return nil
             }
-            return out
-        }
-
-        @ViewBuilder
-        private func entryRow(_ entry: RailEntry, tracks: [Track]) -> some View {
-            switch entry {
-            case .groupHeader(let text):
-                Text(text)
-                    .font(.liziBody(size: LiziTokens.size12, weight: .semibold))
-                    .foregroundColor(LiziTokens.ink3)
-                    .padding(.vertical, 4)
-            case .track(let track):
-                TrackRowView(
-                    track: track,
-                    isCurrent: playback.currentTrack?.id == track.id
-                        && playback.currentTrack?.platform == track.platform,
-                    isCompact: true
-                ) {
-                    playback.setQueue(tracks, startAt: trackIndex(track, in: tracks))
+            return entries.compactMap { entry in
+                switch entry {
+                case .groupHeader:
+                    return nil
+                case .track(let track):
+                    return RailMarqueeCard(
+                        id: entry.id,
+                        coverURL: track.coverURL,
+                        title: track.title,
+                        subtitle: track.artist,
+                        onTap: { playback.setQueue(tracks, startAt: trackIndex(track, in: tracks)) }
+                    )
+                case .playlist(let playlist):
+                    return RailMarqueeCard(
+                        id: entry.id,
+                        coverURL: playlist.coverURL,
+                        title: playlist.title,
+                        subtitle: playlistSubtitle(playlist: playlist),
+                        onTap: { nav.show(.playlist(platform: playlist.source, id: playlist.id, isRank: playlist.isRank)) }
+                    )
+                case .station(let station):
+                    return RailMarqueeCard(
+                        id: entry.id,
+                        coverURL: station.coverURL,
+                        title: station.name,
+                        subtitle: stationSubtitle(station: station),
+                        onTap: { nav.show(.rail(kind: "radio", platform: platform)) }
+                    )
                 }
-            case .playlist(let playlist):
-                Button(action: {
-                    nav.show(.playlist(platform: playlist.source, id: playlist.id, isRank: playlist.isRank))
-                }) {
-                    playlistCardRow(playlist: playlist)
-                }
-                .buttonStyle(.plain)
-            case .station(let station):
-                Button(action: { nav.show(.rail(kind: "radio", platform: platform)) }) {
-                    stationCardRow(station: station)
-                }
-                .buttonStyle(.plain)
             }
         }
 
@@ -736,7 +770,7 @@ struct HomeView: View {
             if let kind = page.railKind {
                 Button(action: { nav.show(.rail(kind: kind.rawValue, platform: platform)) }) {
                     HStack(spacing: 4) {
-                        Text(total > Self.maxRows ? "查看全部（共 \(total) 项）" : "查看全部")
+                        Text(total > 0 ? "查看全部（共 \(total) 项）" : "查看全部")
                         Image(systemName: "chevron.right")
                             .font(.system(size: 11, weight: .semibold))
                     }
@@ -748,55 +782,7 @@ struct HomeView: View {
             }
         }
 
-        // MARK: - 卡片行（与 RailDetailView 同款形状，见本结构体头注释）
-
-        private func playlistCardRow(playlist: Playlist) -> some View {
-            HStack(spacing: 12) {
-                CoverImageView(url: playlist.coverURL, placeholderIconSize: 20)
-                    .frame(width: 56, height: 56)
-                    .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(playlist.title)
-                        .font(.liziBody(size: LiziTokens.size16, weight: .semibold))
-                        .foregroundColor(LiziTokens.ink)
-                        .lineLimit(1)
-                    Text(playlistSubtitle(playlist: playlist))
-                        .font(.liziBody(size: LiziTokens.size13))
-                        .foregroundColor(LiziTokens.ink3)
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(LiziTokens.ink3)
-            }
-            .padding(.vertical, 8)
-            .contentShape(Rectangle())
-        }
-
-        private func stationCardRow(station: RadioStation) -> some View {
-            HStack(spacing: 12) {
-                CoverImageView(url: station.coverURL, placeholderIconSize: 20)
-                    .frame(width: 56, height: 56)
-                    .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(station.name)
-                        .font(.liziBody(size: LiziTokens.size16, weight: .semibold))
-                        .foregroundColor(LiziTokens.ink)
-                        .lineLimit(1)
-                    Text(stationSubtitle(station: station))
-                        .font(.liziBody(size: LiziTokens.size13))
-                        .foregroundColor(LiziTokens.ink3)
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(LiziTokens.ink3)
-            }
-            .padding(.vertical, 8)
-            .contentShape(Rectangle())
-        }
+        // MARK: - 卡片副标题（歌单/电台卡的第二行；曲目卡第二行就是歌手）
 
         private func playlistSubtitle(playlist: Playlist) -> String {
             var parts: [String] = []
@@ -861,6 +847,225 @@ struct HomeView: View {
 
         private func trackIndex(_ track: Track, in tracks: [Track]) -> Int {
             tracks.firstIndex(where: { $0.id == track.id && $0.platform == track.platform }) ?? 0
+        }
+    }
+
+    // MARK: - r31 rail 跑马带（驱动 + 视图 + 卡片）
+
+    /// rail 跑马带里的一张卡（曲目 / 歌单 / 电台共用同一形状）：
+    /// 封面 + 名字 + 副标题；点按行为由调用方 `marqueeCards` 按条目类型填。
+    private struct RailMarqueeCard: Identifiable {
+        var id: String
+        var coverURL: URL?
+        var title: String
+        var subtitle: String
+        var onTap: () -> Void
+    }
+
+    /// r31：rail 跑马带驱动（与 HomeCoverRingModel 的平面带驱动同款：
+    /// CADisplayLink + 真实帧间隔 dt，见 HomeCoverRingView.swift 文件头 r31 节）。
+    /// - 归 HomeView 所有（@StateObject）：dailyPanel 的 `.id(selectedSource)`
+    ///   只重建 sourceContent，驱动不重建；切来源时内容换了只归一化偏移
+    ///   （`noteContentChanged`），不归零、不重停 2.5s——带子接着滚，不停、不跳。
+    /// - 初画 2.5s dwell 只在驱动创建时走一次（与环的 initialDwell 同值）；
+    ///   拖动松手停 1.2s（与环的 dragResumeDwell 同值）；速度由调用方按
+    ///   viewModel.marqSpeedPxPerSecond 同步（默认 24px/s）。
+    @MainActor
+    final class RailMarqueeDriver: ObservableObject {
+        @Published var offsetX: CGFloat = 0
+        @Published var setWidth: CGFloat = 0
+        @Published var isDragging = false
+
+        var speed: CGFloat = 24
+
+        private var dwellUntil = Date().addingTimeInterval(2.5)
+        private var dragBase: CGFloat = 0
+        private var displayLink: CADisplayLink?
+        private var linkProxy: RailMarqueeLinkProxy?
+        private var lastTimestamp: CFTimeInterval = 0
+
+        init() { start() }
+
+        deinit { displayLink?.invalidate() }
+
+        func start() {
+            guard displayLink == nil else { return }
+            let proxy = RailMarqueeLinkProxy(driver: self)
+            let link = CADisplayLink(target: proxy, selector: #selector(RailMarqueeLinkProxy.fired(_:)))
+            link.add(to: .main, forMode: .common)
+            linkProxy = proxy
+            displayLink = link
+        }
+
+        /// 内容换了（切来源 / 该栏重拉）：只把偏移收进新宽度，不归零、
+        /// 不重停 dwell——带子接着滚，不停、不跳。
+        func noteContentChanged() {
+            offsetX = normalized(offsetX)
+        }
+
+        func dragBegan() {
+            isDragging = true
+            dragBase = offsetX
+        }
+
+        func dragMoved(_ dx: CGFloat) {
+            offsetX = normalized(dragBase + dx)
+        }
+
+        func dragEnded() {
+            isDragging = false
+            dwellUntil = Date().addingTimeInterval(1.2)
+        }
+
+        /// display link 回调（主线程）：步长 = 速度 × 真实帧间隔 dt。
+        /// dt 从 link.timestamp 差算；第一帧用 1/60s 起步；dt 夹到 0.1s，
+        /// 后台回来 / 卡顿后不一次跳几十 px。60Hz 约 0.4px/步、120Hz 约 0.2px/步。
+        fileprivate func linkFired(_ link: CADisplayLink) {
+            let dt: CFTimeInterval
+            if lastTimestamp == 0 {
+                dt = 1.0 / 60.0
+            } else {
+                dt = link.timestamp - lastTimestamp
+            }
+            lastTimestamp = link.timestamp
+            guard setWidth > 0, !isDragging, Date() >= dwellUntil else { return }
+            let clamped = min(max(dt, 0), 0.1)
+            guard clamped > 0 else { return }
+            offsetX = normalized(offsetX - speed * CGFloat(clamped))
+        }
+
+        /// 把偏移收进 (-setWidth, 0]，两份循环无缝（环平面带同款）。
+        private func normalized(_ x: CGFloat) -> CGFloat {
+            guard setWidth > 0 else { return x }
+            var v = x
+            while v > 0 { v -= setWidth }
+            while v <= -setWidth { v += setWidth }
+            return v
+        }
+    }
+
+    /// r31：display link 回调代理（与 HomeCoverRingView.swift 的
+    /// `FlatDisplayLinkProxy` 同款：link 强持 target，代理只弱持驱动，
+    /// 不循环引用；跳主线程用 `Task { @MainActor in }`）。
+    private final class RailMarqueeLinkProxy: NSObject {
+        weak var driver: RailMarqueeDriver?
+
+        init(driver: RailMarqueeDriver) {
+            self.driver = driver
+        }
+
+        @objc func fired(_ link: CADisplayLink) {
+            Task { @MainActor in self.driver?.linkFired(link) }
+        }
+    }
+
+    private struct RailMarqueeWidthKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = nextValue()
+        }
+    }
+
+    /// r31：rail 来源的卡片跑马带（每日推荐的环平面带同款形态，不同内容）。
+    /// - 卡片横向排、内容复制两份循环，滚过一份宽度无缝回卷；
+    /// - 自动向左滚，速度与每日带一致（viewModel.marqSpeedPxPerSecond，默认 24px/s）；
+    /// - 驱动与环平面带同款 CADisplayLink + 真实帧间隔 dt（见 RailMarqueeDriver），
+    ///   60Hz 约 0.4px/步、120Hz 约 0.2px/步，不一卡一卡；
+    /// - 可横向拖动：拖动时暂停，松手 1.2s 后恢复（与环同值）；竖向滚动走
+    ///   simultaneousGesture，不抢页面的竖滑；
+    /// - 卡片是 Button（点一首就播 / 点集合进详情），DailyMarqueeView 同款做法。
+    private struct RailMarqueeView: View {
+        let cards: [RailMarqueeCard]
+        let cardWidth: CGFloat
+        let isDark: Bool
+        @ObservedObject var driver: RailMarqueeDriver
+        let speed: CGFloat
+
+        var body: some View {
+            Group {
+                if cards.isEmpty {
+                    Color.clear
+                } else {
+                    marqueeContent
+                }
+            }
+            .onAppear {
+                driver.speed = speed
+                driver.noteContentChanged()
+            }
+            .onChange(of: cards.map(\.id)) { _ in driver.noteContentChanged() }
+            .onChange(of: speed) { _ in driver.speed = speed }
+        }
+
+        private var marqueeContent: some View {
+            HStack(spacing: 16) {
+                ForEach(0..<2, id: \.self) { _ in
+                    HStack(spacing: 16) {
+                        ForEach(cards) { card in
+                            RailMarqueeCardView(card: card, width: cardWidth, isDark: isDark)
+                        }
+                    }
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(key: RailMarqueeWidthKey.self, value: geo.size.width)
+                        }
+                    )
+                }
+            }
+            .offset(x: driver.offsetX)
+            .onPreferenceChange(RailMarqueeWidthKey.self) { driver.setWidth = $0 + 16 }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8, coordinateSpace: .local)
+                    .onChanged { value in
+                        if !driver.isDragging {
+                            driver.dragBegan()
+                        }
+                        driver.dragMoved(value.translation.width)
+                    }
+                    .onEnded { _ in driver.dragEnded() }
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
+        }
+    }
+
+    /// 跑马带里的一张卡：封面 + 名字 + 副标题（环平面带 FlatRingCard 同款形状：
+    /// 封面正方形 + 16pt 名 + 14pt 副标题，间距 7；颜色跟面板深场走）。
+    /// 没封面（coverURL 为 nil）用 r30 的 DefaultCoverArt 深色默认图，不摆白卡；
+    /// URL 有但加载失败时 CoverImageView 的白占位是已知残留（见 HomeCoverRingView
+    /// 文件头 r30 节），与环卡同款。
+    private struct RailMarqueeCardView: View {
+        let card: RailMarqueeCard
+        let width: CGFloat
+        let isDark: Bool
+
+        var body: some View {
+            Button(action: card.onTap) {
+                VStack(alignment: .leading, spacing: 7) {
+                    coverArt
+                        .frame(width: width, height: width)
+                        .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
+                    Text(card.title)
+                        .font(.liziBody(size: LiziTokens.size16, weight: .medium))
+                        .foregroundColor(isDark ? .white : LiziTokens.ink)
+                        .lineLimit(1)
+                    Text(card.subtitle)
+                        .font(.liziBody(size: LiziTokens.size14))
+                        .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
+                        .lineLimit(1)
+                }
+                .frame(width: width, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+        }
+
+        @ViewBuilder
+        private var coverArt: some View {
+            if card.coverURL == nil {
+                DefaultCoverArt(iconSize: 64)
+            } else {
+                CoverImageView(url: card.coverURL, placeholderIconSize: 64)
+            }
         }
     }
 

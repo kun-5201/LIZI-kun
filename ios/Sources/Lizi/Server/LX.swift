@@ -19,7 +19,7 @@ enum LXResolver {
         "netease": "wy", "qq": "tx", "kuwo": "kw", "kugou": "kg",
         // 汽水（qs）：第 11 轮第 8/9 件——新音源（聆澜音源赞助版 v9.0.1）上报 qs
         // 平台，取链实测通（320k）；App 之前把 qishui 拦在 LX 门外（""），
-        // 平台拿不到地址时直接走演示音。
+        // 平台拿不到地址时再走 LX，仍拿不到直接报错（r31：提示音兜底已删）。
         "qishui": "qs", "bodian": "bd", "spotify": "",
     ]
 

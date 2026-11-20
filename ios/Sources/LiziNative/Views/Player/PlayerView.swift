@@ -1179,16 +1179,14 @@ struct PlayerView: View {
         .accessibilityHint("点按打开播放队列")
     }
 
-    /// 状态行是否真的占高（r26）：失败原因文案，或至少一个角标（试听 /
-    /// 演示音）时为真。只按可见内容判定——有曲目但两个角标条件全不
-    /// 成立时角标行整行不渲染，不计入（r29：实际音质角标已删，见
-    /// statusCapsules；该瞬态仍走旧 8/10 间距，不溢出，见文件底
-    /// r26 总账注）。
+    /// 状态行是否真的占高（r26）：失败原因文案，或至少一个角标（试听）
+    /// 时为真。只按可见内容判定——有曲目但角标条件不成立时角标行整行
+    /// 不渲染，不计入（r29：实际音质角标已删，见 statusCapsules；r31：
+    /// 提示音角标已删；该瞬态仍走旧 8/10 间距，不溢出，见文件底 r26 总账注）。
     private var hasStatusRow: Bool {
         if store.errorMessage != nil { return true }
         guard store.currentTrack != nil else { return false }
         return store.currentTrack?.isTrial == true
-            || store.isDemo
     }
 
     /// r26：titleBlock 上间距。compact + 有状态行时 8 → 4（省 4pt）；
@@ -1242,7 +1240,8 @@ struct PlayerView: View {
         return track.artist.isEmpty ? track.platform : track.artist
     }
 
-    /// 状态角标：只在有内容时出现 —— 试听、演示音。取链失败的原因由下面的
+    /// 状态角标：只在有内容时出现 —— 试听（r31：提示音角标已删）。
+    /// 取链失败的原因由下面的
     /// error 行明示，不静默。r29：歌名下方中间的实际音质角标已删（用户真机
     /// 报「中间的杜比全景声显示也删除」），音质入口只剩底部第 3 排的音质
     /// 芯片（PlayerBottomDock，点开 9 档选择器），actualQuality 取链与
@@ -1277,16 +1276,14 @@ struct PlayerView: View {
                     }
                 }
         } else if store.currentTrack != nil {
-            // r29：实际音质角标已删（只删显示，取链/状态不动）；角标行只剩
-            // 试听/演示。两个条件全不成立时整行不渲染——旧代码空 HStack +
-            // 上间距会留 6pt 幽灵高，删角标后这是常态（普通曲目），必须收掉。
-            if store.currentTrack?.isTrial == true || store.isDemo {
+            // r29：实际音质角标已删（只删显示，取链/状态不动）；r31：提示音
+            // 角标已删。角标行只剩试听；条件不成立时整行不渲染——旧代码空
+            // HStack + 上间距会留 6pt 幽灵高，删角标后这是常态（普通曲目），
+            // 必须收掉。
+            if store.currentTrack?.isTrial == true {
                 HStack(spacing: 6) {
                     if store.currentTrack?.isTrial == true {
                         statusCapsule("试听", compactStyle: squeeze)
-                    }
-                    if store.isDemo {
-                        statusCapsule("演示音", compactStyle: squeeze)
                     }
                 }
                 .padding(.top, squeeze ? 2 : 4)

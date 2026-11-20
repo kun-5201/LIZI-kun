@@ -33,13 +33,50 @@ import CryptoKit
 
 /// lx.send('inited') 带回来的 sources、lx.on('request') 注册的处理函数。
 /// 引用类型：装配时挂进 JS 的 block 直接写它，实例从它读。
+///
+/// r30 Worker E：下面三张表原来是裸 var——写在 jsQueue 的 sendBlock /
+/// onBlock 里（脚本发 `inited` / 注册 request 处理时），读却发生在任意
+/// Task 线程（`LXScriptInstance.platforms` / `declaredQualitys` 被
+/// `LXSources.validate()`、`resolveMusicUrl` 从取链 Task 里读；`loadOnQueue`
+/// 还在 jsQueue 上把整个 sink 换成新对象）。Swift 字典 CoW 跨线程
+/// 「写时读」可直接 EXC_BAD_ACCESS，这就是 r29 闪退的最强剩余嫌疑。
+/// 现用一把 NSLock 守卫：跨线程读/所有写都走加锁的计算属性；
+/// 已在 jsQueue 上的读走不加锁的 `…OnQueue` 读法——jsQueue 是串行队列，
+/// 同一时刻只有一个 jsQueue 块在跑，与加锁的写天然互斥，且 NSLock 不可
+/// 重入，jsQueue 内再取锁一旦遇上持锁路径就是自死锁，故一律走这里。
 final class LXScriptSink {
-    var requestHandler: JSValue?
+    private let lock = NSLock()
+    private var _requestHandler: JSValue?
     /// source -> actions（inited 事件上报的 musicSources）。
-    var initedSources: [String: [String]] = [:]
+    private var _initedSources: [String: [String]] = [:]
     /// source -> 声明的档位（inited 事件上报的 musicSources 里的 qualitys；
     /// r26：引擎只试源声明过的档位，见 LXScriptInstance.effectiveTiers）。
-    var initedQualitys: [String: [String]] = [:]
+    private var _initedQualitys: [String: [String]] = [:]
+
+    /// request 处理函数：写（onBlock 注册时）走加锁 setter；jsQueue 块里的
+    /// 读走 `requestHandlerOnQueue`（不加锁）；加锁的 getter 保留给将来
+    /// 可能的跨线程读（目前没有跨线程读点）。
+    var requestHandler: JSValue? {
+        get { lock.lock(); defer { lock.unlock() }; return _requestHandler }
+        set { lock.lock(); _requestHandler = newValue; lock.unlock() }
+    }
+    var initedSources: [String: [String]] {
+        get { lock.lock(); defer { lock.unlock() }; return _initedSources }
+        set { lock.lock(); _initedSources = newValue; lock.unlock() }
+    }
+    var initedQualitys: [String: [String]] {
+        get { lock.lock(); defer { lock.unlock() }; return _initedQualitys }
+        set { lock.lock(); _initedQualitys = newValue; lock.unlock() }
+    }
+
+    /// 已在 jsQueue 上时用的不加锁读法（loadOnQueue 的新 sink 检查、
+    /// hasRequestHandlerOnQueue、callScriptMusicUrlOnce 的 handler 读取都在
+    /// jsQueue 块里）。串行队列保证同一时刻只有一个这样的读在跑，且写
+    /// （sendBlock / onBlock）也在 jsQueue 上、与读互斥，不会撞上正在
+    /// 进行的加锁写；跨线程读永远走上面加锁的计算属性，不走这里。
+    var requestHandlerOnQueue: JSValue? { _requestHandler }
+    var initedSourcesOnQueue: [String: [String]] { _initedSources }
+    var initedQualitysOnQueue: [String: [String]] { _initedQualitys }
 }
 
 enum LXScriptRuntime {
@@ -58,7 +95,8 @@ enum LXScriptRuntime {
         let logBlock: @convention(block) (String, String) -> Void = { level, message in
             print("[lx] [\(level)] \(message.prefix(2000))")
         }
-        ctx.setObject(JSValue(object: logBlock, in: ctx)!, forKeyedSubscript: "__lxNativeLog" as NSString)
+        guard let nativeLog = JSValue(object: logBlock, in: ctx) else { return }
+        ctx.setObject(nativeLog, forKeyedSubscript: "__lxNativeLog" as NSString)
         ctx.evaluateScript("""
         var console = {
           log: function () { __lxNativeLog('log', Array.prototype.slice.call(arguments).map(function (a) { try { return typeof a === 'object' ? JSON.stringify(a) : String(a); } catch (e) { return String(a); } }).join(' ')); },
@@ -68,8 +106,8 @@ enum LXScriptRuntime {
         """)
 
         // lx 运行时对象。
-        let lx = JSValue(newObjectIn: ctx)!
-        let eventNames = JSValue(newObjectIn: ctx)!
+        guard let lx = JSValue(newObjectIn: ctx),
+              let eventNames = JSValue(newObjectIn: ctx) else { return }
         eventNames.setValue("request", forProperty: "request")
         eventNames.setValue("inited", forProperty: "inited")
         eventNames.setValue("updateAlert", forProperty: "updateAlert")
@@ -123,7 +161,12 @@ enum LXScriptRuntime {
                     let rawText = String(data: data, encoding: .utf8) ?? ""
                     LXScriptInstance.jsQueue.async { [weak ctx] in
                         guard let ctx else { return }
-                        let respObj = JSValue(newObjectIn: ctx)!
+                        guard let respObj = JSValue(newObjectIn: ctx) else {
+                            // 响应对象建不出来：直接走错误回调，别让 continuation
+                            // 挂到 20 秒单档超时才返回。
+                            _ = callback.call(withArguments: ["LX 响应对象创建失败"])
+                            return
+                        }
                         respObj.setValue(resp.statusCode, forProperty: "statusCode")
                         if let obj = try? JSONSerialization.jsonObject(with: data),
                            JSONSerialization.isValidJSONObject(obj) {
@@ -142,18 +185,29 @@ enum LXScriptRuntime {
                         if let finalURL = resp.url?.absoluteString {
                             respObj.setValue(finalURL, forProperty: "url")
                         }
-                        _ = callback.call(withArguments: [JSValue(undefinedIn: ctx)!, respObj, rawText])
+                        if let undef = JSValue(undefinedIn: ctx) {
+                            _ = callback.call(withArguments: [undef, respObj, rawText])
+                        } else {
+                            _ = callback.call(withArguments: ["LX 回调参数创建失败"])
+                        }
                     }
                 } catch {
                     let message = error.localizedDescription
                     LXScriptInstance.jsQueue.async { [weak ctx] in
                         guard let ctx else { return }
-                        _ = callback.call(withArguments: [message, JSValue(undefinedIn: ctx)!])
+                        // undefined 造不出来时只传 err 一个参数即可（JS 回调
+                        // 只读第 1 参判错），不要因此丢掉这次错误回传。
+                        if let undef = JSValue(undefinedIn: ctx) {
+                            _ = callback.call(withArguments: [message, undef])
+                        } else {
+                            _ = callback.call(withArguments: [message])
+                        }
                     }
                 }
             }
         }
-        lx.setValue(JSValue(object: requestBlock, in: ctx)!, forProperty: "request")
+        guard let requestValue = JSValue(object: requestBlock, in: ctx) else { return }
+        lx.setValue(requestValue, forProperty: "request")
 
         // lx.on(event, handler)：只接 request 事件。
         let onBlock: @convention(block) (JSValue?, JSValue?) -> Void = { eventValue, handlerValue in
@@ -161,7 +215,8 @@ enum LXScriptRuntime {
                   let handler = handlerValue, !handler.isUndefined else { return }
             sink.requestHandler = handler
         }
-        lx.setValue(JSValue(object: onBlock, in: ctx)!, forProperty: "on")
+        guard let onValue = JSValue(object: onBlock, in: ctx) else { return }
+        lx.setValue(onValue, forProperty: "on")
 
         // lx.send(event, data)：inited 带 sources（记下来当覆盖平台）；
         // updateAlert 只记日志。
@@ -196,10 +251,11 @@ enum LXScriptRuntime {
                 break
             }
         }
-        lx.setValue(JSValue(object: sendBlock, in: ctx)!, forProperty: "send")
+        guard let sendValue = JSValue(object: sendBlock, in: ctx) else { return }
+        lx.setValue(sendValue, forProperty: "send")
 
         // lx.currentScriptInfo：脚本自己的头注释（见 install 注释）。
-        let info = JSValue(newObjectIn: ctx)!
+        guard let info = JSValue(newObjectIn: ctx) else { return }
         for (k, v) in scriptInfo { info.setValue(v, forProperty: k) }
         lx.setValue(info, forProperty: "currentScriptInfo")
 
@@ -221,10 +277,13 @@ enum LXScriptRuntime {
         let sha256Block: @convention(block) (String) -> String = { s in
             SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
         }
-        let cryptoObj = JSValue(newObjectIn: ctx)!
-        cryptoObj.setValue(JSValue(object: md5Block, in: ctx)!, forProperty: "md5")
-        cryptoObj.setValue(JSValue(object: sha1Block, in: ctx)!, forProperty: "sha1")
-        cryptoObj.setValue(JSValue(object: sha256Block, in: ctx)!, forProperty: "sha256")
+        guard let cryptoObj = JSValue(newObjectIn: ctx),
+              let md5Value = JSValue(object: md5Block, in: ctx),
+              let sha1Value = JSValue(object: sha1Block, in: ctx),
+              let sha256Value = JSValue(object: sha256Block, in: ctx) else { return }
+        cryptoObj.setValue(md5Value, forProperty: "md5")
+        cryptoObj.setValue(sha1Value, forProperty: "sha1")
+        cryptoObj.setValue(sha256Value, forProperty: "sha256")
         if let aesFn = ctx.globalObject?.forProperty("__lxAesEncrypt"), !aesFn.isUndefined {
             cryptoObj.setValue(aesFn, forProperty: "aesEncrypt")
         }
@@ -247,10 +306,14 @@ enum LXScriptRuntime {
             return timers.schedule(ctx: ctx, fn: fn, ms: ms, repeats: true)
         }
         let clearTimeoutBlock: @convention(block) (Double) -> Void = { id in timers.cancel(id: id) }
-        ctx.setObject(JSValue(object: setTimeoutBlock, in: ctx)!, forKeyedSubscript: "setTimeout" as NSString)
-        ctx.setObject(JSValue(object: setIntervalBlock, in: ctx)!, forKeyedSubscript: "setInterval" as NSString)
-        ctx.setObject(JSValue(object: clearTimeoutBlock, in: ctx)!, forKeyedSubscript: "clearTimeout" as NSString)
-        ctx.setObject(JSValue(object: clearTimeoutBlock, in: ctx)!, forKeyedSubscript: "clearInterval" as NSString)
+        guard let setTimeoutValue = JSValue(object: setTimeoutBlock, in: ctx),
+              let setIntervalValue = JSValue(object: setIntervalBlock, in: ctx),
+              let clearTimeoutValue = JSValue(object: clearTimeoutBlock, in: ctx) else { return }
+        // clearTimeout / clearInterval 共用同一个 block（原行为），故一个值挂两处。
+        ctx.setObject(setTimeoutValue, forKeyedSubscript: "setTimeout" as NSString)
+        ctx.setObject(setIntervalValue, forKeyedSubscript: "setInterval" as NSString)
+        ctx.setObject(clearTimeoutValue, forKeyedSubscript: "clearTimeout" as NSString)
+        ctx.setObject(clearTimeoutValue, forKeyedSubscript: "clearInterval" as NSString)
     }
 
     /// utils.buffer 的 JS 实现（和 /tmp/lx-test/lx-utils.js 同一份逻辑）。
@@ -638,6 +701,8 @@ final class LXScriptInstance {
 
     /// 脚本 inited 上报的、带 musicUrl 动作的平台（去掉 'local' 伪源）。
     /// 只能在 load() 成功后读。
+    /// r30：经 sink 的加锁读（任意 Task 线程可读；迟到的 inited 写入与
+    /// 这里的读由同一把锁互斥，不再裸读字典）。
     var platforms: [String] {
         sink.initedSources
             .filter { $0.key != "local" && $0.value.contains("musicUrl") }
@@ -647,20 +712,22 @@ final class LXScriptInstance {
     /// 脚本 inited 上报的全部平台（不论有没有 musicUrl 动作）：校验失败时
     /// 拿来告诉用户脚本到底上报了什么（如只上报了 [git]，那 wy/tx/kw
     /// 的歌永远走不到它），而不是一句笼统的「没有可用的 musicUrl 音源」。
+    /// r30：与 platforms 同款加锁读。
     var reportedPlatforms: [String] {
         sink.initedSources.map(\.key).sorted()
     }
 
     /// 脚本 inited 声明的各源档位（source -> qualitys；r26 档位过滤用）。
-    /// 只在 jsQueue 上读/写（与 platforms 同款：load() 的检查在
-    /// jsQueue.sync 里做；resolveMusicUrl 从 jsQueue 外读这里——
-    /// inited 之后该表不再变，读到的是 load 完成后的快照）。
+    /// r30：经 sink 的加锁读（任意 Task 线程可读——resolveMusicUrl 的
+    /// 取链 Task 就在这里读；旧注释称「inited 之后该表不再变」是错的：
+    /// 有的脚本先拉远程配置、迟到几秒才发 inited，读与写会撞上）。
     var declaredQualitys: [String: [String]] {
         sink.initedQualitys
     }
 
-    /// 是否已注册 request 处理（只在 jsQueue 上读，见 waitForRequestHandler）。
-    private var hasRequestHandlerOnQueue: Bool { sink.requestHandler != nil }
+    /// 是否已注册 request 处理（只在 jsQueue 上读，见 waitForRequestHandler；
+    /// r30：走不加锁的 OnQueue 读法，见 LXScriptSink）。
+    private var hasRequestHandlerOnQueue: Bool { sink.requestHandlerOnQueue != nil }
 
     /// 加载脚本：装运行时 + evaluateScript + 校验注册了 request 处理。
     /// 成功后 loaded = true；失败不记 loaded，下次 resolve 会重试加载。
@@ -712,7 +779,8 @@ final class LXScriptInstance {
     /// 等 inited：有的脚本（如 juhe）先拉远程配置再发 inited，load() 返回时
     /// platforms 还是空的。导入校验在读 platforms 前调这个等一等（最多 5 秒；
     /// 同步发 inited 的脚本当场就到，不等）。只能在 jsQueue 之外调
-    /// （内部用 jsQueue.sync 读，sleep 的间隙 jsQueue 是空的，不会死锁）。
+    /// （r30：platforms 已是加锁读，不再经 jsQueue.sync 绕一圈；
+    /// sleep 的间隙 jsQueue 是空的，不会死锁）。
     /// deadline 版：批量校验多个脚本时共用一个期限，免得每个坏脚本各等 5 秒。
     func waitForInited(timeout: TimeInterval = 5) {
         waitForInited(deadline: Date().addingTimeInterval(timeout))
@@ -720,8 +788,7 @@ final class LXScriptInstance {
 
     func waitForInited(deadline: Date) {
         while Date() < deadline {
-            let has = Self.jsQueue.sync { !self.platforms.isEmpty }
-            if has { return }
+            if !self.platforms.isEmpty { return }
             Thread.sleep(forTimeInterval: 0.1)
         }
     }
@@ -846,7 +913,7 @@ final class LXScriptInstance {
                     guard !box.isCancelled else { return }
                     do {
                     try self.loadAssumingOnQueue()
-                    guard let ctx = self.context, let handler = self.sink.requestHandler else {
+                    guard let ctx = self.context, let handler = self.sink.requestHandlerOnQueue else {
                         throw NSError(domain: "LXScript", code: -1, userInfo: [NSLocalizedDescriptionKey: "落雪脚本未就绪"])
                     }
                     // musicInfo 只给 songmid 是不够的：脚本按平台读不同字段，
@@ -950,7 +1017,8 @@ final class LXScriptInstance {
         // load() 从外面等（requireHandler: false），见 load() 注释；
         // loadAssumingOnQueue 在 jsQueue 上等不了，这里直接判。
         if requireHandler {
-            guard freshSink.requestHandler != nil else {
+            // 已在 jsQueue 上：走不加锁的 OnQueue 读法（见 LXScriptSink）。
+            guard freshSink.requestHandlerOnQueue != nil else {
                 throw NSError(domain: "LXScript", code: -1, userInfo: [NSLocalizedDescriptionKey: "不是有效的落雪音源脚本：没有注册 request 处理"])
             }
         }

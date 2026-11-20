@@ -8,7 +8,7 @@ import SwiftUI
 ///
 /// 照抄壳版 `.hall-marq`：
 /// - 卡 156 宽、间距 16；首卡贴左、无半切（左内边距 0）。
-/// - 自动滚动：默认慢速（HomeViewModel.marqSpeedPxPerSecond，默认 24 → 约 22 px/s）；
+/// - 自动滚动：默认慢速（HomeViewModel.marqSpeedPxPerSecond，默认 24 → 24 px/s）；
 ///   回卷 / 初画时在最左停 2.5 秒再走（壳版 marqDwellUntil），首卡看得见、定得住。
 /// - 内容复制两份循环：滚过一份宽度就无缝回卷。
 /// - 可横向拖动：拖动时暂停自动滚动，松手 1.2 秒后恢复（r28：39.6s 视频

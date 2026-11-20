@@ -726,6 +726,9 @@ final class BodianService {
                 "album": scStr(it, "album"), "albumId": scStr(it, "albumId"),
                 "cover": scStr(it, "albumPic").isEmpty ? scStr(it, "albumPic120") : scStr(it, "albumPic"),
                 "duration": scInt(it, "duration") * 1000,
+                // r30 路线 B：ISRC 透传（上游给才有；VM 实测波点搜索整包
+                // 做 isrc 子串扫描结果为无，本字段恒为空，只是占位透传）。
+                "isrc": scStr(it, "isrc"),
                 "fee": (scInt((it["payInfo"] as? [String: Any]) ?? [:], "payType") > 0) ? 1 : 0]
     }
 

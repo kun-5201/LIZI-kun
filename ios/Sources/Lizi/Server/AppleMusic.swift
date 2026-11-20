@@ -190,6 +190,10 @@ final class AppleMusicService {
         return ["id": "am-\(tid)", "source": "applemusic", "name": name,
                 "artists": scStr(r, "artistName"), "album": scStr(r, "collectionName"),
                 "cover": art, "duration": ms, "fee": 0,
+                // r30 路线 B：ISRC 透传（iTunes Search/Lookup API 全键列表里
+                // 根本没有 isrc，VM 实测确认；本字段恒为空，占位而已。
+                // Apple Music 的 ISRC 只走 catalogSearch 的 attributes.isrc）。
+                "isrc": scStr(r, "isrc"),
                 "previewUrl": scStr(r, "previewUrl")]
     }
 
@@ -260,6 +264,9 @@ final class AppleMusicService {
             return ["id": "am-\(scStr(d, "id"))", "source": "applemusic", "name": name,
                     "artists": scStr(a, "artistName"), "album": scStr(a, "albumName"),
                     "cover": artT, "duration": ms, "fee": 0,
+                    // r30 路线 B：ISRC（catalog attributes.isrc，VM 实测有值，
+                    // 如 TWK972201202；这是 7 个平台里唯一能拿到 ISRC 的路）。
+                    "isrc": scStr(a, "isrc"),
                     "previewUrl": previews?.first.map { scStr($0, "url") } ?? ""]
         }
     }

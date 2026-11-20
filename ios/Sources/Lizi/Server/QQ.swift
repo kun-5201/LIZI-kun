@@ -2224,6 +2224,10 @@ extension QQService {
             "fee": scInt(pay, "pay_play") > 0 ? 1 : 0,
             "mid": mid,
             "songId": scInt(it, "id") > 0 ? scInt(it, "id") : 0,
+            // r30 路线 B：ISRC 透传（上游给才有；VM 实测 QQ lite 搜索行与
+            // get_song_detail_yqq 的 track_info 全键列表均无 isrc，本字段
+            // 恒为空，只是占位透传、不改任何取链逻辑）。
+            "isrc": scStr(it, "isrc"),
         ]
     }
 

@@ -801,6 +801,12 @@ actor FoliaKugouService {
         }
         guard !finalHash.isEmpty || !title.isEmpty else { return nil }
         let id = finalHash.isEmpty ? title : finalHash
+        // r30 路线 B：ISRC 透传（上游给才有；VM 实测酷狗 mobiles 搜索行
+        // 全键无 isrc，详情 songinfo 走 gateway 需设备注册 + AES、VM 未
+        // 直调，Folia 归一化亦无 isrc；本字段大概率恒为空，只是占位透传）。
+        var isrc = strField(raw, "isrc", "ISRC", "Isrc")
+        if isrc.isEmpty { isrc = strField(base, "isrc", "ISRC") }
+        if isrc.isEmpty { isrc = strField(audioInfo, "isrc", "ISRC") }
         var track: [String: Any] = [
             "id": id, "source": "kugou", "name": title,
             "artists": artists.isEmpty ? "未知歌手" : artists.joined(separator: " / "),
@@ -810,6 +816,7 @@ actor FoliaKugouService {
             "hash": finalHash, "cover": coverOf(raw),
             "duration": duration, "fee": 0,
         ]
+        if !isrc.isEmpty { track["isrc"] = isrc }
         if !mixSongId.isEmpty { track["mixSongId"] = mixSongId }
         let fileId = strField(raw, "FileID", "fileid", "file_id")
         if !fileId.isEmpty { track["fileId"] = fileId }

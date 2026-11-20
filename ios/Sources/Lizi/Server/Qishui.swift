@@ -1051,6 +1051,10 @@ final class QishuiService {
             "name": scStr(base, "name"), "artists": artists,
             "album": scStr(album, "name"), "albumId": scStr(album, "id"),
             "cover": cover, "duration": scInt(base, "duration_ms"), "fee": 0,
+            // r30 路线 B：ISRC 透传（base_info 给才有；汽水 base_info /
+            // related_info / display_info / player_info 四块均无 isrc 字段，
+            // 本字段恒为空，只是占位透传）。
+            "isrc": scStr(base, "isrc"),
         ]
         if let player = track["player_info"] { out["player_info"] = player }
         if let disp = track["display_info"] { out["display_info"] = disp }

@@ -191,16 +191,18 @@ final class KuwoService {
         var lines: [String] = []
         var last = raw.startIndex
         for m in splitRe.matches(in: raw, range: ns) {
-            let r = Range(m.range, in: raw)!
+            guard let r = Range(m.range, in: raw) else { continue }
             lines.append(String(raw[last..<r.lowerBound]))
             last = r.upperBound
         }
         lines.append(String(raw[last...]))
         let lineRe = try! NSRegularExpression(pattern: #"^\s*([^=;]+)=([^;]*)"#)
         for line in lines {
-            guard let m = lineRe.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) else { continue }
-            let name = String(line[Range(m.range(at: 1), in: line)!])
-            let value = String(line[Range(m.range(at: 2), in: line)!])
+            guard let m = lineRe.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+                  let r1 = Range(m.range(at: 1), in: line),
+                  let r2 = Range(m.range(at: 2), in: line) else { continue }
+            let name = String(line[r1])
+            let value = String(line[r2])
             if name.hasPrefix(cookiePrefix) { return (name, value) }
         }
         return nil
@@ -387,7 +389,8 @@ final class KuwoService {
     static func decodeWordTiming(_ content: String) -> String? {
         guard let tagMatch = kuwoTagRe.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
               tagMatch.range(at: 1).location != NSNotFound else { return nil }
-        let digits = String(content[Range(tagMatch.range(at: 1), in: content)!])
+        guard let tagRange = Range(tagMatch.range(at: 1), in: content) else { return nil }
+        let digits = String(content[tagRange])
         guard let factors = Int(digits, radix: 8) else { return nil }
         let startFactor = factors / 10
         let durationFactor = factors % 10
@@ -397,9 +400,11 @@ final class KuwoService {
         var out = ""
         var lastEnd = result.startIndex
         for m in kuwoPairRe.matches(in: result, range: ns) {
-            let range = Range(m.range, in: result)!
-            let a = Int(result[Range(m.range(at: 1), in: result)!]) ?? 0
-            let b = Int(result[Range(m.range(at: 2), in: result)!]) ?? 0
+            guard let range = Range(m.range, in: result),
+                  let r1 = Range(m.range(at: 1), in: result),
+                  let r2 = Range(m.range(at: 2), in: result) else { continue }
+            let a = Int(result[r1]) ?? 0
+            let b = Int(result[r2]) ?? 0
             let start = Int(abs(Double(a + b) / Double(2 * startFactor)))
             let duration = Int(abs(Double(a - b) / Double(2 * durationFactor)))
             out += result[lastEnd..<range.lowerBound]
@@ -417,17 +422,20 @@ final class KuwoService {
         var yrcOut: [String] = []
         var lastTime = ""
         for line in decoded.components(separatedBy: .newlines) {
-            guard let m = lrcxLineRe.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) else {
+            guard let m = lrcxLineRe.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+                  let r1 = Range(m.range(at: 1), in: line),
+                  let r2 = Range(m.range(at: 2), in: line),
+                  let r4 = Range(m.range(at: 4), in: line) else {
                 if line.range(of: #"^\[(ti|ar|al|by|offset):"#, options: .regularExpression) != nil { out.append(line) }
                 continue
             }
-            let mm = String(line[Range(m.range(at: 1), in: line)!])
-            let ss = String(line[Range(m.range(at: 2), in: line)!])
-            var frac = m.range(at: 3).location != NSNotFound ? String(line[Range(m.range(at: 3), in: line)!]) : "000"
+            let mm = String(line[r1])
+            let ss = String(line[r2])
+            var frac = m.range(at: 3).location != NSNotFound ? (Range(m.range(at: 3), in: line).map { String(line[$0]) } ?? "000") : "000"
             while frac.count < 3 { frac += "0" }
             frac = String(frac.prefix(3))
             let time = "\(mm):\(ss).\(frac)"
-            let content = String(line[Range(m.range(at: 4), in: line)!])
+            let content = String(line[r4])
             let isTrans = content.hasPrefix("<0,0>")
             let text = content.replacingOccurrences(of: "<[^>]*>", with: "", options: .regularExpression)
                 .trimmingCharacters(in: .whitespaces)
@@ -438,9 +446,12 @@ final class KuwoService {
             if isTrans { continue }
             var chars: [(Int, Int, String)] = []
             for cm in lrcxCharRe.matches(in: content, range: NSRange(content.startIndex..., in: content)) {
-                let off = Int(content[Range(cm.range(at: 1), in: content)!]) ?? 0
-                let d = Int(content[Range(cm.range(at: 2), in: content)!]) ?? 0
-                let t = String(content[Range(cm.range(at: 3), in: content)!])
+                guard let c1 = Range(cm.range(at: 1), in: content),
+                      let c2 = Range(cm.range(at: 2), in: content),
+                      let c3 = Range(cm.range(at: 3), in: content) else { continue }
+                let off = Int(content[c1]) ?? 0
+                let d = Int(content[c2]) ?? 0
+                let t = String(content[c3])
                 if !t.isEmpty { chars.append((off, d, t)) }
             }
             if chars.isEmpty { continue }
@@ -555,6 +566,9 @@ final class KuwoService {
             "artists": artists.isEmpty ? "未知歌手" : artists,
             "album": album, "albumId": albumId, "cover": cover,
             "duration": d * 1000, "fee": 0,
+            // r30 路线 B：ISRC 透传（上游给才有；VM 实测酷我搜索行整包做
+            // isrc 子串扫描结果为无，本字段恒为空，只是占位透传）。
+            "isrc": Self.firstNonEmpty([scStr(it, "isrc"), scStr(it, "ISRC")]),
         ]
     }
 

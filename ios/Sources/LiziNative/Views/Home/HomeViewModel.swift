@@ -26,6 +26,18 @@ import SwiftUI
 ///   未登录退到雷达推荐；qishui 走推荐流、bodian 走潮趣日推、kuwo /
 ///   kugou / applemusic 走各家公开推荐（r24 第 1 件逐平台核对，见
 ///   NativeBridge.dailyRecommend 注释；7 家都有每日内容，没有空接口）。
+///
+/// r30（用户 2026-11-21：首页 v4 图定稿）：r28 的上下翻页器整套撤掉——
+/// `HomeRailPagerView.swift`（含 `HomeRailPageView`）删文件、`railPageIndex` /
+/// `railPage` / `railPageTitle` / `showRailPage` / `moveRailPage` 全删；
+/// 来源改成点平台条标题弹小菜单切（壳版 `#hall-src-menu` 思路），
+/// 状态只剩 `selectedSource` + `selectSource(_:)`；取数层
+/// （`railResults` / `loadRailPage` / `railEntries` / `railEmptyReason` /
+/// `isMixedPlaylistsPage`）原样保留、只换触发点，`HomeRailPage` 枚举
+/// 改叫来源列表（顺序与标题不变）。
+/// 注：`selectedSource` / `selectSource` 的名字与 r26 删掉的旧
+/// `Source` 枚举那套同名，但不是同一套——r26 那套是 chips 的
+/// `Source` 枚举，r30 这套是 `HomeRailPage` 来源。
 @MainActor
 final class HomeViewModel: ObservableObject {
     // MARK: - 持久化键（原生版全部加 lizi.native 前缀，与壳版 localStorage 隔离）
@@ -165,12 +177,12 @@ final class HomeViewModel: ObservableObject {
     /// 立即清空首页模型（Moumusic resetContent 同款）：切台瞬间旧平台的
     /// 内容全部下掉；isLoadingDaily 置 true，等新 loadDaily 回来再落
     /// false / 空原因。
-    /// r28 分页器：切台回到每日推荐（第 1 栏），各栏缓存是分平台的、清掉重拉。
+    /// r30：切台回到每日推荐（第 1 个来源），各栏缓存是分平台的、清掉重拉。
     private func resetHomeContent() {
         daily = []
         dailyEmptyReason = nil
         isLoadingDaily = true
-        railPageIndex = 0
+        selectedSource = .daily
         railResults = [:]
         railLoadingPages = []
     }
@@ -215,17 +227,21 @@ final class HomeViewModel: ObservableObject {
         }
     }
 
-    // MARK: - 每日推荐面板分页器（r28，见文件头）
+    // MARK: - 面板来源（r30，见文件头）
 
-    /// 当前栏目下标（0...5，对应 `HomeRailPage`；默认 0 = 每日推荐）。
-    @Published var railPageIndex: Int = 0
+    /// 当前来源（默认 `.daily` = 每日推荐；点平台条标题弹菜单切）。
+    @Published var selectedSource: HomeRailPage = .daily
 
-    /// 当前栏目。
-    var railPage: HomeRailPage { HomeRailPage(rawValue: railPageIndex) ?? .daily }
-
-    /// 当前栏目的标题（喜欢栏按平台取真名，唯一事实来源
+    /// 当前来源的标题（喜欢栏按平台取真名，唯一事实来源
     /// `RailKind.likedTitle(for:)`）。
-    var railPageTitle: String { railPage.title(platform: selectedPlatform) }
+    var sourceTitle: String { selectedSource.title(platform: selectedPlatform) }
+
+    /// 切来源（菜单点选唯一入口；点当前来源也触发一次该栏拉取，
+    /// 喜欢栏不缓存、每次切回都重拉，见 `loadRailPage`）。
+    func selectSource(_ page: HomeRailPage) {
+        selectedSource = page
+        loadRailPage(page)
+    }
 
     /// 各栏取到的结果（首次访问该栏时拉取、之后缓存；切台时随
     /// resetHomeContent 清掉，各栏缓存是分平台的）。
@@ -236,24 +252,6 @@ final class HomeViewModel: ObservableObject {
     @Published private(set) var railLoadingPages: Set<HomeRailPage> = []
 
     func isRailPageLoading(_ page: HomeRailPage) -> Bool { railLoadingPages.contains(page) }
-
-    /// 切到指定栏（切栏即触发该栏首访拉取，见 `loadRailPage`）。
-    func showRailPage(_ page: HomeRailPage) {
-        guard page != railPage else { loadRailPage(page); return }
-        railPageIndex = page.rawValue
-        loadRailPage(page)
-    }
-
-    /// 上/下一栏（delta +1 = 上滑切下一个，-1 = 下滑回上一个；
-    /// 到头返回 false、下标不动，不循环）。
-    @discardableResult
-    func moveRailPage(by delta: Int) -> Bool {
-        let next = min(max(railPageIndex + delta, 0), HomeRailPage.allCases.count - 1)
-        guard next != railPageIndex else { return false }
-        railPageIndex = next
-        loadRailPage(railPage)
-        return true
-    }
 
     /// 该栏在面板里显示的条目（groupHeader 不可点，只做分组说明）。
     /// - 每日推荐：不在这里取（走修好的 loadDaily 链路）。
@@ -391,9 +389,8 @@ final class HomeViewModel: ObservableObject {
     }
 }
 
-/// 每日推荐面板的 6 个栏目（r28 定稿顺序，用户 2026-11-21 01:21–01:38 确认）：
-/// 每日推荐 → 精选 → 用户收藏 → 喜欢的歌曲 → 用户创建的歌单 → 电台。
-/// 面板一次只显示一个栏目，上滑切下一个、下滑回上一个，到头停住、不循环。
+/// 每日推荐面板的 6 个来源（r28 定稿顺序，用户 2026-11-21 01:21–01:38 确认；
+/// r30：上下翻页器撤掉，改点平台条标题弹菜单切来源，一次只显示一个来源）。
 /// 「用户收藏」与「用户创建的歌单」共用 railMyPlaylists 一个取数口
 /// （见 `HomeViewModel.railEntries(for:)` 的分组说明）。
 enum HomeRailPage: Int, CaseIterable {
@@ -427,7 +424,8 @@ enum HomeRailPage: Int, CaseIterable {
         }
     }
 
-    /// 「n/6」里的 n（1-based）。
+    /// 来源在菜单里的序号（1-based；r30：栏头「n/6」已随翻页器撤掉，
+    /// 序号只留作来源顺序的事实来源，不再显示）。
     var position: Int { rawValue + 1 }
 }
 

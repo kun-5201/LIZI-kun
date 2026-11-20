@@ -87,7 +87,12 @@ final class PlaybackStore: ObservableObject {
 
     private let player = AVPlayer()
     /// r29 task 1：Apple Music 整首播放引擎（applicationMusicPlayer）。
-    private let appleMusicPlayer = AppleMusicPlayer()
+    /// r30（r29 闪退二次调查 D2）：改懒创建——r29 是启动时就建
+    /// AppleMusicPlayer（init 里 beginGeneratingPlaybackNotifications +
+    /// 两个通知订阅），每次非 AM 点播还调一次 stop()；6 个非 AM 平台
+    /// 本不该碰 MediaPlayer 半下。现在只有 Apple Music 全曲真正起播
+    /// 时才建，非 AM 全程不建、不调、不订阅。
+    private var appleMusicPlayer: AppleMusicPlayer?
     /// 当前是否走 Apple Music 整首引擎（true 时 pause/resume/seek/进度都走它，
     /// AVPlayer 那边是停着的；切到非 AM 的歌 / 回落试听时清掉）。
     private var usingAppleMusicPlayer = false
@@ -429,7 +434,7 @@ final class PlaybackStore: ObservableObject {
         guard currentTrack != nil else { return }
         activateSessionOnce()
         if usingAppleMusicPlayer {
-            appleMusicPlayer.resume()
+            appleMusicPlayer?.resume()
         } else {
             player.play()
         }
@@ -441,8 +446,8 @@ final class PlaybackStore: ObservableObject {
     /// 后续 resume 走 AV 路径（不编一次从头重播）。
     func pause() {
         if usingAppleMusicPlayer {
-            appleMusicPlayer.pause()
-            if appleMusicPlayer.nowPlayingStoreID == nil {
+            appleMusicPlayer?.pause()
+            if appleMusicPlayer?.nowPlayingStoreID == nil {
                 stopAppleMusicEngine()
             }
         } else {
@@ -538,7 +543,7 @@ final class PlaybackStore: ObservableObject {
     /// 跳到指定进度（秒；按当前引擎分流）。
     func seek(to time: TimeInterval) {
         if usingAppleMusicPlayer {
-            appleMusicPlayer.seek(to: time)
+            appleMusicPlayer?.seek(to: time)
             progress = max(0, min(time, duration))
             return
         }
@@ -617,7 +622,7 @@ final class PlaybackStore: ObservableObject {
     /// 停掉 Apple Music 整首引擎（切歌到非 AM / 回落试听 / 停播时调）；
     /// 不动队列与当前曲目，只清引擎标记。
     private func stopAppleMusicEngine() {
-        appleMusicPlayer.stop()
+        appleMusicPlayer?.stop()
         usingAppleMusicPlayer = false
     }
 
@@ -677,12 +682,20 @@ final class PlaybackStore: ObservableObject {
         // 订阅缓存过期时先现验一次，重启后也能直接播整首）。起播成功
         // 直接 return，不走 30 秒试听链；失败（起播失败等）回落到现有
         // resolveURL → AVPlayer 试听流程，绝不崩、绝不卡在 isLoading。
-        if await AppleMusicAuth.shared.readyForFullPlayback(track: track) {
+        // r30（D2 限流）：AM 分支只在 Apple Music 平台才进——非 AM 的歌
+        // 连 readyForFullPlayback 都不调；停 AM 引擎也只在上一首真走
+        // AM 引擎时（usingAppleMusicPlayer）才调。非 AM 点播路径至此
+        // 与 r28 一字相同，全程不碰 MediaPlayer。
+        if track.platform == "applemusic",
+           await AppleMusicAuth.shared.readyForFullPlayback(track: track) {
             if await startAppleMusicTrack(track: track, gen: gen) { return }
             DiagLog.shared.recordPlaybackStep("am fulltrack fallback to preview source=\(track.platform) id=\(track.id) gen=\(gen)")
         }
         // 非 AM 全曲路径：先停掉另一个播放器（AM 引擎可能还在播上一首 AM 的歌）。
-        stopAppleMusicEngine()
+        // r30：只有真走过 AM 引擎时才停；没建过引擎时不调 stop()。
+        if usingAppleMusicPlayer {
+            stopAppleMusicEngine()
+        }
 
         let result = await resolveURL(for: track, gen: gen)
         // 第 22 轮第 5 件：resolve 回来先查代际（Moumusic 同款守卫）——
@@ -786,8 +799,12 @@ final class PlaybackStore: ObservableObject {
         player.replaceCurrentItem(with: nil)
         isPlaying = false
         DiagLog.shared.recordPlaybackStep("am player start source=\(track.platform) id=\(track.id) storeID=\(storeID) queueCount=\(ids.count) gen=\(gen)")
+        // r30（D2）：引擎懒创建——第一次 AM 全曲起播时才建 AppleMusicPlayer，
+        // 之前是 PlaybackStore 启动时就建。非 AM 点播永远到不了这里。
+        if appleMusicPlayer == nil { appleMusicPlayer = AppleMusicPlayer() }
+        guard let amPlayer = appleMusicPlayer else { return false }
         wireAppleMusicCallbacks(gen: gen)
-        let ok = await appleMusicPlayer.play(storeIDs: ids, startAt: 0)
+        let ok = await amPlayer.play(storeIDs: ids, startAt: 0)
         guard ok, gen == currentPlayGeneration else {
             DiagLog.shared.recordPlaybackStep("am player start FAIL source=\(track.platform) id=\(track.id) gen=\(gen)")
             return false
@@ -805,7 +822,10 @@ final class PlaybackStore: ObservableObject {
     /// 接 AM 播放器的三个回调（每首 AM 全曲起播时重接；回调里先查代际，
     /// 旧一代的回调绝不碰新歌的状态）。
     private func wireAppleMusicCallbacks(gen: Int) {
-        appleMusicPlayer.onProgress = { [weak self] time, dur in
+        // r30（D2）：引擎懒创建后这里才有实例；没建过时直接回（调用方
+        // startAppleMusicTrack 已先建好，正常到不了这句）。
+        guard let amPlayer = appleMusicPlayer else { return }
+        amPlayer.onProgress = { [weak self] time, dur in
             guard let self else { return }
             Task { @MainActor in
                 guard self.usingAppleMusicPlayer, gen == self.currentPlayGeneration else { return }
@@ -820,7 +840,7 @@ final class PlaybackStore: ObservableObject {
                 if idx != self.currentLyricIndex { self.currentLyricIndex = idx }
             }
         }
-        appleMusicPlayer.onNowPlayingItemChanged = { [weak self] storeID in
+        amPlayer.onNowPlayingItemChanged = { [weak self] storeID in
             guard let self else { return }
             Task { @MainActor in
                 guard self.usingAppleMusicPlayer, gen == self.currentPlayGeneration else { return }
@@ -848,7 +868,7 @@ final class PlaybackStore: ObservableObject {
                 }
             }
         }
-        appleMusicPlayer.onPlaybackEnded = { [weak self] in
+        amPlayer.onPlaybackEnded = { [weak self] in
             guard let self else { return }
             Task { @MainActor in
                 guard self.usingAppleMusicPlayer, gen == self.currentPlayGeneration else { return }

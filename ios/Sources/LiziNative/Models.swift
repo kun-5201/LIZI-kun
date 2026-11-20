@@ -203,6 +203,14 @@ struct Track: Identifiable, Codable, Hashable {
     var albumAudioId: Int
     /// 歌手 id 列表（平台有才填）。
     var artistIds: [String]
+    /// ISRC（国际标准录音编码，12 位，全球统一、不受语言影响）。
+    /// r30 路线 B 用它走 Apple Music catalog 精确匹配。
+    /// 只有 Apple Music 的 catalog 数据实测带 ISRC（2026-11-21 VM 实测：
+    /// 其余 6 台的搜索行与歌曲详情里都没有 isrc 字段，见
+    /// AppleAnimatedArtwork.swift 文件头的 r30 平台表）；没有时为空，
+    /// 路线 B 回落名字匹配。归一化（去连字符/空白、全大写、12 位校验）
+    /// 在 Track.from 里由 AppleAnimatedArtworkProvider.normalizedISRC 做。
+    var isrc: String
 
     /// 时长（秒，UI/播放器用）。
     var durationSeconds: TimeInterval { TimeInterval(durationMs) / 1000 }
@@ -212,7 +220,7 @@ struct Track: Identifiable, Codable, Hashable {
          durationMs: Int = 0, quality: AudioQuality? = nil, vip: Bool = false,
          isTrial: Bool = false, platformKey: String = "", albumId: String = "",
          albumAudioId: Int = 0,
-         artistIds: [String] = []) {
+         artistIds: [String] = [], isrc: String = "") {
         self.id = id
         self.platform = platform
         self.title = title
@@ -227,6 +235,31 @@ struct Track: Identifiable, Codable, Hashable {
         self.albumId = albumId
         self.albumAudioId = albumAudioId
         self.artistIds = artistIds
+        self.isrc = isrc
+    }
+
+    /// r30：容错解码——队列持久化（PlaybackStore）存的是旧版 Track（无 isrc
+    /// 键），合成的 Codable 会因缺键整个解码失败、队列丢光；这里逐字段
+    /// decodeIfPresent、缺失按 memberwise init 的缺省值补，旧存档照常读回。
+    /// encode 仍用合成实现（不写 encode(to:)）。
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        platform = try c.decodeIfPresent(String.self, forKey: .platform) ?? ""
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        artist = try c.decodeIfPresent(String.self, forKey: .artist) ?? ""
+        album = try c.decodeIfPresent(String.self, forKey: .album) ?? ""
+        coverURL = try c.decodeIfPresent(URL.self, forKey: .coverURL)
+        durationMs = try c.decodeIfPresent(Int.self, forKey: .durationMs) ?? 0
+        quality = try c.decodeIfPresent(AudioQuality.self, forKey: .quality)
+        vip = try c.decodeIfPresent(Bool.self, forKey: .vip) ?? false
+        isTrial = try c.decodeIfPresent(Bool.self, forKey: .isTrial) ?? false
+        let rawKey = try c.decodeIfPresent(String.self, forKey: .platformKey) ?? ""
+        platformKey = rawKey.isEmpty ? id : rawKey
+        albumId = try c.decodeIfPresent(String.self, forKey: .albumId) ?? ""
+        albumAudioId = try c.decodeIfPresent(Int.self, forKey: .albumAudioId) ?? 0
+        artistIds = try c.decodeIfPresent([String].self, forKey: .artistIds) ?? []
+        isrc = try c.decodeIfPresent(String.self, forKey: .isrc) ?? ""
     }
 }
 

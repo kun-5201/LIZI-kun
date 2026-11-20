@@ -895,11 +895,16 @@ extension Track {
         if let arr = dict["artistIds"] as? [String] { artistIds = arr }
         else if let arr = dict["artistIds"] as? [NSNumber] { artistIds = arr.map { $0.stringValue } }
         else { artistIds = [] }
+        // r30 路线 B：ISRC 透传（各平台归一化层只负责把上游给的 isrc 原样放进
+        // 字典；实测只有 Apple Music 的 catalog 数据带它，其余 6 台没有，
+        // 见 AppleAnimatedArtwork.swift 文件头 r30 平台表）。归一化 +
+        // 12 位校验不合格直接丢（空串），不把脏数据发去 catalog 查。
+        let isrc = AppleAnimatedArtworkProvider.normalizedISRC((dict["isrc"] as? String) ?? "")
         return Track(id: idString, platform: platform, title: title,
                      artist: artist.isEmpty ? "未知歌手" : artist, album: album,
                      coverURL: URL(string: coverString),
                      durationMs: durationMs, vip: fee != 0,
                      platformKey: platformKey, albumId: albumId,
-                     albumAudioId: albumAudioId, artistIds: artistIds)
+                     albumAudioId: albumAudioId, artistIds: artistIds, isrc: isrc)
     }
 }

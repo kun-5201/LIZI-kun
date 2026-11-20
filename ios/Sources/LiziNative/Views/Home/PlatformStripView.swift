@@ -4,20 +4,23 @@ import UIKit
 /// 平台条：模板 v2（~/workspace/lizi-home-template-portrait.png /
 /// lizi-home-template-landscape.png）+ 壳版铺色面板顶部的 `.hall-plat__bar`。
 ///
-/// - 模板 v2 头行（一行三列，左→右）：标题（「每日推荐」，
-///   24pt 粗体——模板量：4 字占 92pt；壳版 `.pstrip__name` 是 13px，
-///   模板把面板标题放大了，按已确认的模板做；要改回 13pt 改一行。
-///   r26（用户 2026-11-20 22:39–22:40）：首页 5 个来源 chips 全删、
-///   只留每日推荐，标题不再跟来源切换走，固定就是「每日推荐」）
-///   → 7 个平台图标（28pt、间距 5，
-///   模板量：每块 28×28、间距 5；壳版 `.pstrip__i` 是 32px，
-///   模板把图标收小了才放得下大标题 + 搜索）→ 搜索
-///   （壳版 `.pstrip__search` 在长条右列；模板右端也有放大镜）。
-/// - 图标 28pt、圆角 28%（≈8pt），选中描 2pt 圈（壳版
+/// - 面板头行（一行三列，左→右）：标题（当前来源名，默认「每日推荐」，
+///   r30：19pt 粗体——逐帧规格（verification/shell-video-39s-home-3d.md）
+///   与 v4 图（~/workspace/lizi-home-daily-v4.png）量：约 36px ≈ 19pt；
+///   旧模板 v2 的 24pt 已作废）→ 7 个平台图标（r30：26pt、间距 5，
+///   逐帧规格每枚约 48px ≈ 26pt；旧 28pt 已作废）→ 搜索
+///   （r30：字形 19pt，逐帧规格约 35px ≈ 19pt；旧 18pt 已作废）。
+///   r30：标题是来源切换入口——点标题弹来源小菜单（壳版
+///   `#hall-src-menu` 思路，浮层由 HomeView 挂），标题文案跟当前来源走
+///   （`viewModel.sourceTitle`，默认「每日推荐」）；标题后挂一枚小
+///   chevron.down（9pt）表示可点开菜单。图标点按仍是切平台，
+///   与来源切换无关（平台 ≠ 来源：平台是 7 家音源，来源是面板里的
+///   6 个栏目）。
+/// - 图标 26pt、圆角 28%（≈7pt），选中描 2pt 圈（壳版
 ///   `0 0 0 2px currentColor`；浅场 currentColor 就是墨色）。
 ///   r28 tone-aware：面板跟专辑取色后深场时标题、搜索图标、选中圈
 ///   都改白色（`isDark` 由调用方 HomeView 的 panelTone 传入），
-///   浅场保持墨色；图标 28pt、条高 48pt 不动。
+///   浅场保持墨色；图标 26pt、条高 48pt 不动。
 ///   图标下不再挂名字（名字只在左列出现一次——现在是「每日推荐」标题）。
 /// - 不横向滚动：图标太宽时只收图标（壳版 `fitPlatBar`，缩放下限 0.55，
 ///   标题不动）；标题宽用 PreferenceKey 实测，初值按最长标题
@@ -48,7 +51,8 @@ struct PlatformStripView: View {
     /// 右端搜索钮用（模板 v2 + 壳版 `.pstrip__search`）。
     @EnvironmentObject private var nav: AppNavigation
 
-    /// 标题实测宽（PreferenceKey 回写；初值 100 = 「每日推荐」4 字 × 24pt 预估）。
+    /// 标题实测宽（PreferenceKey 回写；初值 100 = 「每日推荐」4 字 × 19pt
+    /// 预估 + chevron；最长来源「用户创建的歌单」约 133pt，实测后自纠）。
     @State private var nameWidth: CGFloat = 100
 
     /// r28 tone-aware：调用方（HomeView）按在播专辑取色 `panelTone.isDark`
@@ -56,7 +60,12 @@ struct PlatformStripView: View {
     /// 默认 false（浅场），与改前行为一致。
     var isDark: Bool = false
 
-    /// 面板标题：固定「每日推荐」（r26：来源 chips 已删，不再跟来源切换走）。
+    /// r30：点标题弹来源小菜单（调用方 HomeView 挂浮层；不传则标题不可点，
+    /// 只显示当前来源名）。本条全仓只在 HomeView 用，调用方必传。
+    var onSourceMenuTap: (() -> Void)? = nil
+
+    /// 面板标题：当前来源名（`viewModel.sourceTitle`，默认「每日推荐」；
+    /// r26「固定每日推荐」已作废，r30 起跟来源切换走）。
 
     /// r22j 平台管理：平台条只显示设置 → 平台管理勾选的平台（顺序不变，
     /// 仍是 `LiziPlatforms.all` 的顺序）；不勾选的不显示。没存 = 全部
@@ -65,17 +74,17 @@ struct PlatformStripView: View {
         LiziPlatforms.all.filter { viewModel.visiblePlatforms.contains($0.id) }
     }
 
-    /// 图标自然宽 = 可见数 × 28 + (可见数 − 1) × 5（模板 v2：每块 28×28、
-    /// 间距 5；全部勾选时 7×28 + 6×5 = 226；取消勾选后随可见数变小）。
+    /// 图标自然宽 = 可见数 × 26 + (可见数 − 1) × 5（r30：每块 26×26、
+    /// 间距 5；全部勾选时 7×26 + 6×5 = 212；取消勾选后随可见数变小）。
     private var iconsNaturalWidth: CGFloat {
         let n = CGFloat(max(visiblePlatforms.count, 1))
-        return n * 28 + (n - 1) * 5
+        return n * 26 + (n - 1) * 5
     }
 
     /// 图标缩放（壳版 fitPlatBar：只收图标，下限 0.55；标题、搜索不动）。
-    /// 可用宽 = 总宽 − 标题宽 − 搜索钮 32 − 三处间距 12×3。
+    /// 可用宽 = 总宽 − 标题宽 − 搜索钮 28 − 三处间距 8×3。
     private func barScale(totalWidth: CGFloat) -> CGFloat {
-        let avail = totalWidth - nameWidth - 32 - 36
+        let avail = totalWidth - nameWidth - 28 - 24
         guard avail > 0 else { return 0.55 }
         return max(0.55, min(1, avail / iconsNaturalWidth))
     }
@@ -83,40 +92,53 @@ struct PlatformStripView: View {
     var body: some View {
         GeometryReader { geo in
             let scale = barScale(totalWidth: geo.size.width)
-            HStack(spacing: 12) {
-                Text("每日推荐")
-                    .font(.liziBody(size: 24, weight: .bold))
-                    .foregroundColor(isDark ? .white : LiziTokens.ink)
-                    .lineLimit(1)
-                    .background(
-                        GeometryReader { proxy in
-                            Color.clear.preference(
-                                key: PlatBarNameWidthKey.self,
-                                value: proxy.size.width
+            HStack(spacing: 8) {
+                // r30：标题是来源切换入口（点弹小菜单）；标题后小 chevron
+                // 表示可点开。标题宽用 PreferenceKey 实测（见 Text 内）。
+                Button(action: { onSourceMenuTap?() }) {
+                    HStack(spacing: 4) {
+                        Text(viewModel.sourceTitle)
+                            .font(.liziBody(size: 19, weight: .bold))
+                            .foregroundColor(isDark ? .white : LiziTokens.ink)
+                            .lineLimit(1)
+                            .background(
+                                GeometryReader { proxy in
+                                    Color.clear.preference(
+                                        key: PlatBarNameWidthKey.self,
+                                        value: proxy.size.width
+                                    )
+                                }
                             )
-                        }
-                    )
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(isDark ? .white.opacity(0.8) : LiziTokens.ink2)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(onSourceMenuTap == nil)
+                .accessibilityLabel("来源：\(viewModel.sourceTitle)，点按切换来源")
                 HStack(spacing: 5) {
                     ForEach(visiblePlatforms, id: \.id) { platform in
                         Button(action: { viewModel.selectPlatform(platform.id, playbackStore: playback) }) {
-                            PlatformIconView(platform: platform, selected: platform.id == viewModel.selectedPlatform, size: 28, ringColor: isDark ? .white : LiziTokens.ink)
+                            PlatformIconView(platform: platform, selected: platform.id == viewModel.selectedPlatform, size: 26, ringColor: isDark ? .white : LiziTokens.ink)
                         }
                         .accessibilityLabel("切换到\(platform.name)")
                     }
                 }
                 .scaleEffect(scale, anchor: .leading)
-                .frame(width: iconsNaturalWidth * scale, height: 28, alignment: .leading)
+                .frame(width: iconsNaturalWidth * scale, height: 26, alignment: .leading)
                 Spacer()
                 // 模板 v2 + 壳版 `.pstrip__search`：长条右端放大镜，点进搜索页。
+                // r30：字形 19pt（逐帧规格约 35px ≈ 19pt），触摸框 28×28。
                 Button(action: { nav.show(.search) }) {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(.system(size: 19, weight: .semibold))
                         .foregroundColor(isDark ? .white : LiziTokens.ink2)
-                        .frame(width: 32, height: 32)
+                        .frame(width: 28, height: 28)
                 }
                 .accessibilityLabel("搜索")
             }
-            .frame(height: 48) // 壳版 `.hall-plat__bar` 原高 42px；原生图标放大到 28 后条高 48，图标垂直居中，上下各留 10pt。
+            .frame(height: 48) // 壳版 `.hall-plat__bar` 原高 42px；原生图标放大到 26 后条高 48，图标垂直居中，上下各留 11pt。
         }
         .frame(height: 48)
         .onPreferenceChange(PlatBarNameWidthKey.self) { nameWidth = $0 }
@@ -137,7 +159,7 @@ private struct PlatBarNameWidthKey: PreferenceKey {
 struct PlatformIconView: View {
     let platform: LiziPlatforms.Info
     let selected: Bool
-    /// 图标边长（默认 32；平台条传 28，设置行传 26）。
+    /// 图标边长（默认 32；平台条传 26，设置行传 26）。
     var size: CGFloat = 32
     /// 选中圈颜色（默认墨色；r28 tone-aware：平台条深场时传白色）。
     /// 设置页 / 账号详情不传，保持墨色不变。

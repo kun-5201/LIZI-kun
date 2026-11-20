@@ -82,6 +82,46 @@ import UIKit
 ///   （15405970）、《Into the Blue Again》（183211887）——editorialVideo 字段
 ///   根本不存在，走路线 A。中文搜索也通（"周杰伦 最伟大的作品" 在 us 店面搜到
 ///   正确专辑排第一）。
+/// - r30（2026-11-21，用户决定：路线 B 改用 Apple Music 的艺人/专辑 ID 去对，
+///   能适配的全部适配）：名字匹配的别名表只有 11 组手写条目，表外歌手/专辑仍配不上，
+///   改走 ISRC（国际标准录音编码，全球统一、不受语言影响）。
+///   链路：Track.isrc → GET /v1/catalog/{sf}/songs?filter[isrc]=…&include=albums
+///   → 逐首取其专辑 → 首个有 editorialVideo 的专辑才算命中 → 下载视频。
+///   关键坑（VM 实测）：同一个 ISRC 可对应多首歌——TWK972201202（《最伟大的作品》）
+///   在 us 返回 2 首，data[0] 是单曲版（专辑 1721448748，无视频），data[1] 才是
+///   专辑版（1721454339，有视频）；只取 data[0] 会错判无视频，必须逐首试完。
+///   ISRC 没有或查不到时回落 r29 名字匹配（ICU 简繁 + 别名表 + 三店面），
+///   别名表与 7 天否定缓存逻辑原样保留。成功配上的 (albumId, storefront)
+///   按 ISRC 键缓存（内存 + UserDefaults，30 天 TTL，上限 64 条），
+///   清理入口见 clearRouteBCaches()（否定缓存与 ISRC 缓存一起清）。
+///   7 平台 ISRC 能不能拿到（2026-11-21 VM 对真上游实测，非凭记忆）：
+///   - Apple Music：能。catalog attributes.isrc（实测 TWK972201202 /
+///     HKG732264813）；iTunes Search/Lookup API 全键列表里根本没有 isrc，
+///     所以 Apple Music 的 ISRC 只走 catalog（有开发者 token 时）。
+///   - 网易：不能。搜索行与 weapi /v3/song/detail 全键列表均无 isrc。
+///   - QQ：不能。DoSearchForQQMusicLite 搜索行与 get_song_detail_yqq 的
+///     track_info 全键列表均无 isrc。
+///   - 酷狗：不能。mobiles.kugou.com 搜索行全键无 isrc；详情 songinfo 走
+///     gateway 需设备注册 + AES（VM 无法直调）；Folia 归一化亦无 isrc。
+///   - 汽水：不能。VM 无法直调（设备注册 + ECDSA 签名）；base_info /
+///     related_info / display_info / player_info 四块均无 isrc 字段；
+///     Folia 与 Android 壳版服务均无 isrc。
+///   - 波点：不能。搜索整包（3 首，含 mediaBasicInfo / audios）做
+///     isrc 子串扫描，结果为无。
+///   - 酷我：不能。search.kuwo.cn 搜索行整包做 isrc 子串扫描，结果为无；
+///     www musicInfo 详情需 Hm_Iuvt_ token + DES Secret（VM 未直调），
+///     m 站 songinfoandlrc 回 301 查询失败。
+///   结论：ISRC 路实际只有 Apple Music 一家能走；其余 6 台拿不到 ISRC，
+///   老实走名字路兜底，不编假 ISRC、不拿别家字段冒充。
+///   回归（VM 实测）：《最伟大的作品》ISRC TWK972201202 → 专辑版
+///   1721454339 有 editorialVideo（配上）；《海屿你》ISRC HKG732264813 →
+///   专辑 1692508526（Single）无 editorialVideo，另一 Single 1895803820
+///   直接查专辑也无 editorialVideo，仍走路线 A。
+///   Token：仍走本文件现有的两路（用户已贴 token → 网页 token，401 回落），
+///   与 AppleMusicAuth.developerToken() 同源（同一批 UserDefaults 键 +
+///   同一套抠 token 正则）；不直接调 developerToken() 是因为它只回第一个
+///   可用 token，用户 token 被 amp-api 拒时无法回落网页 token——没有另写
+///   第三套取 token 逻辑，AppleMusicAuth.swift 本轮未改。
 /// 缓存与回落：
 /// - Caches/apple-animated-artwork/<key>-p.mp4 / -s.mp4（竖版 3:4 供锁屏、方形
 ///   1:1 备用），与路线 A 的 animated-artwork/ 目录分开；预览图同目录存
@@ -140,6 +180,13 @@ final class AppleAnimatedArtworkProvider {
     /// 升级后第一次 prepare 必须清掉（见 migrateMatchV2IfNeeded）。bool
     /// 缺省为 false，正好表示“还没清过”。
     private static let matchV2ClearedKey = "lizi.routeb.matchv2.cleared"
+    /// r30：ISRC → (albumId, storefront) 缓存的 UserDefaults 键（JSON：
+    /// { ISRC: { "albumId": ..., "storefront": ..., "savedAt": ... } }）。
+    /// 只记“配上过且当时有视频”的成功结论；ISRC 查不到 / 无视频不记，
+    /// 由原有的 match 键否定缓存（route-b-no-match / no-video）兜底。
+    private static let isrcAlbumCacheKey = "lizi.routeb.isrcalbums"
+    private static let isrcAlbumCacheTTL: TimeInterval = 30 * 24 * 3600
+    private static let isrcAlbumCacheMax = 64
     /// 用户自己的 MusicKit 开发者 token（与 AppleMusic.swift 的 devTokenKey 同值，
     /// 设置里已有粘贴入口；这里不用跨文件引用常量，免得以后挪文件时断链）。
     private static let userDevTokenKey = "lizi.applemusic.devtoken"
@@ -153,6 +200,12 @@ final class AppleAnimatedArtworkProvider {
     /// lane 跟着存：否定缓存命中时也要按首歌把结论重记一笔，否则 7 天内再播
     /// 这首歌，诊断里看不到路线 B 的任何结论（r20 补）。
     private var negatives: [String: (date: Date, lane: String)] = [:]
+    /// r30：ISRC → (albumId, storefront, 记入时间) 的内存镜像；落盘见
+    /// isrcAlbumCacheKey。视频文件本身仍按 match 键（albumKey）存，ISRC
+    /// 缓存只省“ISRC → song → album”的查找，不另起一套视频键（否则同一张
+    /// 专辑经 ISRC 路与名字路会存两份视频）。
+    private var isrcAlbums: [String: (albumId: String, storefront: String, date: Date)] = [:]
+    private var isrcCacheLoaded = false
     /// 最近一次按 key 落定的路线 B 结论 lane（五个结论之一）：prepare 同 key
     /// 合并调用（第二首歌）回调时，按这个 lane 给那首歌补记一笔。
     private var lastConclusion: [String: String] = [:]
@@ -320,6 +373,26 @@ final class AppleAnimatedArtworkProvider {
                 album = await albumIdForSong(songId, key: key)
             }
         }
+        // r30 ISRC 路（全平台）：Track.isrc 非空时先走 ISRC 精确匹配——
+        // 同录音全球同一编码，不受歌手/专辑名的语言与简繁影响。命中（且
+        // 该专辑有视频）直接用；没命中（无此 ISRC / 同 ISRC 的专辑都没
+        // 视频 / 本次没查成）回落名字匹配，不记否定（否定只由名字路的
+        // 确定性结论或 no-video 记，见下两处 markNegative；ISRC 本次没查成
+        // 时 ampFailedKeys 已由 ampGet 置上，名字路同样查不成时走
+        // amp-failure lane，不会误记 no-match）。
+        if album == nil, !track.isrc.isEmpty {
+            if let hit = await albumIdByISRC(track.isrc, key: key) {
+                album = (hit.id, hit.storefront)
+                editorial = hit.editorial
+                DiagLog.shared.recordLog(category: "apple-animated-artwork",
+                    message: "route B ISRC hit isrc=\(Self.normalizedISRC(track.isrc)) albumId=\(hit.id) storefront=\(hit.storefront) track=\(track.title)",
+                    fields: ["lane": "route-b-isrc-hit", "isrc": Self.normalizedISRC(track.isrc), "albumId": hit.id, "storefront": hit.storefront, "platform": track.platform])
+            } else {
+                DiagLog.shared.recordLog(category: "apple-animated-artwork",
+                    message: "route B ISRC miss, falling back to name match isrc=\(Self.normalizedISRC(track.isrc)) track=\(track.title) artist=\(track.artist) album=\(track.album)",
+                    fields: ["lane": "route-b-isrc-miss", "isrc": Self.normalizedISRC(track.isrc), "platform": track.platform])
+            }
+        }
         if album == nil {
             album = await albumIdBySearch(artist: track.artist, album: track.album, key: key)
         }
@@ -414,6 +487,28 @@ final class AppleAnimatedArtworkProvider {
         lock.unlock()
     }
 
+    /// r30 公开：清掉路线 B 的全部缓存结论——7 天否定缓存（clearNegatives）
+    /// + ISRC → 专辑缓存（内存镜像与 UserDefaults 落盘一起清）。
+    /// 供设置里的诊断清理或错配后手动清理调用；视频文件本身不在这里删
+    /// （Caches 由 pruneCache 按 TTL/数量管，删错配结论后下次 prepare
+    /// 会重新查 ISRC/名字并覆盖）。不碰 matchV2 迁移标记（它只表示
+    /// “r29 升级迁移已跑过”，清掉会让旧否定结论在下次 prepare 时被
+    /// 重新清一次——无害但没必要）。
+    func clearRouteBCaches() {
+        clearNegatives()
+        clearISRCAlbumCache()
+    }
+
+    /// r30：只清 ISRC → 专辑缓存（内存 + 落盘）。clearRouteBCaches 调它；
+    /// 单独调用于“只想重查 ISRC、不动否定结论”的诊断场景。
+    func clearISRCAlbumCache() {
+        lock.lock()
+        isrcAlbums.removeAll()
+        isrcCacheLoaded = true
+        lock.unlock()
+        UserDefaults.standard.removeObject(forKey: Self.isrcAlbumCacheKey)
+    }
+
     /// r29 task 2 升级迁移：标记 absent = 还没清过旧否定结论 → 清一次并
     /// 置标记。prepare(for:) 开头调用；幂等，多次调用无副作用。只清
     /// “匹配修之前记的”旧结论——标记一旦置上，后续记的否定都是新逻辑
@@ -460,6 +555,120 @@ final class AppleAnimatedArtworkProvider {
             return (albumId, sf)
         }
         return nil
+    }
+
+    /// r30 ISRC → 专辑：GET /v1/catalog/{sf}/songs?filter[isrc]=…&include=albums。
+    /// 同一个 ISRC 可对应多首歌（专辑版 + 单曲版 + 精选集收录），必须逐首取其
+    /// 专辑、逐个查 editorialVideo，首个有真视频的专辑才算命中——只取 data[0]
+    /// 会错配到无视频的单曲版（实测：TWK972201202 在 us 返回 2 首，data[0]
+    /// 专辑 1721448748 无视频，data[1] 专辑 1721454339 有视频）。
+    /// 返回 editorial 一并带回，调用方不再重复拉一次。命中后把 (albumId,
+    /// storefront) 按 ISRC 缓存（30 天）；三店面都无视频 / 无此 ISRC 返回 nil，
+    /// 调用方回落名字匹配。本次没查成（ampGet 抛错）时 ampFailedKeys 已由
+    /// ampGet 置上，调用方按 amp-failure lane 记，不记否定。
+    private func albumIdByISRC(_ rawISRC: String, key: String) async -> (id: String, storefront: String, editorial: [String: Any])? {
+        let isrc = Self.normalizedISRC(rawISRC)
+        guard !isrc.isEmpty else { return nil }
+        // 1. 缓存命中（未过期）：直接用，但视频存在性仍由调用方现查一次
+        //    （fetchEditorialVideo，1 次请求）再确认——缓存只省 ISRC →
+        //    song → album 的查找，不替视频存在性背书。
+        if let hit = isrcAlbumCached(isrc) {
+            if let ed = await fetchEditorialVideo(albumId: hit.albumId, storefront: hit.storefront, key: key) {
+                return (hit.albumId, hit.storefront, ed)
+            }
+            // 缓存的专辑现在查不到视频了（下架 / 接口抖动）：不直接判死，
+            // 落到第 2 步现查一次——现查仍无视频才回落名字匹配。
+            lock.lock()
+            isrcAlbums.removeValue(forKey: isrc)
+            lock.unlock()
+            saveISRCAlbumCache()
+        }
+        // 2. 逐店面查 ISRC；同 ISRC 的歌逐首试其专辑的视频。
+        for sf in Self.storefronts {
+            guard let data = try? await ampGet(path: "/v1/catalog/\(sf)/songs?filter[isrc]=\(isrc)&include=albums&limit=10", key: key),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let list = json["data"] as? [[String: Any]], !list.isEmpty else { continue }
+            for song in list {
+                guard let rel = song["relationships"] as? [String: Any],
+                      let albums = rel["albums"] as? [String: Any],
+                      let albumList = albums["data"] as? [[String: Any]],
+                      let albumId = albumList.first?["id"] as? String, !albumId.isEmpty else { continue }
+                guard let ed = await fetchEditorialVideo(albumId: albumId, storefront: sf, key: key) else { continue }
+                cacheISRCAlbum(isrc, albumId: albumId, storefront: sf)
+                return (albumId, sf, ed)
+            }
+        }
+        return nil
+    }
+
+    /// r30 ISRC 归一化：去连字符/空白、全大写；只有 12 位才认
+    /// （CCXXXYYNNNNN：前 2 位国家码字母，中间 3 位注册码字母数字，
+    /// 后 7 位年份 + 编号数字）。不合格返回 ""，调用方按“无 ISRC”
+    /// 走名字路，不把脏数据发去 catalog 查。供 Track.from 与本文件共用。
+    static func normalizedISRC(_ s: String) -> String {
+        let cleaned = s.uppercased().filter { $0.isLetter || $0.isNumber }
+        guard cleaned.count == 12 else { return "" }
+        let c = Array(cleaned)
+        guard c[0].isLetter, c[1].isLetter,
+              c[5].isNumber, c[6].isNumber, c[7].isNumber, c[8].isNumber,
+              c[9].isNumber, c[10].isNumber, c[11].isNumber else { return "" }
+        return cleaned
+    }
+
+    // MARK: - r30 ISRC → 专辑缓存（内存镜像 + UserDefaults 落盘，30 天 TTL）
+
+    /// 读缓存（未过期才回；过期条目顺手删掉）。首次调用时从 UserDefaults
+    /// 懒加载一次；清缓存（clearISRCAlbumCache）后 loaded 已置 true，
+    /// 不会把刚清掉的盘上数据又读回来。
+    private func isrcAlbumCached(_ isrc: String) -> (albumId: String, storefront: String)? {
+        lock.lock()
+        defer { lock.unlock() }
+        if !isrcCacheLoaded {
+            isrcCacheLoaded = true
+            if let raw = UserDefaults.standard.data(forKey: Self.isrcAlbumCacheKey),
+               let obj = try? JSONSerialization.jsonObject(with: raw) as? [String: [String: Any]] {
+                for (k, v) in obj {
+                    guard let albumId = v["albumId"] as? String, !albumId.isEmpty,
+                          let storefront = v["storefront"] as? String, !storefront.isEmpty,
+                          let savedAt = v["savedAt"] as? TimeInterval else { continue }
+                    isrcAlbums[k] = (albumId, storefront, Date(timeIntervalSince1970: savedAt))
+                }
+            }
+        }
+        guard let hit = isrcAlbums[isrc] else { return nil }
+        guard Date().timeIntervalSince(hit.date) < Self.isrcAlbumCacheTTL else {
+            isrcAlbums.removeValue(forKey: isrc)
+            return nil
+        }
+        return (hit.albumId, hit.storefront)
+    }
+
+    /// 写一条缓存（内存 + 落盘；超 64 条删最旧）。
+    private func cacheISRCAlbum(_ isrc: String, albumId: String, storefront: String) {
+        lock.lock()
+        isrcAlbums[isrc] = (albumId, storefront, Date())
+        if isrcAlbums.count > Self.isrcAlbumCacheMax {
+            let sorted = isrcAlbums.sorted { $0.value.date < $1.value.date }
+            for old in sorted.dropLast(Self.isrcAlbumCacheMax) {
+                isrcAlbums.removeValue(forKey: old.key)
+            }
+        }
+        lock.unlock()
+        saveISRCAlbumCache()
+    }
+
+    /// 落盘当前内存镜像：内部取一次锁快照（NSLock 不可重入，本函数不调
+    /// 其它带锁方法）；UserDefaults 写在锁外做，避免持锁碰磁盘。
+    private func saveISRCAlbumCache() {
+        lock.lock()
+        var obj: [String: [String: Any]] = [:]
+        for (k, v) in isrcAlbums {
+            obj[k] = ["albumId": v.albumId, "storefront": v.storefront,
+                      "savedAt": v.date.timeIntervalSince1970]
+        }
+        lock.unlock()
+        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        UserDefaults.standard.set(data, forKey: Self.isrcAlbumCacheKey)
     }
 
     /// 其他平台的歌：按 "歌手 专辑名" 在 amp-api 搜专辑，首个双向匹配的才算命中。

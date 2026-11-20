@@ -18,6 +18,20 @@ import UIKit
 /// 内容区内的上下滑归切栏，横向拖动仍归环（开环/切歌），改尺寸仍归
 /// 分界手柄，面板外的滑动照旧滚整页。
 ///
+/// r30（用户 2026-11-21：首页 v4 图定稿，见 ~/workspace/lizi-home-daily-v4.png）：
+/// r28 的上下翻页器整套撤掉——`HomeRailPagerView.swift` 删文件，
+/// 本文件里的栏头（栏目名 + 圆点 + n/6 + 上/下钮）、`pagerContent`、
+/// `pagerDragGesture`、`pagerDragY` / `pagerWentNext` 全删；
+/// 来源改成点平台条标题弹小菜单切（壳版 `#hall-src-menu` 思路：
+/// 浮层列 6 个来源，点选即切，当前来源打勾），栏内容随来源换
+/// （每日推荐 = 环/跑马带，其余 5 栏 = 原 `HomeRailPageView` 的 rail 列表，
+/// 原样搬进本文件 `RailSourceListView`，只改名、不改行）；
+/// 平台条标题 24pt→19pt、图标 28pt→26pt、搜索字形 18pt→19pt
+/// （逐帧规格 + v4 图量）；面板取色 r28 已接好（见 `.task(id:)` 与
+/// 文件尾 `AlbumTone`），本轮核实后不动；面板高度账不变
+/// （栏头 28pt 撤掉后内容区多出 36pt 余量，`panelContentH` 公式不动）。
+/// 本地音乐仍在面板下方、首屏可见，不动。
+///
 /// r28（用户 2026-11-21 01:52：39.6s 套壳视频逐帧重做，见
 /// verification/shell-video-39s-home-3d.md；另 01:57「环只手滑展开」、
 /// 01:58「面板跟专辑取色」两条澄清）：
@@ -73,9 +87,11 @@ import UIKit
 ///    见 LocalMusicView.swift）。段间距 24；底部留白 50
 ///    （16 净空 + 34 Home Indicator，底部安全区已忽略）。
 /// 4. 铺色面板（壳版 `#hall-plat`，圆角 22，内边距 10）：
-///    平台条（模板 v2：左列「每日推荐」标题 24pt 粗体 + 7 图标 22pt 间距 5，
-///    高 48，右端搜索）
-///    → 3D 封面环（HomeCoverRingView，平面跑马带常态；环的位置在面板里、
+///    平台条（r30：左列当前来源标题 19pt 粗体 + 7 图标 26pt 间距 5，
+///    高 48，右端搜索 19pt；点标题弹来源小菜单）
+///    → 来源内容（每日推荐 = 3D 封面环 HomeCoverRingView，平面跑马带常态；
+///    其余来源 = rail 列表 RailSourceListView），同一块圆角面板里，
+///    顺序与壳版 bar → marquee 一致。
 ///    面板底色 r28 起按在播专辑取色（`AlbumTone`，见文件头 r28 节；
 ///    旧「平台品牌色 10% 淡 tint」已作废）。
 ///    壳版面板 min-height 按条 + gap 8 + marq 228 + 内边距 20 计
@@ -135,11 +151,8 @@ struct HomeView: View {
     /// 本次拖动的起始 Hero 高（onChanged 第一次进来时记，松手清掉；
     /// translation 是从手势起点累计的，必须配一个固定的起点算 newHeroH）。
     @State private var dragStartHeroH: CGFloat?
-    /// r28 分页器拖动中的跟手偏移（竖滑切栏时内容跟着手指走一点；
-    /// 松手后归零，见 pagerDragGesture）。
-    @State private var pagerDragY: CGFloat = 0
-    /// r28 上一次切栏方向（下一栏从下往上进、上一栏反之；切页转场方向用）。
-    @State private var pagerWentNext = true
+    /// r30 来源小菜单是否打开（点平台条标题开，点菜单外 / 选来源后关）。
+    @State private var sourceMenuShown = false
     /// r28 面板取色：正在播那首歌的专辑色板（`AlbumTone`，见文件尾；
     /// 默认 tone-a/b/c #5b5bd6/#b04f8c/#2f6f8f）。`.task(id:)` 跟
     /// toneSourceURL 走，切歌即重算；没封面/取色失败回默认色。
@@ -233,9 +246,10 @@ struct HomeView: View {
             let heroH = contentH * fraction
             // r28：面板高按内容封顶（壳版视频：面板约 336–407pt，本地音乐露在
             // 首屏；旧「两块拼满整屏」已作废）。内容高 = 内边距 20 + 条 48 +
-            // 间距 8 + 栏头 28 + 间距 8 + 每日内容（底座内边距 20 + 带 flatCard+52
-            // + 间距 6 + 提示行 27）= flatCard + 217（标准档 407；
-            // compact 397、large 426）。
+            // 间距 8 + 内容区（每日内容：底座内边距 20 + 带 flatCard+52
+            // + 间距 6 + 提示行 27 = flatCard+105，再加 r30 栏头撤掉后
+            // 多出的 36pt 余量）= flatCard + 217（标准档 407；
+            // compact 397、large 426；公式不动，只改账）。
             // 横屏面板 140 本来就小于内容高，封顶不触发。拖大 Hero 后面板按
             // split 收缩（低于封顶），不受封顶影响；拖小 Hero 后面板停在封顶，
             // 余下是本地音乐，不留空。
@@ -260,8 +274,9 @@ struct HomeView: View {
                             )
                             .padding(.horizontal, 16)
 
-                            // 铺色面板（壳版 `#hall-plat`）：平台条 → 来源 chips →
-                            // 跑马带/环，同一块圆角面板里，顺序与壳版 bar → marquee 一致。
+                            // 铺色面板（壳版 `#hall-plat`）：平台条 → 来源内容
+                            // （每日推荐 = 环/跑马带，其余来源 = rail 列表），
+                            // 同一块圆角面板里，顺序与壳版 bar → marquee 一致。
                             // 圆角 22、内边距 10（壳版 `.hall-plat` / plat-face）；
                             // 底色 = 当前平台品牌色 10% 淡 tint（壳版是平台色满铺，
                             // 原生浅色卡片 + 墨字只能淡 tint 近似，见文件头）。
@@ -434,9 +449,9 @@ struct HomeView: View {
     /// 见 `panelTone` 与文件尾 `AlbumTone`）：
     /// 圆角 22、内边距 10、底色 tone-a→tone-b→tone-c 对角渐变；
     /// 只有环在窗内竖滑（横屏面板 140 比内容矮得多；模板里面板封面本来
-    /// 就是齐底边裁断的）。顺序：条 → 栏头 → 内容（r28 分页器：
-    /// 条之下是栏头（栏目名 + 位置点 + n/6 + 上/下一栏钮）与一次一栏的
-    /// 内容区；r26 之前这里是条 → 环，来源 chips 已删）。
+    /// 就是齐底边裁断的）。顺序：条 → 内容（r30：栏头已删，条之下直接是
+    /// 一次一栏的内容区；r28 分页器的栏头/圆点/上下钮/竖滑切栏全撤，
+    /// 来源改点条标题弹小菜单切，见 `sourceMenuOverlay`）。
     /// r23h：平台条钉在面板顶、不进竖滑 ScrollView——
     /// 面板是定高窗、内容比窗高，放歌后环内容一换（每日 → 队列）或手指
     /// 在面板里竖滑，ScrollView 的偏移会把条顶出窗外、再也滑
@@ -447,11 +462,11 @@ struct HomeView: View {
     /// DragGesture），它与外层 ScrollView 竖滑共存；现在多了一层面板内
     /// ScrollView，展开手势是否仍优先，要真机验（见清单 D19）。
     /// r28：环的上滑展开已删（r24 起竖向占优的手势由环的识别器自毁、
-    /// 交还 ScrollView；横向才是开环），面板内容区竖滑现归分页器
-    /// （见 pagerDragGesture）：竖滑切栏、横滑开环、点按播歌/进详情，
-    /// 三者按方向与位移分流；横屏面板只有约 140 高，栏头 + 条占掉
-    /// 大半后 rail 栏只剩约一行的位置，「查看全部」进整页看全量，
-    /// 见 HomeRailPageView 文件头。
+    /// 交还 ScrollView；横向才是开环）。r30：面板内容区竖滑不再切栏
+    /// （分页器已撤），竖滑归外层 ScrollView 滚整页、横滑归环开环、
+    /// 点按播歌/进详情；横屏面板只有约 140 高，条占掉大半后 rail 栏
+    /// 只剩约一行的位置，「查看全部」进整页看全量，
+    /// 见 `RailSourceListView`（原 `HomeRailPageView`）的文件头注释。
     /// r22l 编译修：真类型名是 PlayerTokens.PlayerSizeTier
     ///（PlayerTokens.swift 里 `enum PlayerSizeTier`，r20 约定名），
     /// 之前写的 SizeTier 不存在。
@@ -464,22 +479,19 @@ struct HomeView: View {
         // r23h：条钉在面板顶，见本函数头注释。
         VStack(spacing: 8) {
             // r28 tone-aware：平台条标题/搜索/选中圈跟专辑取色深场走白字、浅场走墨色。
-            PlatformStripView(viewModel: viewModel, isDark: panelTone.isDark)
-            // r28 分页器：栏头 + 内容区（平台条本身不进手势区，
-            // 从条上起的竖滑仍归外层 ScrollView 滚整页）。
-            VStack(spacing: 8) {
-                pagerHeader
-                pagerContent(tier: tier)
-                    .id(viewModel.railPageIndex)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: pagerWentNext ? .bottom : .top)
-                            .combined(with: .opacity),
-                        removal: .move(edge: pagerWentNext ? .top : .bottom)
-                            .combined(with: .opacity)
-                    ))
-                    .offset(y: pagerDragY)
-            }
-            .highPriorityGesture(pagerDragGesture)
+            // r30：点标题弹来源小菜单（壳版 #hall-src-menu 思路）。
+            PlatformStripView(
+                viewModel: viewModel,
+                isDark: panelTone.isDark,
+                onSourceMenuTap: { sourceMenuShown = true }
+            )
+            // r30 来源内容：每日推荐 = 环/跑马带，其余 5 栏 = rail 列表
+            // （原 HomeRailPageView，原样搬进本文件 RailSourceListView）。
+            // 来源切换不走翻页手势：菜单点选即切；面板内竖滑归外层
+            // ScrollView 滚整页，横滑归环。
+            sourceContent(tier: tier)
+                .id(viewModel.selectedSource)
+                .transition(.opacity)
         }
         .padding(10)
         .frame(width: width, height: height)
@@ -490,124 +502,83 @@ struct HomeView: View {
             )
         )
         .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius22))
-    }
-
-    /// r28 分页器栏头：当前栏目名 + 位置点（6 点，当前为长胶囊）+「n/6」+
-    /// 上/下一栏按钮。点圆点直接跳栏；到头时对应方向的按钮置灰禁用。
-    /// 平台条（PlatformStripView）仍固定显示「每日推荐」标题（r26 决定，
-    /// 文件不许动），栏目名以这里为准。
-    /// r28：颜色跟面板深场走（深场白字，浅场墨字；平台条本身不在此列，
-    /// 见交回的冲突说明）。
-    private var pagerHeader: some View {
-        HStack(spacing: 8) {
-            Text(viewModel.railPageTitle)
-                .font(.liziBody(size: LiziTokens.size14, weight: .semibold))
-                .foregroundColor(panelTone.text)
-                .lineLimit(1)
-            Spacer()
-            HStack(spacing: 5) {
-                ForEach(HomeRailPage.allCases, id: \.rawValue) { page in
-                    Button(action: {
-                        pagerWentNext = page.rawValue > viewModel.railPageIndex
-                        withAnimation(.easeOut(duration: 0.22)) { viewModel.showRailPage(page) }
-                    }) {
-                        Capsule()
-                            .fill(page == viewModel.railPage
-                                  ? panelTone.text
-                                  : panelTone.text.opacity(0.35))
-                            .frame(width: page == viewModel.railPage ? 16 : 6, height: 6)
-                    }
-                    .accessibilityLabel("第 \(page.position) 栏，共 6 栏：\(page.title(platform: viewModel.selectedPlatform))")
-                }
+        // r30 来源小菜单浮层（壳版 #hall-src-menu 思路：挂在标题下、
+        // 可溢出面板边缘；点菜单外任意处关，选来源后关）。
+        // overlay 挂在 clipShape 之后，不被圆角裁掉；菜单卡本身是浅色卡、
+        // 与面板取色无关，任何 tone 下都可读。
+        .overlay(alignment: .topLeading) {
+            if sourceMenuShown {
+                sourceMenuOverlay
             }
-            Text("\(viewModel.railPage.position)/\(HomeRailPage.allCases.count)")
-                .font(.liziBody(size: LiziTokens.size12))
-                .foregroundColor(panelTone.secondaryText)
-                .monospacedDigit()
-            Button(action: {
-                pagerWentNext = false
-                withAnimation(.easeOut(duration: 0.22)) { _ = viewModel.moveRailPage(by: -1) }
-            }) {
-                Image(systemName: "chevron.up")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(panelTone.secondaryText)
-                    .frame(width: 28, height: 28)
-            }
-            .disabled(viewModel.railPageIndex == 0)
-            .opacity(viewModel.railPageIndex == 0 ? 0.3 : 1)
-            .accessibilityLabel("上一栏")
-            Button(action: {
-                pagerWentNext = true
-                withAnimation(.easeOut(duration: 0.22)) { _ = viewModel.moveRailPage(by: 1) }
-            }) {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(panelTone.secondaryText)
-                    .frame(width: 28, height: 28)
-            }
-            .disabled(viewModel.railPageIndex == HomeRailPage.allCases.count - 1)
-            .opacity(viewModel.railPageIndex == HomeRailPage.allCases.count - 1 ? 0.3 : 1)
-            .accessibilityLabel("下一栏")
         }
     }
 
-    /// r28 分页器内容区：一次只显示一个栏目（第 0 栏是每日推荐环，
-    /// 其余 5 栏是 `HomeRailPageView` 的 rail 列表预览）。
+    /// r30 来源内容：一次只显示一个来源。每日推荐走修好的环/跑马带，
+    /// 其余 5 栏走 rail 列表（取数见 `HomeViewModel.loadRailPage`，
+    /// 首次访问拉取、之后缓存，喜欢栏每次切回都重拉）。
     @ViewBuilder
-    private func pagerContent(
+    private func sourceContent(
         tier: PlayerTokens.PlayerSizeTier
     ) -> some View {
-        switch viewModel.railPage {
+        switch viewModel.selectedSource {
         case .daily:
             dailyRingContent(tier: tier)
         case .featured, .collections, .liked, .created, .radio:
-            HomeRailPageView(viewModel: viewModel)
+            RailSourceListView(viewModel: viewModel)
         }
     }
 
-    /// r28 分页器手势：内容区内的上下滑切栏（上滑 = 下一栏，下滑 = 上一栏），
-    /// 不滑不切，到头停住、不循环。
-    /// - 只认竖向占优的拖动（|dy| > |dx| × 1.25，与环的判定同系数）：
-    ///   横向拖动留给环（横向 = 开环/切歌，见 HomeCoverRingView.stripTouchMoved），
-    ///   不抢；竖向占优才跟手（pagerDragY，松手归零）。
-    /// - 高优先级手势（`.highPriorityGesture`）：面板在外层 ScrollView 里，
-    ///   普通手势会被整页滚动抢走（r21 同款教训）；高优先级让内容区竖滑先归切栏，
-    ///   面板外的滑动照旧滚整页（本地音乐仍从 Hero / 面板外滑出来）。
-    /// - 切栏阈值 48pt（约一根手指的轻滑）；快甩（predictedEndTranslation
-    ///   超 100pt 且已滑 24pt）也切。没过阈值松手弹回原位。
-    /// - 到头时往死胡同方向只跟手 1/4（橡皮筋感），告诉用户到底了；
-    ///   `moveRailPage` 本身也夹在 0...5，不循环。
-    /// - 点按不受影响：DragGesture(minimumDistance: 12) 不到 12px 不认，
-    ///   行点按 /「查看全部」/ 栏头按钮照常走。
-    private var pagerDragGesture: some Gesture {
-        DragGesture(minimumDistance: 12)
-            .onChanged { value in
-                let dx = value.translation.width
-                let dy = value.translation.height
-                guard abs(dy) > abs(dx) * 1.25 else { return }
-                let atFirst = viewModel.railPageIndex == 0
-                let atLast = viewModel.railPageIndex == HomeRailPage.allCases.count - 1
-                var follow = dy
-                if (atFirst && dy > 0) || (atLast && dy < 0) { follow = dy * 0.25 }
-                pagerDragY = min(max(follow, -72), 72)
-            }
-            .onEnded { value in
-                let dy = value.translation.height
-                let predicted = value.predictedEndTranslation.height
-                defer { withAnimation(.easeOut(duration: 0.18)) { pagerDragY = 0 } }
-                guard abs(dy) > abs(value.translation.width) * 1.25 else { return }
-                if dy < -48 || (predicted < -100 && dy < -24) {
-                    pagerWentNext = true
-                    withAnimation(.easeOut(duration: 0.22)) { _ = viewModel.moveRailPage(by: 1) }
-                } else if dy > 48 || (predicted > 100 && dy > 24) {
-                    pagerWentNext = false
-                    withAnimation(.easeOut(duration: 0.22)) { _ = viewModel.moveRailPage(by: -1) }
+    /// r30 来源小菜单浮层：标题下 6 行来源（每日推荐 / 精选 / 用户收藏 /
+    /// 喜欢的歌曲 / 用户创建的歌单 / 电台），当前来源打勾；点行切来源并关菜单，
+    /// 点菜单外任意处只关菜单。壳版 `#hall-src-menu`（public/index.html
+    /// 约 250 行 + hall/option-wheel.js）同款思路：浮层挂在标题下、
+    /// 内容由来源列表填、点选切换；原生不用滚轮，用点选列表。
+    private var sourceMenuOverlay: some View {
+        ZStack(alignment: .topLeading) {
+            // 点菜单外关：整块面板大小的透明层（菜单卡在它上面，
+            // 卡上的点按走行按钮，不落到这里）。
+            Color.black.opacity(0.001)
+                .onTapGesture { sourceMenuShown = false }
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(HomeRailPage.allCases, id: \.rawValue) { page in
+                    Button(action: {
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            viewModel.selectSource(page)
+                        }
+                        sourceMenuShown = false
+                    }) {
+                        HStack(spacing: 8) {
+                            Text(page.title(platform: viewModel.selectedPlatform))
+                                .font(.liziBody(size: LiziTokens.size16, weight: page == viewModel.selectedSource ? .semibold : .regular))
+                                .foregroundColor(LiziTokens.ink)
+                                .lineLimit(1)
+                            Spacer()
+                            if page == viewModel.selectedSource {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(LiziTokens.ink)
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("来源：\(page.title(platform: viewModel.selectedPlatform))")
                 }
             }
+            .frame(width: 208)
+            .background(LiziTokens.paper)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .shadow(color: .black.opacity(0.25), radius: 12, x: 0, y: 4)
+            // 面板内边距 10 + 条 48 + 间距 8 = 66，菜单顶贴在条下。
+            .padding(.leading, 10)
+            .padding(.top, 66)
+        }
     }
 
     /// 每日推荐环内容（原 dailyPanel 里的环，原样搬过来；
-    /// r28 分页器只换容器，不动环本身；横屏/竖屏两分支原来就是同一份，
+    /// r30 来源切换只换容器，不动环本身；横屏/竖屏两分支原来就是同一份，
     /// 合并成一个——环本身不分横竖屏，横屏只是面板窗更矮、内容裁得更多）。
     /// r21：首页 3D 封面环（平面跑马带常态 + 上滑展开全屏圆环；
     /// 见 HomeCoverRingView 文件头视频逐帧规格）。
@@ -627,6 +598,269 @@ struct HomeView: View {
                 tier: tier,
                 panelIsDark: panelTone.isDark
             )
+        }
+    }
+
+    /// r30：原 `HomeRailPagerView.swift` 里的 `HomeRailPageView`，随翻页器
+    /// 文件删除原样搬进本文件、只改名（`railPage` → `selectedSource`），
+    /// 行/三态/点按行为一行不改。
+    ///
+    /// 每日推荐之外的 5 栏（精选 / 用户收藏 / 喜欢的歌曲 / 用户创建的歌单 / 电台）
+    /// 在面板里的样子。栏里条目的形状照壳版 `public/app.js` 的 marqCardHtml
+    /// （约 12344–12400 行）1:1 抄（只换容器为一次一栏，不搬壳版代码；
+    /// 行组件复用 RailDetailView 同款，不另起形状）：
+    /// - 曲目行 = 封面 + 歌名 + 歌手·专辑 + 时长（TrackRowView，与 RailDetailView 同款）；
+    /// - 歌单/电台卡 = 封面 56 + 名字 + 创建者·数量 + chevron
+    ///   （与 RailDetailView 的 playlistCardRow / stationCardRow 同款；
+    ///   壳版卡上还有「歌单/电台」小签，副标题已写清数量/创建者，这里不另贴签）；
+    /// - 分组说明卡（网易「我创建的歌单 / 我收藏的歌单」、Apple Music
+    ///   「官方热门歌单（非本人收藏）」、本地星标说明）= 12pt 小字行，不可点
+    ///   （壳版 marq__card--group 同款）。
+    /// - 平台返回类型本来就不同（见 RailsBridge 文件头）：网易/QQ/波点精选=歌单、
+    ///   酷狗/汽水精选=曲目、酷我精选=排行榜（歌单）；空态文案原样保留
+    ///   （如「这一层没有歌曲」「这一层没有歌单」与各平台诚实原因）。
+    ///
+    /// 面板是定高窗：最多放 3 条可点条目（竖屏内容区约 255pt，行约 68–72pt，
+    /// 再加「查看全部」一行正好放下；横屏面板只有约 140 高，栏头 + 条占掉
+    /// 大半后 rail 栏只剩约一行的位置、其余裁断是模板原意），其余走底部
+    /// 「查看全部」进 RailDetailView 整页。
+    /// 点行行为与 RailDetailView 一致：曲目点播（setQueue 整份曲目，含分组卡
+    /// 之后的全部曲目）、歌单卡进歌单详情页（.playlist 路由）、电台频道卡
+    /// 进电台整页（.rail radio；频道下钻在详情页里点，面板不另做下钻层；
+    /// 波点电台本身就是曲目，点行直接播）。
+    /// 加载/失败/空态走 RailDetailView 同款三态（文案由 RailsBridge 原样给）。
+    /// 取数在 `HomeViewModel.loadRailPage`（切到某栏时再拉该栏、首次拉取后缓存，
+    /// 喜欢栏每次切回都重拉——本地星标一点就变，壳版同款不缓存）。
+    private struct RailSourceListView: View {
+        @ObservedObject var viewModel: HomeViewModel
+        @EnvironmentObject private var playback: PlaybackStore
+        @EnvironmentObject private var nav: AppNavigation
+
+        /// 面板里最多放几条可点条目（分组说明卡不占名额；见本结构体头注释）。
+        private static let maxRows = 3
+
+        private var page: HomeRailPage { viewModel.selectedSource }
+        private var platform: String { viewModel.selectedPlatform }
+
+        var body: some View {
+            Group {
+                if viewModel.isRailPageLoading(page) || viewModel.railResults[page] == nil {
+                    loadingView
+                } else if let error = viewModel.railResults[page]?.error {
+                    errorView(error: error)
+                } else if let reason = viewModel.railEmptyReason(for: page) {
+                    emptyView(reason: reason)
+                } else {
+                    entriesView
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+
+        // MARK: - 列表层
+
+        private var entriesView: some View {
+            let entries = viewModel.railEntries(for: page)
+            let tracks = entries.compactMap { entry -> Track? in
+                if case .track(let track) = entry { return track }
+                return nil
+            }
+            let shown = visibleEntries(entries)
+            let total = entries.filter { entry in
+                if case .groupHeader = entry { return false }
+                return true
+            }.count
+            return VStack(alignment: .leading, spacing: 0) {
+                ForEach(shown) { entry in
+                    entryRow(entry, tracks: tracks)
+                }
+                if viewModel.isMixedPlaylistsPage(page) {
+                    Text("该平台接口不区分自建与收藏，两页显示同一份歌单。")
+                        .font(.liziBody(size: LiziTokens.size12))
+                        .foregroundColor(LiziTokens.ink3)
+                        .padding(.top, 6)
+                }
+                Spacer(minLength: 0)
+                viewAllButton(total: total)
+            }
+        }
+
+        /// 面板里放得下的条目（按顺序取最多 maxRows 条可点条目，路过的
+        /// 分组说明卡一并带上、不占名额；超出的走「查看全部」）。
+        private func visibleEntries(_ entries: [RailEntry]) -> [RailEntry] {
+            var out: [RailEntry] = []
+            var count = 0
+            for entry in entries {
+                if case .groupHeader = entry { out.append(entry); continue }
+                guard count < Self.maxRows else { break }
+                out.append(entry)
+                count += 1
+            }
+            return out
+        }
+
+        @ViewBuilder
+        private func entryRow(_ entry: RailEntry, tracks: [Track]) -> some View {
+            switch entry {
+            case .groupHeader(let text):
+                Text(text)
+                    .font(.liziBody(size: LiziTokens.size12, weight: .semibold))
+                    .foregroundColor(LiziTokens.ink3)
+                    .padding(.vertical, 4)
+            case .track(let track):
+                TrackRowView(
+                    track: track,
+                    isCurrent: playback.currentTrack?.id == track.id
+                        && playback.currentTrack?.platform == track.platform,
+                    isCompact: true
+                ) {
+                    playback.setQueue(tracks, startAt: trackIndex(track, in: tracks))
+                }
+            case .playlist(let playlist):
+                Button(action: {
+                    nav.show(.playlist(platform: playlist.source, id: playlist.id, isRank: playlist.isRank))
+                }) {
+                    playlistCardRow(playlist: playlist)
+                }
+                .buttonStyle(.plain)
+            case .station(let station):
+                Button(action: { nav.show(.rail(kind: "radio", platform: platform)) }) {
+                    stationCardRow(station: station)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+
+        @ViewBuilder
+        private func viewAllButton(total: Int) -> some View {
+            if let kind = page.railKind {
+                Button(action: { nav.show(.rail(kind: kind.rawValue, platform: platform)) }) {
+                    HStack(spacing: 4) {
+                        Text(total > Self.maxRows ? "查看全部（共 \(total) 项）" : "查看全部")
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .font(.liziBody(size: LiziTokens.size13, weight: .medium))
+                    .foregroundColor(LiziTokens.ink2)
+                }
+                .padding(.top, 8)
+                .accessibilityLabel("查看全部\(page.title(platform: platform))")
+            }
+        }
+
+        // MARK: - 卡片行（与 RailDetailView 同款形状，见本结构体头注释）
+
+        private func playlistCardRow(playlist: Playlist) -> some View {
+            HStack(spacing: 12) {
+                CoverImageView(url: playlist.coverURL, placeholderIconSize: 20)
+                    .frame(width: 56, height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(playlist.title)
+                        .font(.liziBody(size: LiziTokens.size16, weight: .semibold))
+                        .foregroundColor(LiziTokens.ink)
+                        .lineLimit(1)
+                    Text(playlistSubtitle(playlist: playlist))
+                        .font(.liziBody(size: LiziTokens.size13))
+                        .foregroundColor(LiziTokens.ink3)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(LiziTokens.ink3)
+            }
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+
+        private func stationCardRow(station: RadioStation) -> some View {
+            HStack(spacing: 12) {
+                CoverImageView(url: station.coverURL, placeholderIconSize: 20)
+                    .frame(width: 56, height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(station.name)
+                        .font(.liziBody(size: LiziTokens.size16, weight: .semibold))
+                        .foregroundColor(LiziTokens.ink)
+                        .lineLimit(1)
+                    Text(stationSubtitle(station: station))
+                        .font(.liziBody(size: LiziTokens.size13))
+                        .foregroundColor(LiziTokens.ink3)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(LiziTokens.ink3)
+            }
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+
+        private func playlistSubtitle(playlist: Playlist) -> String {
+            var parts: [String] = []
+            if !playlist.creator.isEmpty { parts.append(playlist.creator) }
+            if playlist.trackCount > 0 { parts.append("\(playlist.trackCount) 首") }
+            return parts.joined(separator: " · ")
+        }
+
+        private func stationSubtitle(station: RadioStation) -> String {
+            var parts: [String] = []
+            if !station.creator.isEmpty { parts.append(station.creator) }
+            if station.trackCount > 0 { parts.append("\(station.trackCount) 期节目") }
+            if station.playCount > 0 { parts.append("播放 \(station.playCount)") }
+            return parts.joined(separator: " · ")
+        }
+
+        // MARK: - 通用状态（RailDetailView 同款三态，面板内居中）
+
+        private var loadingView: some View {
+            HStack(spacing: 8) {
+                ProgressView()
+                Text("正在拉取\(page.title(platform: platform))…")
+                    .font(.liziBody(size: LiziTokens.size13))
+                    .foregroundColor(LiziTokens.ink3)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
+
+        private func emptyView(reason: String) -> some View {
+            Text(reason)
+                .font(.liziBody(size: LiziTokens.size13))
+                .foregroundColor(LiziTokens.ink3)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .padding(.horizontal, 24)
+        }
+
+        private func errorView(error: String) -> some View {
+            VStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 20))
+                    .foregroundColor(LiziTokens.accent)
+                Text(error)
+                    .font(.liziBody(size: LiziTokens.size13))
+                    .foregroundColor(LiziTokens.ink2)
+                    .multilineTextAlignment(.center)
+                Button("重试") {
+                    viewModel.loadRailPage(page, force: true)
+                }
+                .font(.liziBody(size: LiziTokens.size14, weight: .medium))
+                .foregroundColor(.white)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+                .background(LiziTokens.ink)
+                .clipShape(Capsule())
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .padding(.horizontal, 24)
+        }
+
+        // MARK: - 工具
+
+        private func trackIndex(_ track: Track, in tracks: [Track]) -> Int {
+            tracks.firstIndex(where: { $0.id == track.id && $0.platform == track.platform }) ?? 0
         }
     }
 

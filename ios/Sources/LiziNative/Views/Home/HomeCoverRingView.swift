@@ -101,8 +101,8 @@ import UIKit
 ///    本轮点按改走 `.onTapGesture`（带位置），拖动仍走 DragGesture；
 ///    <5px=点按、≥5px=拖动，与壳版 RING_THRESHOLD=5 同款分界。
 /// 另补两处截图对照：环卡歌名/歌手左对齐（r21 居中，截图 8 张全是左对齐，
-/// 壳版 `.mring__name` 默认左对齐）；平面带下加可见入口（提示行 +「展开 3D 环」
-/// 按钮，用户现在根本找不到环；按钮开环不接管手指，`beginDrag: false`）。
+/// 壳版 `.mring__name` 默认左对齐）；平面带下加可见入口提示行
+/// （用户现在根本找不到环）。
 /// 拖动时顶部再暗一档（`isRingDragging` 驱动，视频：拖动时顶部大卡片变暗）。
 /// 本轮只动本文件；播放页、闪退相关文件、HomeView.swift 一行不动。
 ///
@@ -184,7 +184,7 @@ import UIKit
 ///    （顶栏底 + 卡高×0.55 + 12 / 屏底 − 卡高×0.55 − 52 − 下坠），
 ///    带子被滚到屏顶附近时环不再顶到顶栏/灵动岛底下；平时不触发。
 /// 核对结论（不改代码）：① 22:29 截图里环不是没渲染——平面带在、环是
-/// 默认收起态；看不见的是唯一可见入口（提示行 +「展开 3D 环」按钮），
+/// 默认收起态；看不见的是唯一可见入口提示行，
 /// r25 时 chips 占 40pt 把它顶出屏底，chips 删除后（当前树）竖屏默认
 /// 面板 382、竖滑区 312 > 内容 285，入口可见（2–27pt 余量，见驱动）；
 /// ② 视频逐帧几何（平面卡 0.51vw、环卡 0.39vw、槽距 40°、无倒影、左对齐
@@ -219,6 +219,30 @@ import UIKit
 ///   已在 r28 删掉，点按开环不在触发里），没有任何定时器、onAppear、
 ///   加载完成回调能开环；tickFlat 只走跑马带，从不写 ringPhase。
 ///   常态永远是平面跑马带。
+///
+/// r30（2026-11-21，3D 环改版，v5 图口径：lizi-home-3d-ring-v5.png +
+/// shell-video-frames f_050/f_055/f_060/f_070 实拍；只动本文件）：
+/// - 核对结论（不改代码）：触发（跑马带横向拖动开环、竖向交还 ScrollView、
+///   openRing 唯一调用点 stripTouchMoved，无自动开环）、变暗 0.36/0.58/0.78
+///   （整页约 0.45 倍，f_050 亮度 121→51）、环带纵向（stripCenter 锚点，
+///   封面约屏高 53%–71%）、提示（11pt，屏高约 94%）、几何（pitch=卡宽×1.14、
+///   侧卡 ±40°、透视 3.2R、相机 translateZ(-R) rotateX(-5°)、facing
+///   0.06 藏 / 0.06–0.30 淡出、压暗 0.55·((1-facing)/2)^1.25）、展开 520ms
+///   easeOutQuint / 收回 430ms / 点空白 220ms 快收 / 松手 1s 后收 /
+///   惯性 τ=1.08s + 弹簧 118 吸附 / 点卡播歌收回 / 下滑 >90px 退出——
+///   逐项对上，不动。
+/// - 改的四处：(1) 一次只见 3 张：visibleSlots 由中心±2 收成中心±1
+///   （world ±40°；±80° 的卡本来就在屏外）；(2) 侧卡面板裁切：环层按面板宽
+///   （带子宽 + 两侧各 20pt = 面板 padding 10 + 本文件 VStack padding 10，
+///   圆角 22 与 dailyPanel 同值）框住 + clipShape，命中测试同步拦面板外点按；
+///   注意：v5 图要求面板裁切，实拍 f_050/f_055 里侧卡实际溢出面板到屏边——
+///   按任务 v5 图口径做面板裁切；(3) 环开着时平面带彻底让位（壳版
+///   `body.is-ring .mstrip { opacity: 0 }` 同款，透明度跟 overlayOpacity 走），
+///   环下面不再透出多余的专辑卡；(4) 没封面的卡不再摆白卡：coverURL 为 nil
+///   时画深色默认封面（壳版 `.mring__card.is-empty` 深色底 +「无封面」同款
+///   做法，原生用深色渐变 + music.note），FlatRingCard 与 RingCardView 共用
+///   DefaultCoverArt；URL 有但加载失败的白占位在 CoverImageView.swift 里，
+///   本文件动不了，见交回残留。
 
 // MARK: - 状态机
 
@@ -762,15 +786,18 @@ final class HomeCoverRingModel: ObservableObject {
         let trackIndex: Int
     }
 
-    /// 可见槽位：|world| ≤ 86.5°（facing > 0.06），同一首歌只出现一次
-    /// （曲目 < 5 首时不复制，壳版 n = min(曲数, 环容量) 同款）。
+    /// 可见槽位：一次只见 3 张（r30 v5 图口径）——中心槽前后各一格
+    /// （world ±40°）；|world| ≤ 86.5°（facing > 0.06）仍作第二道防线，
+    /// 同一首歌只出现一次（曲目 < 3 首时不复制，壳版 n = min(曲数, 环容量) 同款）。
+    /// 旧的中心±2 会在转环半途多露一格（world ±60° 在屏边各剩约 12pt 边角，
+    /// 未裁切时看得见；面板裁切后虽出不来，仍按 v5 收成 3 张）。
     func visibleSlots() -> [RingSlot] {
         guard !tracks.isEmpty else { return [] }
         let q = -angle / ringStep
         let center = Int(q.rounded())
         var seen = Set<Int>()
         var out: [RingSlot] = []
-        for s in (center - 2)...(center + 2) {
+        for s in (center - 1)...(center + 1) {
             let world = (CGFloat(s) - q) * ringStep
             guard abs(world) <= 86.5 else { continue }
             let idx = mod(anchorIndex + s, tracks.count)
@@ -844,6 +871,18 @@ final class HomeCoverRingModel: ObservableObject {
         return cy
     }
 
+    /// 面板横向范围（r30 v5：侧卡由面板圆角 mask 裁切，不溢出面板外）：
+    /// 面板外缘 = 带子外缘各扩 20pt（dailyPanel padding 10 + 本文件
+    /// body 的 VStack padding 10，见 HomeView.dailyPanel）；面板与带子
+    /// 同中心（stripCenter.x）。带子还没量到（stripSize = 0）时回落
+    /// 屏宽/2 − 16（f_001 面板左右边距约 16pt）。
+    /// - 返回：(面板中心 x，面板半宽)，liziHome 坐标。
+    func panelRect(screenWidth: CGFloat) -> (centerX: CGFloat, halfWidth: CGFloat) {
+        let cx = stripCenter.x > 0 ? stripCenter.x : screenWidth / 2
+        let half = stripSize.width > 0 ? stripSize.width / 2 + 20 : screenWidth / 2 - 16
+        return (cx, half)
+    }
+
     /// 点按命中：取包含该点、离正前方最近的卡（ring.js onPressUp 点选同款，
     /// 用包围盒近似旋转后的卡）。
     /// r24：纵向锚点与 ringLayer 同款回落——stripCenter 还没量到时
@@ -853,6 +892,11 @@ final class HomeCoverRingModel: ObservableObject {
     /// 再按槽位加各自的 `tiltDrop`（-5° 下坠，越靠两侧越小），命中盒与
     /// 眼睛看到的卡片位置一致；不加下坠时前排卡的命中盒会比实物高 20pt。
     func hitTestRingCard(at point: CGPoint, screenWidth: CGFloat, screenHeight: CGFloat? = nil, topEdge: CGFloat = 95) -> Int? {
+        // r30：面板外的点按不算点卡（侧卡被面板裁掉的部分看不见，点那里
+        // 应是点空白快收，不是点中被裁掉的卡）。
+        let panel = panelRect(screenWidth: screenWidth)
+        guard point.x >= panel.centerX - panel.halfWidth,
+              point.x <= panel.centerX + panel.halfWidth else { return nil }
         let cx = screenWidth / 2
         let cy = ringCenterY(screenHeight: screenHeight ?? 0, topEdge: topEdge)
         let r = effectiveRadius()
@@ -927,6 +971,12 @@ struct HomeCoverRingView: View {
                     entryHintRow
                 }
                 .padding(10)
+                // r30 v5：环开着时平面带彻底让位（壳版
+                // `body.is-ring .mstrip { opacity: 0 }` 同款，透明度跟
+                // overlayOpacity 走：展开 0.26s 淡出、收回跟 closeT 淡入），
+                // 环下面不再透出多余的专辑卡。opacity 不动布局，
+                // stripCenter / stripSize 照常量，环的纵向锚点不受影响。
+                .opacity(1 - model.overlayOpacity)
                 .background(
                     RoundedRectangle(cornerRadius: 14)
                         .fill(Color.black.opacity(0.18))
@@ -1065,9 +1115,22 @@ private struct FlatRingCard: View {
     let isDark: Bool
     let onTap: () -> Void
 
+    /// r30：没封面（coverURL 为 nil）不摆白卡——深色默认封面（壳版
+    /// `.mring__card.is-empty` 深色底 +「无封面」同款做法；原生占位图标
+    /// 沿用 music.note，只把白底换成深色渐变）。URL 有但加载失败的白占位
+    /// 在 CoverImageView.swift 里，本文件动不了。
+    @ViewBuilder
+    private var coverArt: some View {
+        if track.coverURL == nil {
+            DefaultCoverArt(iconSize: 64)
+        } else {
+            CoverImageView(url: track.coverURL, placeholderIconSize: 64)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            CoverImageView(url: track.coverURL, placeholderIconSize: 64)
+            coverArt
                 .frame(width: width, height: width)
                 .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
             Text(track.title)
@@ -1084,6 +1147,26 @@ private struct FlatRingCard: View {
         .accessibilityLabel("播放：\(track.title)")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { onTap() }
+    }
+}
+
+/// 没封面的默认封面（r30，FlatRingCard / RingCardView 共用）：
+/// 深色渐变底 + music.note，绝不摆白卡。壳版 `.mring__card.is-empty`
+/// 是深色底 +「无封面」字；原生占位图标沿用 music.note（CoverImageView
+/// 同款图标），只把白底换成与深场面板/变暗后环面同色的深色渐变。
+private struct DefaultCoverArt: View {
+    let iconSize: CGFloat
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(white: 0.24), Color(white: 0.10)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+            Image(systemName: "music.note")
+                .font(.system(size: iconSize, weight: .regular))
+                .foregroundStyle(.white.opacity(0.35))
+        }
     }
 }
 
@@ -1181,17 +1264,25 @@ struct HomeRingOverlayView: View {
     /// r26-3D：纵向锚点走 `ringCenterY`（ring.js 上下限夹取）；每张卡再
     /// 下坠各自的 `tiltDrop`（相机 -5°，正前方约 20pt、两侧渐小）——
     /// 原生之前 z=0 平面排布、容器旋转不产生下坠，环整体比视频高约 20pt。
+    /// r30 v5：环层按面板宽框住 + 圆角 22 裁切（dailyPanel 同值），侧卡
+    /// 被面板左右边切半、不溢出面板外；层内坐标 = 面板坐标（子卡 x/y
+    /// 各减面板左缘/上缘），卡中心纵向仍是 cy + tiltDrop，与旧版一致；
+    /// 层高 = 卡高 + 上下各 40pt 阴影余量（封面阴影 radius 26 / y 12，
+    /// 约 38pt，旧层高会把阴影下沿裁掉）。命中测试同步拦面板外点按
+    /// （见 hitTestRingCard）。
     private func ringLayer(screenWidth: CGFloat, screenHeight: CGFloat) -> some View {
         let topEdge: CGFloat = screenWidth > screenHeight ? 64 : 95
         let cy = model.ringCenterY(screenHeight: screenHeight, topEdge: topEdge)
-        let cx = screenWidth / 2
+        let panel = model.panelRect(screenWidth: screenWidth)
+        let panelMinX = panel.centerX - panel.halfWidth
         let r = model.effectiveRadius()
         let cam = model.cameraScale()
+        let layerHeight = model.ringCardHeight + 80
         return ZStack {
             ForEach(model.visibleSlots()) { slot in
                 let track = model.tracks[slot.trackIndex]
                 let facing = model.facing(forWorld: slot.world)
-                let x = cx + r * sin(slot.world * .pi / 180)
+                let x = panel.centerX + r * sin(slot.world * .pi / 180)
                 RingCardView(
                     track: track,
                     width: model.ringCard,
@@ -1204,18 +1295,19 @@ struct HomeRingOverlayView: View {
                     perspective: 0.5
                 )
                 .opacity(model.facingOpacity(facing: facing))
-                .position(x: x, y: model.ringCardHeight / 2 + model.tiltDrop(facing: facing))
+                .position(x: x - panelMinX, y: layerHeight / 2 + model.tiltDrop(facing: facing))
                 .zIndex(Double(100 - abs(slot.world)))
                 .accessibilityLabel("播放：\(track.title)")
             }
         }
-        .frame(width: screenWidth, height: model.ringCardHeight)
+        .frame(width: panel.halfWidth * 2, height: layerHeight)
+        .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius22))
         .rotation3DEffect(
             .degrees(-5),
             axis: (x: 1, y: 0, z: 0),
             perspective: 0.5
         )
-        .position(x: cx, y: cy)
+        .position(x: panel.centerX, y: cy)
     }
 }
 
@@ -1229,9 +1321,20 @@ private struct RingCardView: View {
     let width: CGFloat
     let shadeOpacity: Double
 
+    /// r30：没封面（coverURL 为 nil）不摆白卡——深色默认封面（见 FlatRingCard
+    /// coverArt 注释；URL 有但加载失败的白占位在 CoverImageView.swift 里）。
+    @ViewBuilder
+    private var coverArt: some View {
+        if track.coverURL == nil {
+            DefaultCoverArt(iconSize: 48)
+        } else {
+            CoverImageView(url: track.coverURL, placeholderIconSize: 48)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            CoverImageView(url: track.coverURL, placeholderIconSize: 48)
+            coverArt
                 .frame(width: width, height: width)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay(

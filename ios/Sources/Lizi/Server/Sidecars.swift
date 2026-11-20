@@ -87,9 +87,11 @@ func scCookieValue(_ setCookie: String?, _ name: String) -> String? {
 func krcToLrc(_ krc: String) -> String {
     var out: [String] = []
     for line in krc.components(separatedBy: "\n") {
-        guard let m = krcLineRegex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) else { continue }
-        let start = Int(line[Range(m.range(at: 1), in: line)!]) ?? 0
-        let content = String(line[Range(m.range(at: 3), in: line)!])
+        guard let m = krcLineRegex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+              let r1 = Range(m.range(at: 1), in: line),
+              let r3 = Range(m.range(at: 3), in: line) else { continue }
+        let start = Int(line[r1]) ?? 0
+        let content = String(line[r3])
         let text = content.replacingOccurrences(of: "<[^>]*>", with: "", options: .regularExpression)
         let mm = start / 60000
         let ss = Double(start % 60000) / 1000.0
@@ -105,16 +107,22 @@ private let krcCharRegex = try! NSRegularExpression(pattern: #"<(\d+),(\d+),-?\d
 func krcToYrc(_ krc: String) -> String {
     var out: [String] = []
     for line in krc.components(separatedBy: "\n") {
-        guard let m = krcLineRegex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) else { continue }
-        let start = Int(line[Range(m.range(at: 1), in: line)!]) ?? 0
-        let dur = Int(line[Range(m.range(at: 2), in: line)!]) ?? 0
-        let content = String(line[Range(m.range(at: 3), in: line)!])
+        guard let m = krcLineRegex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+              let r1 = Range(m.range(at: 1), in: line),
+              let r2 = Range(m.range(at: 2), in: line),
+              let r3 = Range(m.range(at: 3), in: line) else { continue }
+        let start = Int(line[r1]) ?? 0
+        let dur = Int(line[r2]) ?? 0
+        let content = String(line[r3])
         let ns = NSRange(content.startIndex..., in: content)
         var chars: [(Int, Int, String)] = []
         for cm in krcCharRegex.matches(in: content, range: ns) {
-            let off = Int(content[Range(cm.range(at: 1), in: content)!]) ?? 0
-            let d = Int(content[Range(cm.range(at: 2), in: content)!]) ?? 0
-            let t = String(content[Range(cm.range(at: 3), in: content)!])
+            guard let c1 = Range(cm.range(at: 1), in: content),
+                  let c2 = Range(cm.range(at: 2), in: content),
+                  let c3 = Range(cm.range(at: 3), in: content) else { continue }
+            let off = Int(content[c1]) ?? 0
+            let d = Int(content[c2]) ?? 0
+            let t = String(content[c3])
             if !t.isEmpty { chars.append((off, d, t)) }
         }
         if chars.isEmpty { continue }
@@ -136,19 +144,26 @@ func awlrcToYrc(_ awlrc: String) -> String {
     struct Line { var start: Int; var text: String; var chars: [(Int, Int, String)] }
     var lines: [Line] = []
     for raw in awlrc.components(separatedBy: "\n") {
-        guard let m = awlrcLineRegex.firstMatch(in: raw, range: NSRange(raw.startIndex..., in: raw)) else { continue }
-        let mm = Int(raw[Range(m.range(at: 1), in: raw)!]) ?? 0
-        let ss = Int(raw[Range(m.range(at: 2), in: raw)!]) ?? 0
-        var frac = String(raw[Range(m.range(at: 3), in: raw)!])
+        guard let m = awlrcLineRegex.firstMatch(in: raw, range: NSRange(raw.startIndex..., in: raw)),
+              let r1 = Range(m.range(at: 1), in: raw),
+              let r2 = Range(m.range(at: 2), in: raw),
+              let r3 = Range(m.range(at: 3), in: raw),
+              let r4 = Range(m.range(at: 4), in: raw) else { continue }
+        let mm = Int(raw[r1]) ?? 0
+        let ss = Int(raw[r2]) ?? 0
+        var frac = String(raw[r3])
         while frac.count < 3 { frac += "0" }
         let start = mm * 60000 + ss * 1000 + (Int(frac) ?? 0)
-        let content = String(raw[Range(m.range(at: 4), in: raw)!])
+        let content = String(raw[r4])
         let ns = NSRange(content.startIndex..., in: content)
         var chars: [(Int, Int, String)] = []
         for cm in awlrcCharRegex.matches(in: content, range: ns) {
-            let off = Int(content[Range(cm.range(at: 1), in: content)!]) ?? 0
-            let d = Int(content[Range(cm.range(at: 2), in: content)!]) ?? 0
-            let t = String(content[Range(cm.range(at: 3), in: content)!])
+            guard let c1 = Range(cm.range(at: 1), in: content),
+                  let c2 = Range(cm.range(at: 2), in: content),
+                  let c3 = Range(cm.range(at: 3), in: content) else { continue }
+            let off = Int(content[c1]) ?? 0
+            let d = Int(content[c2]) ?? 0
+            let t = String(content[c3])
             if !t.isEmpty { chars.append((off, d, t)) }
         }
         if !chars.isEmpty { lines.append(Line(start: start, text: content, chars: chars)) }

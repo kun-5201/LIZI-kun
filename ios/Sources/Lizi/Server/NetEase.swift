@@ -262,6 +262,10 @@ final class NetEaseService {
             "cover": cover,
             "duration": dt != 0 ? dt : int(s, "duration"),
             "fee": s["fee"] as? Int ?? 0,
+            // r30 路线 B：ISRC 透传（上游给才有；VM 实测网易搜索行与
+            // weapi /v3/song/detail 全键列表均无 isrc，本字段恒为空，
+            // 只是占位透传、不改任何取链逻辑）。
+            "isrc": str(s, "isrc"),
         ]
         return out
     }

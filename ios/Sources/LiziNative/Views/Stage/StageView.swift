@@ -1,15 +1,22 @@
 import SwiftUI
 
-/// 舞台页（原生版屏幕 9，r20 横竖屏两套布局，对照用户 01:34 两张截图）。
+/// 舞台页（原生版屏幕 9，r20 横竖屏两套布局，对照用户 01:34 两张截图；
+/// v5 胶囊改版：胶囊收进顶行，不再叠页面竖直中央）。
 ///
 /// 分层：
 /// - 底层：`StageWebView`（WKWebView，file:// 加载 `Resources/stages/*.html`）。
-/// - 上层：原生 HUD——竖屏顶行（返回 + 设置 / 形态三个按钮）+ 竖直中央
-///   叠加的播放胶囊（r28：胶囊移出顶行，浮在舞台画面/歌词上面，歌词仍在
-///   后面正常显示）；横屏整条控制行（返回 + 胶囊 + 设置 + 形态）都叠在
-///   竖直中央，返回贴左墙、设置/形态贴右墙、胶囊正中间。左下角（当前歌词
-///   小行 + 歌手名）。旧的底部迷你播放条（bottomHUD 整条）已撤，播放控制
-///   全进胶囊；形态名胶囊已撤（形态名只在形态选择器里显示）。
+/// - 上层：原生 HUD——竖屏/横屏同一条顶行：返回 + 播放胶囊（居中）+
+///   设置 / 形态，全部贴顶行；竖屏顶行顶 = topGap 52（标准档），岛底约
+///   48，胶囊不盖灵动岛；横屏顶行贴屏幕顶边（topGap 20）。竖屏胶囊是
+///   紧凑版（填返回与设置/形态之间的槽位，标准档 208pt，封面/字号/三键
+///   各缩一档，进度条只留细条不带时间——槽位就这么宽，正常版歌名只剩两字）；
+///   横屏胶囊沿用正常版理想宽 320/340/380 居中。左下角（当前歌词小行 +
+///   歌手名）一字不动：位置、字号、内容都不改；歌词区里淡字的下一行歌词
+///   （如「慌啥子嘛 / 赵本山」）是歌词本身，留着，不删。
+///   胶囊副标题只写歌手（r29 task 8 已做，`trackSubtitle` 不含歌名），
+///   歌名只在胶囊标题出现一次，本次只确认、不改。
+///   旧的底部迷你播放条（bottomHUD 整条）已撤，播放控制全进胶囊；
+///   形态名胶囊已撤（形态名只在形态选择器里显示）。
 ///
 /// 中央大歌词是哪一层（r20 已查，不猜）：
 /// - 截图里的形态是 519 棱镜阈限（prism-euphoria）：它自己画中央大歌词——
@@ -85,14 +92,14 @@ struct StageView: View {
 
     /// 就地浮层本体（r26）：形态下拉 / 齿轮面板二选一，右上锚定、
     /// 顶行下方 10pt（壳版 `.smenu` / `.spnl` 的 `top: calc(100% + 10px)`）。
-    /// r28：横屏触发按钮已移到竖直中央，浮层仍锚右上不跟按钮走——放中央行
-    /// 下方会超屏底（行底约 223pt + 面板高 228pt > 393pt），右上锚定照常可用。
-    /// 宽：下拉 min(560, 可用宽)，设置 min(340, 可用宽)（壳版 402 / 320，
+    /// v5：顶行高 = 顶行胶囊实高（`topRowCapsuleHeight`：竖屏紧凑胶囊约
+    /// 56、横屏正常胶囊约 60），不再是三按钮高 36/40——按旧值锚面板会
+    /// 压住胶囊下沿。宽：下拉 min(560, 可用宽)，设置 min(340, 可用宽)（壳版 402 / 320，
     /// 设计图下拉更宽）；高：下拉 min(58% 屏高, 520)，设置 min(62% 屏高, 560)，
     /// 超出可滚。歌不停：浮层只盖画面，不动播放状态。
     @ViewBuilder
     private func floatingPanel(tokens: StageTokens, geo: GeometryProxy) -> some View {
-        let topRowHeight: CGFloat = tokens.topCapsuleHeight
+        let topRowHeight: CGFloat = tokens.topRowCapsuleHeight
         let panelTop = geo.safeAreaInsets.top + tokens.topGap + topRowHeight + 10
         let horizontalSpace = geo.size.width
             - geo.safeAreaInsets.leading - geo.safeAreaInsets.trailing
@@ -170,21 +177,10 @@ struct StageView: View {
                 }
                 .ignoresSafeArea()
             }
-            // 控制行（r28）：竖屏只有播放胶囊叠在页面竖直中央；横屏整条
-            // 控制行（返回 + 胶囊 + 设置 + 形态）都叠在页面竖直中央，返回
-            // 贴左墙、设置/形态贴右墙、胶囊正中间（见 landscapeCenterRow）。
-            // ZStack 默认居中对齐 + 本 overlay(alignment: .center) 双保险；
-            // 只在 HUD 可见时出现，随 HUD 一起藏起。胶囊本体与尺寸一字不动，
-            // 浮在舞台画面 / 中央歌词上面，歌词仍在后面正常显示、不改布局。
-            .overlay(alignment: .center) {
-                if bridge.hudVisible {
-                    if tokens.isLandscape {
-                        landscapeCenterRow(tokens: tokens, geo: geo)
-                    } else {
-                        centeredPlayerCapsule(tokens: tokens, geo: geo)
-                    }
-                }
-            }
+            // 顶行（v5）：竖屏/横屏同一条顶行——返回 + 胶囊（居中）+ 设置 +
+            // 形态，竖屏顶在岛下（topGap 52，岛底约 48，不盖岛），横屏贴屏幕
+            // 顶边（topGap 20）。胶囊不再叠页面竖直中央（r28 旧挂载已删）；
+            // 左下角歌词字块一字不动，位置、字号、内容都不改。
             // 两个就地浮层（r26，用户 22:35 设计图 + 22:36 齿轮同款）：
             // 挂在 ZStack 上才能拿到 geo；本体见 floatingPanel。
             .overlay(alignment: .topTrailing) {
@@ -219,81 +215,84 @@ struct StageView: View {
         }
     }
 
-    // MARK: - 顶行（仅竖屏：返回 + 设置 / 形态三个按钮；横屏整条控制行
-    //   已移到页面竖直中央贴墙，见 landscapeCenterRow；播放胶囊竖屏叠在
-    //   中央，见 centeredPlayerCapsule）
+    // MARK: - 顶行（v5：竖屏/横屏同一条顶行——返回 + 胶囊（居中）+
+    //   设置 / 形态；竖屏顶在岛下，横屏贴屏幕顶边；左下角歌词不动）
 
     @ViewBuilder
     private func topRow(tokens: StageTokens, geo: GeometryProxy) -> some View {
-        if !tokens.isLandscape {
+        if tokens.isLandscape {
+            landscapeTopRow(tokens: tokens, geo: geo)
+        } else {
             portraitTopRow(tokens: tokens, geo: geo)
         }
     }
 
-    /// 竖屏顶行（r28）：左返回圆按钮（只有 < 箭头）+ 右设置齿轮 + 九宫格
-    /// 两个圆按钮（只有图标），中间 Spacer 撑开；播放胶囊不在顶行了。
-    /// 圆钮直径见 tokens.roundButtonDiameter（36/40/42），图标 15pt
-    /// （直径等比缩：17 × 40/44 ≈ 15.5 → 15）。
+    /// 竖屏顶行圆按钮（只有图标）：返回 < / 设置齿轮 / 九宫格三枚，
+    /// 直径见 tokens.roundButtonDiameter（36/40/42），图标 15pt。
+    private func circleButton(tokens: StageTokens,
+                              systemName: String,
+                              label: String,
+                              weight: Font.Weight = .medium,
+                              action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 15, weight: weight))
+                .foregroundStyle(.white)
+                .frame(width: tokens.roundButtonDiameter, height: tokens.roundButtonDiameter)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(.white.opacity(0.25), lineWidth: 1))
+        }
+        .accessibilityLabel(label)
+    }
+
+    /// 竖屏顶行（v5）：返回圆钮贴左 + 紧凑胶囊填中间槽位 + 设置齿轮 +
+    /// 九宫格贴右，一排都在岛下面。胶囊不定宽（HStack 填槽，标准档 208pt），
+    /// 内部是紧凑版（封面 36、歌名 14、三键 18/20/18、进度条只留细条
+    /// 不带时间）——槽位就这么宽，用正常版歌名只剩两字，再大一档只剩 4 字。
+    /// 圆钮在行内垂直居中（行高 = 胶囊高约 56，圆钮 40）。
+    /// 顶边 = geo.safeAreaInsets.top + topGap；本页根 GeometryReader
+    /// 与 VStack 都 .ignoresSafeArea()，运行时 geo.safeAreaInsets.top 是 0，
+    /// 所以有效顶边就是 topGap（竖屏 48/52/56，标准档 52pt，岛底约 48pt，
+    /// 胶囊顶露出 4pt 不盖岛；紧凑档 48pt 的机型没有灵动岛）。
+    /// 别把这一项换成 key window 安全区——那会一下冲到约 91pt。
     private func portraitTopRow(tokens: StageTokens, geo: GeometryProxy) -> some View {
         HStack(spacing: tokens.topRowGap) {
-            Button(action: {
+            circleButton(tokens: tokens, systemName: "chevron.left", label: "返回首页", weight: .semibold) {
                 bridge.wakeHUD()
                 navigation.show(.home)
-            }) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: tokens.roundButtonDiameter, height: tokens.roundButtonDiameter)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .overlay(Circle().stroke(.white.opacity(0.25), lineWidth: 1))
             }
-            .accessibilityLabel("返回首页")
 
-            Spacer(minLength: 0)
+            // 紧凑胶囊：填槽，歌名/歌手单行 + 三键 + 细进度条（无时间）。
+            playerCapsule(tokens: tokens, width: nil, compact: true)
+                .frame(maxWidth: .infinity)
 
             // 设置按钮：只有形态声明了 __stagePanel 才显示（壳版同款显隐规则；
             // 85 个已收录形态全有声明，所以实际常驻）。
             if bridge.panelSpec != nil {
-                Button(action: { toggleSettings() }) {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(.white)
-                        .frame(width: tokens.roundButtonDiameter, height: tokens.roundButtonDiameter)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .overlay(Circle().stroke(.white.opacity(0.25), lineWidth: 1))
+                circleButton(tokens: tokens, systemName: "gearshape", label: "本形态设置") {
+                    toggleSettings()
                 }
-                .accessibilityLabel("本形态设置")
             }
 
-            Button(action: { togglePicker() }) {
-                Image(systemName: "square.grid.2x2")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.white)
-                    .frame(width: tokens.roundButtonDiameter, height: tokens.roundButtonDiameter)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .overlay(Circle().stroke(.white.opacity(0.25), lineWidth: 1))
+            circleButton(tokens: tokens, systemName: "square.grid.2x2", label: "选择形态") {
+                togglePicker()
             }
-            .accessibilityLabel("选择形态")
         }
         .padding(.leading, geo.safeAreaInsets.leading + tokens.sideMargin)
         .padding(.trailing, geo.safeAreaInsets.trailing + tokens.sideMargin)
-        // r26：竖屏顶边 = geo.safeAreaInsets.top + topGap；本页根 GeometryReader
-        // 与 VStack 都 .ignoresSafeArea()，运行时 geo.safeAreaInsets.top 是 0，
-        // 所以有效顶边就是 topGap（竖屏 48/52/56，标准档 52pt，脱开岛底 48pt；
-        // r27：35/39/43 → 48/52/56）。
-        // 别把这一项换成 key window 安全区——那会一下冲到约 91pt。
         .padding(.top, geo.safeAreaInsets.top + tokens.topGap)
     }
 
-    /// 横屏控制行（r28）：整条移到页面竖直中央（挂在 body 的
-    /// `.overlay(alignment: .center)` 里，ZStack 居中对齐），不再占顶行。
-    /// 贴墙：返回贴左墙、设置/形态贴右墙——左右边距只留 safeArea，不再加
-    /// sideMargin（横屏灵动岛机一侧 safeArea 约 59pt，传感器区仍避开）；
-    /// 播放胶囊放 ZStack 中央，正中间。胶囊高 36、图标与文字 14pt
-    /// （高 40 → 36 等比缩：15 × 36/40 = 13.5 → 14）。
+    /// 横屏顶行（v5，取代 r28 的竖直中央行）：整条贴屏幕顶边（顶 = topGap
+    ///   16/20/24，横屏灵动岛在左右边中段，纵向不相交），返回贴左墙、
+    ///   设置/形态贴右墙——左右边距只留 safeArea，不再加 sideMargin
+    ///   （横屏灵动岛机一侧 safeArea 约 59pt，传感器区仍避开）；
+    ///   播放胶囊放 ZStack 中央，正中间，理想宽 320/340/380 一字不动。
+    ///   胶囊高 36 的说法是旧三按钮高，现胶囊实高约 55–64（见
+    ///   `topRowCapsuleHeight`，浮层锚定走它）；图标与文字 14pt。
     /// 左右两端宽度不等（左 76–84、右 164–190 含间距），胶囊不用 Spacer
     /// 顶——ZStack 居中放胶囊、HStack 贴墙放三按钮，两层叠加，胶囊严格居中。
-    private func landscapeCenterRow(tokens: StageTokens, geo: GeometryProxy) -> some View {
+    private func landscapeTopRow(tokens: StageTokens, geo: GeometryProxy) -> some View {
         let insets = geo.safeAreaInsets
         return ZStack {
             centeredPlayerCapsule(tokens: tokens, geo: geo)
@@ -355,61 +354,70 @@ struct StageView: View {
             .padding(.leading, insets.leading)
             .padding(.trailing, insets.trailing)
         }
+        // v5：整条贴屏幕顶边（竖屏同款公式，横屏 topGap 16/20/24）。
+        .padding(.top, geo.safeAreaInsets.top + tokens.topGap)
     }
 
-    /// 居中叠加的播放胶囊（r28）：竖屏自适应宽（顶行同款边距），横屏取
-    /// min(档位理想宽, 内容宽)，相机收起态按内容宽；本体
-    /// `playerCapsule` 一字不动，只换了挂载位置（顶行 → 页面竖直中央）。
+    /// 横屏居中播放胶囊（v5：只横屏用，竖屏改走顶行紧凑胶囊）：
+    /// 取 min(档位理想宽, 内容宽)，相机收起态按内容宽；本体
+    /// `playerCapsule` 一字不动，只换了挂载位置（r28 竖直中央 → v5 顶行）。
     @ViewBuilder
     private func centeredPlayerCapsule(tokens: StageTokens, geo: GeometryProxy) -> some View {
-        if tokens.isLandscape {
-            let insets = geo.safeAreaInsets
-            let contentW = geo.size.width - insets.leading - insets.trailing - tokens.sideMargin * 2
-            let collapsed = bridge.isCamera && !pillExpanded
-            let collapsedWidth = tokens.coverSize + 10 + tokens.playButtonFrame + tokens.capsuleHPadding * 2
-            let capsuleW: CGFloat = collapsed
-                ? collapsedWidth
-                : min(tokens.idealCapsuleWidthLandscape, contentW)
-            playerCapsule(tokens: tokens, width: capsuleW)
-        } else {
-            playerCapsule(tokens: tokens, width: nil)
-                .frame(maxWidth: .infinity)
-                .padding(.leading, geo.safeAreaInsets.leading + tokens.sideMargin)
-                .padding(.trailing, geo.safeAreaInsets.trailing + tokens.sideMargin)
-        }
+        // 只横屏调用（topRow 已按横竖屏分流）；竖屏走顶行紧凑胶囊。
+        let insets = geo.safeAreaInsets
+        let contentW = geo.size.width - insets.leading - insets.trailing - tokens.sideMargin * 2
+        let collapsed = bridge.isCamera && !pillExpanded
+        let collapsedWidth = tokens.coverSize + 10 + tokens.playButtonFrame + tokens.capsuleHPadding * 2
+        let capsuleW: CGFloat = collapsed
+            ? collapsedWidth
+            : min(tokens.idealCapsuleWidthLandscape, contentW)
+        playerCapsule(tokens: tokens, width: capsuleW)
     }
 
     // MARK: - 播放胶囊（封面 + 歌名/歌手 + 上一首/播放/下一首 + 进度条）
 
     /// 播放胶囊。`width` 为 nil 时自适应（竖屏顶行里撑满剩余宽）；
     /// 横屏传算好的固定宽。相机形态收起态只剩封面 + 播放键。
-    private func playerCapsule(tokens: StageTokens, width: CGFloat?) -> some View {
+    /// `compact`（v5 竖屏顶行）：内部尺寸走 `top*` 紧凑档（封面/字号/
+    /// 三键各缩一档），进度条只留细条不带时间——与 v5 图一致，也是不带
+    /// 时间才能在 208pt 槽位里放下 5 字歌名的原因；拖动 seek 不变。
+    /// 副标题只写歌手（r29 task 8），歌名只在标题出现一次，这里不改。
+    private func playerCapsule(tokens: StageTokens, width: CGFloat?, compact: Bool = false) -> some View {
         let collapsed = bridge.isCamera && !pillExpanded
-        return HStack(spacing: 10) {
+        let cover = compact ? tokens.topCoverSize : tokens.coverSize
+        let titleF = compact ? tokens.topTitleFont : tokens.titleFont
+        let artistF = compact ? tokens.topArtistFont : tokens.artistFont
+        let skipF = compact ? tokens.topSkipButtonFrame : tokens.skipButtonFrame
+        let playF = compact ? tokens.topPlayButtonFrame : tokens.playButtonFrame
+        let skipI = compact ? tokens.topSkipIconSize : tokens.skipIconSize
+        let playI = compact ? tokens.topPlayIconSize : tokens.playIconSize
+        let hPad = compact ? tokens.topCapsuleHPadding : tokens.capsuleHPadding
+        let vPad = compact ? tokens.topCapsuleVPadding : tokens.capsuleVPadding
+        return HStack(spacing: compact ? 8 : 10) {
             // 封面（相机形态收起态：点封面展开完整胶囊）。
             Button(action: {
                 bridge.wakeHUD()
                 if bridge.isCamera { pillExpanded.toggle() }
             }) {
                 CoverImageView(url: store.currentTrack?.coverURL, placeholderIconSize: 16)
-                    .frame(width: tokens.coverSize, height: tokens.coverSize)
+                    .frame(width: cover, height: cover)
                     .clipShape(RoundedRectangle(cornerRadius: tokens.coverCornerRadius))
             }
             .accessibilityLabel(bridge.isCamera ? (pillExpanded ? "收起播放器" : "展开播放器") : "封面")
 
             if collapsed {
                 Spacer()
-                playButton(tokens: tokens)
+                playButton(tokens: tokens, frame: playF, iconSize: playI)
             } else {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(store.currentTrack?.title ?? "未播放")
-                                .font(.system(size: tokens.titleFont, weight: .semibold))
+                                .font(.system(size: titleF, weight: .semibold))
                                 .foregroundStyle(.white)
                                 .lineLimit(1)
                             Text(trackSubtitle)
-                                .font(.system(size: tokens.artistFont))
+                                .font(.system(size: artistF))
                                 .foregroundStyle(.white.opacity(0.75))
                                 .lineLimit(1)
                         }
@@ -419,34 +427,38 @@ struct StageView: View {
 
                         transportButton(tokens: tokens,
                                         systemName: "backward.fill",
-                                        iconSize: tokens.skipIconSize,
-                                        frame: tokens.skipButtonFrame,
+                                        iconSize: skipI,
+                                        frame: skipF,
                                         label: "上一首") { store.previous() }
-                        playButton(tokens: tokens)
+                        playButton(tokens: tokens, frame: playF, iconSize: playI)
                         transportButton(tokens: tokens,
                                         systemName: "forward.fill",
-                                        iconSize: tokens.skipIconSize,
-                                        frame: tokens.skipButtonFrame,
+                                        iconSize: skipI,
+                                        frame: skipF,
                                         label: "下一首") { store.next() }
                     }
 
-                    progressRow(tokens: tokens)
+                    if compact {
+                        progressScrubber()
+                    } else {
+                        progressRow(tokens: tokens)
+                    }
                 }
             }
         }
-        .padding(.horizontal, tokens.capsuleHPadding)
-        .padding(.vertical, tokens.capsuleVPadding)
+        .padding(.horizontal, hPad)
+        .padding(.vertical, vPad)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: tokens.capsuleCornerRadius))
         .overlay(RoundedRectangle(cornerRadius: tokens.capsuleCornerRadius).stroke(.white.opacity(0.28), lineWidth: 1))
         .frame(width: width)
     }
 
-    private func playButton(tokens: StageTokens) -> some View {
+    private func playButton(tokens: StageTokens, frame: CGFloat, iconSize: CGFloat) -> some View {
         Button(action: { bridge.wakeHUD(); store.togglePlay() }) {
             Image(systemName: store.isPlaying ? "pause.fill" : "play.fill")
-                .font(.system(size: tokens.playIconSize))
+                .font(.system(size: iconSize))
                 .foregroundStyle(.white)
-                .frame(width: tokens.playButtonFrame, height: tokens.playButtonFrame)
+                .frame(width: frame, height: frame)
         }
         .accessibilityLabel(store.isPlaying ? "暂停" : "播放")
         .disabled(store.currentTrack == nil)
@@ -589,11 +601,11 @@ struct StageView: View {
 
     // MARK: - 派生文案
 
-    /// 歌手 · 专辑（壳版 `#stage-sub` 同款格式）。
+    /// 只写歌手（r29 task 8：副标题不再拼专辑，歌名只在胶囊标题出现一次）。
     private var trackSubtitle: String {
         guard let track = store.currentTrack else { return "—" }
-        if track.album.isEmpty { return track.artist.isEmpty ? "—" : track.artist }
-        return track.artist.isEmpty ? track.album : track.artist + " · " + track.album
+        if track.artist.isEmpty { return track.album.isEmpty ? "—" : track.album }
+        return track.artist
     }
 
     /// 左下角歌手名（只要歌手，不要专辑，与截图一致）。

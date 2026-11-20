@@ -196,7 +196,7 @@ final class AppleMusicAuth {
     /// StoreKit 授权（completionHandler 版包一层 continuation；系统弹框由用户点）。
     private func requestStoreKitAuthorization() async -> SKCloudServiceAuthorizationStatus {
         await withCheckedContinuation { continuation in
-            SKCloudServiceController().requestAuthorization { status in
+            SKCloudServiceController.requestAuthorization { status in
                 continuation.resume(returning: status)
             }
         }

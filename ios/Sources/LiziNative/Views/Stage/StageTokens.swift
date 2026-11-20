@@ -38,7 +38,17 @@ import SwiftUI
 /// （r28：三按钮各缩一档——竖屏圆钮 40/44/46 → 36/40/42，横屏胶囊宽
 ///   各 −4、胶囊高 40 → 36，图标/文字字号等比缩，见 StageView；
 ///   topRowGap / sideMargin / topGap 一律不动。）
-/// | 播放胶囊理想宽     |   – |   – |   – | 320 | 340 | 380 |
+/// | 播放胶囊理想宽（横屏）|   – |   – |   – | 320 | 340 | 380 |
+/// | 顶行紧凑胶囊封面（v5 竖屏）| 32 | 36 | 40 |   – |   – |   – |
+///   （v5：竖屏胶囊收进顶行，只能占返回与设置/形态之间的槽位——
+///   standard：390 − 边距 32 − 返回 40 − 齿轮 40 − 九宫格 40 − 间距 30
+///   = 208pt；按图上比例硬取 280 居中会压住右组（右组左缘 284，
+///   280 宽胶囊右缘 335），所以竖屏胶囊不定宽、HStack 填槽，
+///   内部同步缩小两档（封面 56→36、歌名 16→14、三键 78→68、
+///   横向内边距 12→10、进度条去时间只留细条），歌名栏剩约 70pt，
+///   5 字歌名 14pt（约 70）刚好放下；再大一档就只剩 56pt、歌名截成 4 字。
+///   图上约 48% 屏宽是示意比例，不按像素定宽。横屏理想宽 320/340/380
+///   不动，本来就是约 40–46% 屏宽，与 v5 横屏图一致，内容也不缩。）
 /// | 胶囊圆角           |  20 |  20 |  20 |  20 |  20 |  20 |
 /// | 胶囊横向内边距    |  10 |  12 |  12 |  12 |  12 |  14 |
 /// | 胶囊纵向内边距    |   8 |   8 |   8 |   5 |   6 |   6 |
@@ -51,19 +61,22 @@ import SwiftUI
 /// | 左下角歌词行字号   |  15 |  15 |  15 |  15 |  15 |  15 |
 /// | 左下角歌手字号     |  12 |  12 |  12 |  12 |  12 |  12 |
 /// | 左下角底部预留     | 18% | 18% | 18% | 17% | 17% | 17% |
-/// （高度，胶囊高度由内容撑出，不写死：竖屏约 70pt，横屏约 54pt；
+/// （高度，胶囊高度由内容撑出，不写死：竖屏紧凑胶囊约 56pt，横屏约 60pt；
 ///  左下角底部预留 = 屏高 × 该比例，截图实测字块顶约在 75% 高处。）
 ///
-/// 验算（r28：播放胶囊已移出顶行、叠在页面竖直中央，顶行只剩三个按钮；
-/// 胶囊不再挤顶行，竖屏胶囊宽 = 内容宽，横屏取 min(理想宽, 内容宽)）：
-/// - 竖屏 standard（390 宽）：内容宽 358，顶行三圆钮 40×3 + 间距 10×2
-///   = 140，富余；居中胶囊宽 358，内行：封面 56 + 间距 10 + 文案 +
-///   三键 78 + 内边距 24，绰绰有余。
-/// - 横屏 standard（852×393）：居中控制行——胶囊取理想 340 放屏正中间，
-///   左右缘 256/596；返回 80 贴左墙（右缘 ≤ 59 + 80 = 139，岛侧 safeArea
-///   最坏 59pt 计），设置 84 + 间距 14 + 形态 84 = 182 贴右墙（左缘 ≥
-///   852 − 59 − 182 = 611），两端都不碰胶囊；胶囊内行一：封面 48 +
+/// 验算（v5：胶囊收进顶行，竖屏/横屏同一排，不再叠页面竖直中央）：
+/// - 竖屏 standard（390 宽）：顶行 HStack = 边距 16 + 返回圆钮 40 +
+///   间距 10 + 紧凑胶囊（填槽，208）+ 间距 10 + 齿轮 40 + 间距 10 +
+///   九宫格 40 + 边距 16；胶囊内行：内边距 20 + 封面 36 + 间距 8 +
+///   文案 70 + 间距 6 + 三键 68 = 208，5 字歌名 14pt（约 70）放得下；
+///   胶囊顶 = topGap 52，岛底约 48，露出 4pt 不盖岛；胶囊高约 56
+///   （12 + 文案栈 44，与封面 36 取大），圆钮在行内垂直居中。
+/// - 横屏 standard（852×393）：顶行贴顶，topGap 20；胶囊 340 放屏正中间，
+///   左右缘 256/596；返回 80 贴左墙（右缘 ≤ 59 + 80 = 139），设置 84 +
+///   间距 14 + 形态 84 = 182 贴右墙（左缘 ≥ 852 − 59 − 182 = 611），
+///   两端都不碰胶囊；胶囊内行一：封面 48 +
 ///   间距 10 + 文案 172 + 间距 8 + 三键 78 + 内边距 24 = 340。
+/// （r28 旧验算：胶囊叠页面竖直中央，v5 已作废。）
 enum StageSizeTier: String {
     case compact
     case standard
@@ -86,7 +99,8 @@ struct StageTokens {
     let settingsCapsuleWidth: CGFloat
     let pickerCapsuleWidth: CGFloat
     /// 三个顶栏按钮的高：竖屏 = 圆钮直径，横屏 = 胶囊高 36。
-    /// （浮层锚定 topRowHeight 与横屏胶囊 frame 都走它，别再写死 40。）
+    /// （横屏三胶囊按钮的 frame 高走它；浮层锚定改走 topRowCapsuleHeight，
+    ///  v5 顶行高 = 胶囊实高，别再拿它当行高。）
     let topCapsuleHeight: CGFloat
 
     // MARK: - 播放胶囊
@@ -106,6 +120,29 @@ struct StageTokens {
     let timeFont: CGFloat = 11
     /// 横屏播放胶囊的理想宽（实际取 min(理想宽, 可用宽)，居中放）。
     let idealCapsuleWidthLandscape: CGFloat
+    // MARK: - 顶行紧凑胶囊（v5 竖屏：胶囊收进顶行填两组按钮之间的槽位，
+    //   内部同步缩小；横屏不用这套，沿用上面的正常尺寸）。
+    /// 紧凑胶囊纵向内边距（固定 6；进度条去时间只留细条，与 v5 图一致）。
+    let topCapsuleVPadding: CGFloat = 6
+    /// 紧凑胶囊横向内边距（8/10/10；正常胶囊 10/12/12，竖屏槽位挤不下）。
+    let topCapsuleHPadding: CGFloat
+    let topCoverSize: CGFloat
+    let topTitleFont: CGFloat
+    let topArtistFont: CGFloat
+    let topSkipButtonFrame: CGFloat
+    let topPlayButtonFrame: CGFloat
+    let topSkipIconSize: CGFloat
+    let topPlayIconSize: CGFloat
+    /// 顶行胶囊的实际高度（浮层锚定用）：纵向内边距 ×2 + 封面与文案栈取大；
+    /// 文案栈 = 歌名 + 间距 1 + 歌手 + 间距 2 + 进度条 16。
+    var topRowCapsuleHeight: CGFloat {
+        if isLandscape {
+            return capsuleVPadding * 2
+                + max(coverSize, titleFont + 1 + artistFont + 2 + 16)
+        }
+        return topCapsuleVPadding * 2
+            + max(topCoverSize, topTitleFont + 1 + topArtistFont + 2 + 16)
+    }
 
     // MARK: - 左下角
 
@@ -137,6 +174,11 @@ struct StageTokens {
         if isLandscape {
             roundButtonDiameter = 0
             topCapsuleHeight = 36
+            // 横屏不用紧凑尺寸，走正常胶囊尺寸（字段照常赋值，避免未初始化）。
+            topCapsuleHPadding = 0
+            topCoverSize = 0; topTitleFont = 0; topArtistFont = 0
+            topSkipButtonFrame = 0; topPlayButtonFrame = 0
+            topSkipIconSize = 0; topPlayIconSize = 0
             switch tier {
             case .compact:
                 sideMargin = 28; topGap = 16; topRowGap = 12
@@ -176,6 +218,11 @@ struct StageTokens {
                 coverSize = 48; titleFont = 15; artistFont = 11
                 skipButtonFrame = 20; playButtonFrame = 24
                 skipIconSize = 16; playIconSize = 20; transportSpacing = 4
+                // v5 紧凑胶囊（顶行填槽用）：封面 32、三键 16/18/16。
+                topCapsuleHPadding = 8
+                topCoverSize = 32; topTitleFont = 14; topArtistFont = 11
+                topSkipButtonFrame = 16; topPlayButtonFrame = 18
+                topSkipIconSize = 13; topPlayIconSize = 15
             case .standard:
                 sideMargin = 16; topGap = 52; topRowGap = 10
                 roundButtonDiameter = 40
@@ -184,6 +231,11 @@ struct StageTokens {
                 coverSize = 56; titleFont = 16; artistFont = 12
                 skipButtonFrame = 22; playButtonFrame = 26
                 skipIconSize = 18; playIconSize = 22; transportSpacing = 4
+                // v5 紧凑胶囊（顶行填槽用）：封面 36、三键 18/20/18。
+                topCapsuleHPadding = 10
+                topCoverSize = 36; topTitleFont = 14; topArtistFont = 11
+                topSkipButtonFrame = 18; topPlayButtonFrame = 20
+                topSkipIconSize = 15; topPlayIconSize = 17
             case .large:
                 sideMargin = 16; topGap = 56; topRowGap = 10
                 roundButtonDiameter = 42
@@ -192,6 +244,11 @@ struct StageTokens {
                 coverSize = 60; titleFont = 17; artistFont = 12
                 skipButtonFrame = 24; playButtonFrame = 28
                 skipIconSize = 20; playIconSize = 24; transportSpacing = 6
+                // v5 紧凑胶囊（顶行填槽用）：封面 40、三键 20/22/20。
+                topCapsuleHPadding = 10
+                topCoverSize = 40; topTitleFont = 15; topArtistFont = 11
+                topSkipButtonFrame = 20; topPlayButtonFrame = 22
+                topSkipIconSize = 16; topPlayIconSize = 19
             }
             captionBottomReserve = 0.18
         }

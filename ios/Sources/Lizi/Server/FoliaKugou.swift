@@ -28,6 +28,17 @@ import UIKit
 /// - 匿名 `playInfo` 拿不到 URL：播放必须登录（网关 `/v5/url` 匿名回
 ///   20028「本次请求需要验证」）；20028 时先调 register_dev 再重试一次，
 ///   仍 20028 则回 `reason:"login"`，不再降档重试。
+///   r28 修：`/v5/url` 的 20028 回包字段是 `errcode`（数字；无签名的
+///   20006 回包里还是字符串 `"20006"`），不是 `error_code`——旧
+///   `upstreamErrorCode` 只读 `error_code`，`needsVerify` 恒为假，
+///   register_dev 重试从未真正触发过（2026-11-21 VM 实测：带签名的
+///   匿名 `/v5/url` 回 `{"errcode":20028,"status":0,"error":"本次请求
+///   需要验证"}`；不带签名回 `errcode:"20006" errmsg:"err signature"`，
+///   所以签名必须带——上游 `song_url.js` 的 `notSign:true` 是死键，
+///   `request.js` 只认 `notSignature`，照抄 `notSign` 反而会签错）。
+///   另外：无 token 且整条链都没拿到地址时也回 `reason:"login"`
+///  （Folia `kugouNoUrlError(noUrlSeen, signedOut:true)` 同款：未登录
+///   + 没给地址 → 登录后可能能放）。
 /// - 匿名搜索走 complexsearch/v2（Folia 用 http；本实现用 https，
 ///   VM 实测同一 host 的 https 同样回 200）。
 /// - 登录态搜索走网关 `/v3/search/song`；首页回空时退回匿名再搜一次
@@ -488,27 +499,43 @@ actor FoliaKugouService {
         return KGResponse(httpStatus: http.statusCode, json: Upstream.jsonObject(data), raw: data)
     }
 
-    /// 上游状态：`status` 为 0 或 `error_code` 非 0 即失败
-    ///（`util/request.js` 的 502 判定同款）。
+    /// 上游状态：`status` 为 0 或 `error_code`/`errcode` 非 0 即失败
+    ///（`util/request.js` 的 502 判定同款；r28：`/v5/url` 只回 `errcode`，
+    /// 不带 `error_code`，不读它会把 20028 当成功）。
     private static func upstreamStatus(_ json: [String: Any]?) -> Int {
         guard let json else { return 0 }
         if let s = json["status"] as? Int { return s }
         if let s = json["status"] as? NSNumber { return s.intValue }
         if let e = json["error_code"] as? Int { return e == 0 ? 1 : 0 }
         if let e = json["error_code"] as? NSNumber { return e.intValue == 0 ? 1 : 0 }
+        if let e = json["errcode"] as? Int { return e == 0 ? 1 : 0 }
+        if let e = json["errcode"] as? NSNumber { return e.intValue == 0 ? 1 : 0 }
+        if let e = json["errcode"] as? String { return (Int(e) ?? 0) == 0 ? 1 : 0 }
         return 1
     }
 
+    /// 上游错误码：`error_code` 与 `errcode` 都认，数字与字符串都认
+    ///（r28：`/v5/url` 的 20028 是数字 `errcode`，20006 是字符串
+    /// `errcode:"20006"`；旧实现只读数字 `error_code`，两个都漏）。
     private static func upstreamErrorCode(_ json: [String: Any]?) -> Int {
         guard let json else { return 0 }
-        if let e = json["error_code"] as? Int { return e }
-        if let e = json["error_code"] as? NSNumber { return e.intValue }
+        for key in ["error_code", "errcode"] {
+            if let e = json[key] as? Int { return e }
+            if let e = json[key] as? NSNumber { return e.intValue }
+            if let e = json[key] as? String, let n = Int(e) { return n }
+        }
         return 0
     }
 
-    /// 20028「本次请求需要验证」（Folia `kugouTransport.ts` 的重试触发条件）。
+    /// 20028「本次请求需要验证」（Folia `kugouTransport.ts` 的
+    /// `isDeviceVerificationRequired` 同款：`errcode ?? error_code`
+    /// 为 20028，或文案含「本次请求需要验证」）。
     private static func needsVerify(_ json: [String: Any]?) -> Bool {
-        upstreamStatus(json) == 0 && upstreamErrorCode(json) == 20028
+        guard let json else { return false }
+        guard upstreamStatus(json) == 0 else { return false }
+        if upstreamErrorCode(json) == 20028 { return true }
+        let msg = strField(json, "error", "error_msg", "msg")
+        return msg.contains("本次请求需要验证")
     }
 
     /// 20028 重试：先调 register_dev 拿新 dfid，再原样重发一次
@@ -1201,7 +1228,10 @@ actor FoliaKugouService {
     /// song_url 一次尝试（`module/song_url.js`）：GET /v5/url，
     /// x-router trackercdn.kugou.com，encryptKey（key=signKey）。
     /// 回 (url, authRequired, reason)：无 URL 时 reason 带上游状态，
-    /// 401/403/errcode 152 时 authRequired 为真（Folia 立刻认登录失效）。
+    /// 401/403/errcode 152 时 authRequired 为真（Folia 立刻认登录失效）；
+    /// register_dev 重试后仍是 20028 时同样 authRequired（文件头约定：
+    /// 仍 20028 则回 `reason:"login"`，不再降档重试——换档位只会
+    /// 再拿一次 20028，Folia 同款立刻抛 auth-required）。
     private func fetchSongURL(hash: String, quality: String, albumId: Int, albumAudioId: Int) async throws -> (url: String?, authRequired: Bool, reason: String) {
         let params: [String: String] = [
             "album_id": String(albumId), "area_code": "1", "hash": hash.lowercased(),
@@ -1216,6 +1246,12 @@ actor FoliaKugouService {
                               xRouter: "trackercdn.kugou.com", encryptKey: true)
         }
         if res.httpStatus == 401 || res.httpStatus == 403 || Self.upstreamErrorCode(res.json) == 152 {
+            return (nil, true, "login")
+        }
+        if Self.needsVerify(res.json) {
+            // withRegisterRetry 里已经 register_dev + 重试过一次，仍是
+            // 20028：设备验证过不去，再换档位/变体也是同一答案，直接认
+            // 需要登录（匿名设备未注册 / 登录态的 dfid 已失效都走这里）。
             return (nil, true, "login")
         }
         let rawData = res.json?["data"]
@@ -1290,7 +1326,11 @@ actor FoliaKugouService {
                 do {
                     let r = try await fetchSongURL(hash: hash, quality: tier, albumId: v.0, albumAudioId: v.1)
                     if r.authRequired {
-                        return .json(200, ["code": 401, "reason": "login", "error": "酷狗登录已失效，请重新扫码登录"])
+                        // 文案分两种：存过 token 是登录失效，没存过是根本没登
+                        //（reason 都是 "login"，下游只认 reason，文案只进诊断）。
+                        let loggedIn = !loginState().token.isEmpty
+                        return .json(200, ["code": 401, "reason": "login",
+                                           "error": loggedIn ? "酷狗登录已失效，请重新扫码登录" : "酷狗取链需要登录，请扫码登录酷狗后再播"])
                     }
                     if let url = r.url {
                         return .json(200, ["code": 0, "url": url, "quality": tier, "via": "kugou"])
@@ -1308,6 +1348,14 @@ actor FoliaKugouService {
             return .json(200, ["code": 0, "url": url, "quality": "128", "via": "kugou-legacy"])
         }
         if noUrlReason.isEmpty { noUrlReason = "unavailable" }
+        // Folia `kugouNoUrlError(noUrlSeen, signedOut)` 同款：整条链都没给
+        // 地址 + 根本没登录 → 登录后可能能放，回 reason:"login"（不回
+        // 上游原文，否则播放页只显示「暂时无法播放」，用户不知道要登录）。
+        // 已登录还拿不到地址时保留上游原因（无版权 / status 3 之类），不谎
+        // 报登录问题。
+        if loginState().token.isEmpty {
+            return .json(200, ["code": 2, "reason": "login", "error": "酷狗取链需要登录，请扫码登录酷狗后再播"])
+        }
         return .json(200, ["code": 2, "reason": noUrlReason, "error": noUrlReason])
     }
 

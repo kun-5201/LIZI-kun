@@ -13,8 +13,11 @@ import UIKit
 ///   模板量：每块 28×28、间距 5；壳版 `.pstrip__i` 是 32px，
 ///   模板把图标收小了才放得下大标题 + 搜索）→ 搜索
 ///   （壳版 `.pstrip__search` 在长条右列；模板右端也有放大镜）。
-/// - 图标 28pt、圆角 28%（≈8pt），选中描 2pt 墨色圈（壳版
-///   `0 0 0 2px currentColor`；原生浅色面板上 currentColor 就是墨色）。
+/// - 图标 28pt、圆角 28%（≈8pt），选中描 2pt 圈（壳版
+///   `0 0 0 2px currentColor`；浅场 currentColor 就是墨色）。
+///   r28 tone-aware：面板跟专辑取色后深场时标题、搜索图标、选中圈
+///   都改白色（`isDark` 由调用方 HomeView 的 panelTone 传入），
+///   浅场保持墨色；图标 28pt、条高 48pt 不动。
 ///   图标下不再挂名字（名字只在左列出现一次——现在是「每日推荐」标题）。
 /// - 不横向滚动：图标太宽时只收图标（壳版 `fitPlatBar`，缩放下限 0.55，
 ///   标题不动）；标题宽用 PreferenceKey 实测，初值按最长标题
@@ -48,6 +51,11 @@ struct PlatformStripView: View {
     /// 标题实测宽（PreferenceKey 回写；初值 100 = 「每日推荐」4 字 × 24pt 预估）。
     @State private var nameWidth: CGFloat = 100
 
+    /// r28 tone-aware：调用方（HomeView）按在播专辑取色 `panelTone.isDark`
+    /// 传入——深场时标题、搜索图标、选中圈都用白色，浅场保持墨色。
+    /// 默认 false（浅场），与改前行为一致。
+    var isDark: Bool = false
+
     /// 面板标题：固定「每日推荐」（r26：来源 chips 已删，不再跟来源切换走）。
 
     /// r22j 平台管理：平台条只显示设置 → 平台管理勾选的平台（顺序不变，
@@ -78,7 +86,7 @@ struct PlatformStripView: View {
             HStack(spacing: 12) {
                 Text("每日推荐")
                     .font(.liziBody(size: 24, weight: .bold))
-                    .foregroundColor(LiziTokens.ink)
+                    .foregroundColor(isDark ? .white : LiziTokens.ink)
                     .lineLimit(1)
                     .background(
                         GeometryReader { proxy in
@@ -91,7 +99,7 @@ struct PlatformStripView: View {
                 HStack(spacing: 5) {
                     ForEach(visiblePlatforms, id: \.id) { platform in
                         Button(action: { viewModel.selectPlatform(platform.id, playbackStore: playback) }) {
-                            PlatformIconView(platform: platform, selected: platform.id == viewModel.selectedPlatform, size: 28)
+                            PlatformIconView(platform: platform, selected: platform.id == viewModel.selectedPlatform, size: 28, ringColor: isDark ? .white : LiziTokens.ink)
                         }
                         .accessibilityLabel("切换到\(platform.name)")
                     }
@@ -103,7 +111,7 @@ struct PlatformStripView: View {
                 Button(action: { nav.show(.search) }) {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(LiziTokens.ink2)
+                        .foregroundColor(isDark ? .white : LiziTokens.ink2)
                         .frame(width: 32, height: 32)
                 }
                 .accessibilityLabel("搜索")
@@ -124,13 +132,16 @@ private struct PlatBarNameWidthKey: PreferenceKey {
 
 /// 单个平台图标：真 logo 图（默认 32pt，圆角 28% ≈ 9pt 框定；设置页平台管理
 /// 行用 26pt、圆角 7pt，照抄壳版 `.pm__logo` 26×26 radius 7）；选中态描
-/// 2pt 墨色圈。logo 资源缺失时（资源没进包）回落旧的品牌色 + 首字瓷砖，
+/// 2pt 圈（默认墨色；平台条深场时传白色，见 `ringColor`）。logo 资源缺失时（资源没进包）回落旧的品牌色 + 首字瓷砖，
 /// 不空白。
 struct PlatformIconView: View {
     let platform: LiziPlatforms.Info
     let selected: Bool
     /// 图标边长（默认 32；平台条传 28，设置行传 26）。
     var size: CGFloat = 32
+    /// 选中圈颜色（默认墨色；r28 tone-aware：平台条深场时传白色）。
+    /// 设置页 / 账号详情不传，保持墨色不变。
+    var ringColor: Color = LiziTokens.ink
 
     var body: some View {
         ZStack {
@@ -151,7 +162,7 @@ struct PlatformIconView: View {
         }
         .overlay(
             RoundedRectangle(cornerRadius: size * 0.28)
-                .stroke(LiziTokens.ink, lineWidth: selected ? 2 : 0)
+                .stroke(ringColor, lineWidth: selected ? 2 : 0)
         )
     }
 }

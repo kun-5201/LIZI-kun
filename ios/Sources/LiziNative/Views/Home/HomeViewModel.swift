@@ -62,12 +62,18 @@ final class HomeViewModel: ObservableObject {
     @Published var lastTrack: Track?
     @Published var lastPlayedAt: Date?
 
-    /// 跑马带速度（px/帧，60fps 计）：照抄壳版 app.js marqSpeedOf，
-    /// 默认 24 → 0.36 px/帧（比最初写死的 0.6 慢四成）。
+    /// 跑马带速度（px/s；30Hz 定时器每跳走 `marqueeSpeed / 30`，
+    /// 见 HomeCoverRingView.tickFlat，所以本值本身就是 px/s）。
+    /// r28：壳版 app.js marqSpeedOf 的斜率是 0.011，默认 24 →
+    /// (0.10 + 24×0.011)×60 = 21.84 px/s；规格（ring.js
+    /// MARQUEE_SPEED）要 24 px/s，斜率改 0.0125：
+    /// (0.10 + 24×0.0125)×60 = 0.40×60 = 24 px/s。
+    /// 与壳版公式就此分叉（壳版仍是 0.011）；v=0 的下限 6 px/s 不变，
+    /// v=100 的上限由 72 变 81 px/s。初画停 2.5s、松手 1.2s 恢复不动。
     var marqSpeedPxPerSecond: CGFloat {
         let v = UserDefaults.standard.object(forKey: Self.marqSpeedKey) as? Double ?? 24
         let clamped = max(0, min(100, v.isFinite ? v : 24))
-        return CGFloat((0.10 + clamped * 0.011) * 60)
+        return CGFloat((0.10 + clamped * 0.0125) * 60)
     }
 
     /// 首页加载代际（Moumusic HomeViewModel.loadGeneration 同款，只管首页

@@ -21,6 +21,11 @@ import Foundation
 final class DownloadStore: NSObject, ObservableObject {
     static let shared = DownloadStore()
 
+    /// 下载完成通知（r28）：落盘 + 写清单成功后发一次，
+    /// `LocalMusicSectionView` 订阅它刷新列表；失败 / 进度不发。
+    /// userInfo：`["entryId": 新清单条目 id]`。
+    static let downloadCompletedNotification = Notification.Name("lizi.native.downloadCompleted")
+
     /// 一首歌的下载状态（UI 按它换图标：下载中是环形进度 + 百分比，
     /// 下完是勾，已下载态不重复下，失败是红三角、点按重试）。
     enum DownloadState: Equatable {
@@ -203,6 +208,13 @@ final class DownloadStore: NSObject, ObservableObject {
                     self.downloadedMap = map
                     self.refreshDownloadedCache()
                     self.setState(key: key, state: .downloaded)
+                    // r28：先写完映射 / 缓存 / 状态再发通知——订阅方
+                    // 收到就调 LocalMusic.list()，新条目已在清单里。
+                    NotificationCenter.default.post(
+                        name: Self.downloadCompletedNotification,
+                        object: self,
+                        userInfo: ["entryId": entry.id]
+                    )
                 } else {
                     self.setState(key: key, state: .failed("导入本地音乐失败"))
                 }

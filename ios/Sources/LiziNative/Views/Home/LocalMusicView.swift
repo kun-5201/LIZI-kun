@@ -25,6 +25,9 @@ import UniformTypeIdentifiers
 ///   「还没有导入本地音频。在文件 App 里选音频文件，导入后出现在这里。」
 ///   不编假文件，文件夹里没歌就是空态。
 /// - `onAppear` 与导入/删除后刷新列表（`LocalMusic.list()` 按导入时间倒序）。
+/// - r28：订阅 `DownloadStore.downloadCompletedNotification`，下载一完成
+///   就 `refresh()`——只在完成那一刻刷一次，不轮询、不跟进度走；
+///   订阅随视图走（`.onReceive`），视图消失即取消，不留泄漏。
 struct LocalMusicSectionView: View {
     @EnvironmentObject private var playback: PlaybackStore
     @State private var entries: [LocalMusic.Entry] = []
@@ -119,6 +122,11 @@ struct LocalMusicSectionView: View {
         }
         .padding(.horizontal, 16)
         .onAppear { refresh() }
+        // r28：下载完成即刷新（通知在落盘 + 写清单之后发，list() 里已有新歌；
+        // 文件夹计数与展开后的文件列表同一次 refresh() 一起更新）。
+        .onReceive(NotificationCenter.default.publisher(for: DownloadStore.downloadCompletedNotification)) { _ in
+            refresh()
+        }
         .sheet(isPresented: $isPickerPresented) {
             LocalMusicDocumentPicker(
                 onPick: { urls in

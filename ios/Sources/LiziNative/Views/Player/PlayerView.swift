@@ -116,6 +116,11 @@ struct PlayerView: View {
     /// 队列面板是否打开：控制行最左列表图标的回调切它（再点一次关上）。
     @State private var showQueue = false
 
+    /// r28：登录弹窗目标（取链失败原因是登录时弹登录入口，目前只有酷狗）。
+    /// 由 `store.loginPromptPlatform`（PlaybackStore，String?）或失败红字
+    /// 点按置位；sheet 的 onDone 调 `store.dismissLoginPrompt()` 清信号。
+    @State private var loginTarget: LoginSheetTarget?
+
     var body: some View {
         GeometryReader { geo in
             let tier = PlayerTokens.sizeTier(for: geo.size, topInset: geo.safeAreaInsets.top)
@@ -146,6 +151,17 @@ struct PlayerView: View {
         // 禁缩放：SwiftUI 默认没有捏合缩放；这里明确不加任何缩放手势。
         .navigationBarHidden(true)
         .onAppear { settings.refreshNowLayout() }
+        // r28：取链失败原因是登录时（目前只有酷狗）弹登录入口。
+        // onChange 只在信号变化时触发；红字点按是另一条置位路径（见
+        // statusCapsules），信号已立但本页后挂载时也能点红字补弹。
+        .onChange(of: store.loginPromptPlatform) { platform in
+            if let platform {
+                loginTarget = LoginSheetTarget(platform: platform)
+            }
+        }
+        .sheet(item: $loginTarget) { target in
+            LoginSheetView(platform: target.platform, onDone: { store.dismissLoginPrompt() })
+        }
     }
 
     /// r25 #7：按 `SettingsStore.nowLayout` 分发竖屏版式（"" 默认一字不动）。
@@ -977,6 +993,15 @@ struct PlayerView: View {
                 .font(.system(size: PlayerTokens.textXs))
                 .foregroundStyle(Color.red.opacity(0.85))
                 .padding(.top, squeeze ? 2 : 4)
+                // r28：只有取链失败原因是登录（loginPromptPlatform 非空，
+                // 目前只有酷狗）时点红字才弹登录入口；其它失败原因点按无
+                // 动作。内层手势优先于外层 titleBlock 的点歌名开队列，
+                // 点红字只弹登录，不会同时打开队列。
+                .onTapGesture {
+                    if let platform = store.loginPromptPlatform {
+                        loginTarget = LoginSheetTarget(platform: platform)
+                    }
+                }
         } else if store.currentTrack != nil {
             HStack(spacing: 6) {
                 if let quality = store.actualQuality {

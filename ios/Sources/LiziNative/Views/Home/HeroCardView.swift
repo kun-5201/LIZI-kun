@@ -8,16 +8,19 @@ import SwiftUI
 ///   HomeView 按模板算好传进来（`height`），不再用壳版 clamp 公式
 ///   （公式保留作 `height == nil` 时的回落）。
 ///   圆角 17（模板量：顶行/左列都从 16 往里收 17pt；壳版是 3px，
-///   模板为准）。标题 42pt（竖屏模板量约 42pt）/ 46pt（横屏模板量约
-///   46pt），由 HomeView 按朝向传 `titleSize`；内边距左/右 24、上/下 20
+///   模板为准）。标题 26pt（r28：39.6s 视频实测约 26pt 白字；
+///   旧模板量 42/46 已作废），由 HomeView 按朝向传 `titleSize`；
+///   内边距左/右 24、上/下 20
 ///   （壳版 badge left 24 top 20、meta left/right 24 bottom 20）；阴影
 ///   0 30/35 0.5（壳版 0 30px 70px -34px / .5，SwiftUI 无 spread，
 ///   radius≈blur/2 近似）。
 /// - 显示上次播放的歌（PlaybackStore.currentTrack，空时取持久化的上次播放；
 ///   两者都没有时标题是「从下面挑一个平台开始」）。
-/// - 封面宽图铺满 + 底部渐变；左上角「上次听到 · 时间」徽章；
-///   左下角歌名 / 副标题；右下角播放键（播放中三角变均衡条动画，
-///   照抄壳版 .hall-hero__play-bars）。模板里没有「打开歌单」pill，
+/// - 封面宽图铺满 + 底部渐变；左上角「上次听到 · 时间」徽章（r28：
+///   13pt，视频实测）；
+///   左下角歌名 / 副标题（r28：歌名 26pt、副标题 15pt，视频实测）；
+///   右下角播放键（r28：白圆 ⌀40pt，视频实测 75px；
+///   播放中三角变均衡条动画，照抄壳版 .hall-hero__play-bars）。模板里没有「打开歌单」pill，
 ///   已拿掉——整卡点按就是进播放页，pill 是重复入口，功能没丢。
 /// - 右上角锁按钮：有海报时才出现；锁定 = 闭锁图标，解锁 = 开锁图标；
 ///   状态 UserDefaults 持久化（`lizi.native.hall.heroLocked`），默认解锁。
@@ -33,8 +36,8 @@ struct HeroCardView: View {
     let viewHeight: CGFloat
     /// 模板 v2 定高（竖屏 382 / 横屏 180，932×430 档）；nil 时回落壳版 clamp 公式。
     var height: CGFloat? = nil
-    /// 模板 v2 标题字号：竖屏 42 / 横屏 46（模板实测）。
-    var titleSize: CGFloat = 42
+    /// 模板 v2 标题字号：r28 起 26（39.6s 视频实测；旧 42/46 已作废）。
+    var titleSize: CGFloat = 26
 
     @EnvironmentObject var playback: PlaybackStore
     @EnvironmentObject var nav: AppNavigation
@@ -83,7 +86,7 @@ struct HeroCardView: View {
                 HStack(alignment: .top) {
                     if let at = viewModel.lastPlayedAt, track != nil {
                         Text("上次听到 · \(agoString(from: at))")
-                            .font(.liziMono(size: LiziTokens.size12, weight: .medium))
+                            .font(.liziMono(size: LiziTokens.size13, weight: .medium))
                             .tracking(1.5)
                             .foregroundColor(.white.opacity(0.78))
                             .textCase(.uppercase)
@@ -115,7 +118,7 @@ struct HeroCardView: View {
                             .lineLimit(1)
                         if let track = track {
                             Text(subtitle(for: track))
-                                .font(.liziBody(size: LiziTokens.size13))
+                                .font(.liziBody(size: 15))
                                 .foregroundColor(.white.opacity(0.76))
                                 .lineLimit(1)
                         } else {
@@ -128,18 +131,19 @@ struct HeroCardView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     if track != nil {
-                        // 模板 v2：右下角只有播放键，没有「打开歌单」pill——
+                        // r28：右下角只有播放键，白圆 ⌀40pt（视频实测 75px ≈ 40pt；
+                        // 旧 52pt 已作废）。没有「打开歌单」pill——
                         // 整卡点按就是进播放页，pill 是重复入口（见文件头）。
                         Button(action: togglePlay) {
                             ZStack {
                                 Circle()
                                     .fill(Color.white.opacity(0.95))
-                                    .frame(width: 52, height: 52)
+                                    .frame(width: 40, height: 40)
                                 if playback.isPlaying {
                                     EQBarsView()
                                 } else {
                                     Image(systemName: "play.fill")
-                                        .font(.system(size: 20))
+                                        .font(.system(size: 16))
                                         .foregroundColor(LiziTokens.ink)
                                 }
                             }

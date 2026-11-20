@@ -50,6 +50,12 @@ final class PlaybackStore: ObservableObject {
     /// 播放失败时的原因（vip / unavailable / login / region / drm / network；
     /// 成功时为 nil）。UI 按它明示「为什么没声音」，不静默。
     @Published private(set) var errorMessage: String?
+    /// r28：取链失败原因是登录时要弹登录入口的平台（目前只有酷狗会出
+    /// reason "login"；nil = 不弹）。播放页读它弹
+    /// `LoginSheetView(platform:)`（酷狗走 `FoliaKugouLoginView` 二维码），
+    /// 关弹窗/登录成功后由调用方调 `dismissLoginPrompt()` 清掉；新点播
+    /// 与停播时这里自动清。登录成功不自动重播——用户回播放页再点一次。
+    @Published private(set) var loginPromptPlatform: String?
     /// 当前曲目的实际音质档位（显示音质 = 这个，绝不显示请求的档位）。
     @Published private(set) var actualQuality: AudioQuality?
     /// 是否正在放演示音（取链全失败时的最后一档；不是真歌，UI 要标出来）。
@@ -579,8 +585,14 @@ final class PlaybackStore: ObservableObject {
         player.replaceCurrentItem(with: nil)
         isPlaying = false
         isLoading = false
+        loginPromptPlatform = nil
         progress = 0
         currentTrack = nil
+    }
+
+    /// 关掉登录提示信号（登录弹窗关掉 / 登录成功后调用方调；不碰播放状态）。
+    func dismissLoginPrompt() {
+        loginPromptPlatform = nil
     }
 
     // MARK: - 播放主流程（第 16 轮教训：全程无强制解包）
@@ -609,6 +621,7 @@ final class PlaybackStore: ObservableObject {
         DiagLog.shared.recordPlaybackStep("play start source=\(track.platform) id=\(track.id) gen=\(gen)")
         isLoading = true
         errorMessage = nil
+        loginPromptPlatform = nil
         isDemo = false
         actualQuality = nil
         progress = 0
@@ -642,6 +655,9 @@ final class PlaybackStore: ObservableObject {
             isPlaying = false
             errorMessage = result?.reason ?? "unavailable"
             lastFetchReason = result?.reason ?? "unavailable"
+            // r28：酷狗取链报 login 时立登录提示信号（播放页据此弹二维码
+            // 登录入口；其它原因不立，不把每种失败都变成登录弹窗）。
+            loginPromptPlatform = lastFetchReason == "login" ? track.platform : nil
             DiagLog.shared.recordPlaybackStep("resolve url FAIL source=\(track.platform) id=\(track.id) reason=\(lastFetchReason)")
             return
         }

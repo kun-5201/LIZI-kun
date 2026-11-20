@@ -61,19 +61,20 @@ import UIKit
 ///
 /// 尺寸分档（r21：一档一套固定尺寸，不加任何 MagnificationGesture；
 /// 视频实测，720px 原帧量取，档中宽 370/397/430pt）：
-/// - 平面卡：卡宽 ≈ 0.51vw → compact 188 / standard 202 / large 220，
-///   间距 16（f_001：两卡共占约 0.51vw，卡缝约 12–18px）。
-/// - 环卡：卡宽 ≈ 0.39vw → compact 144 / standard 156 / large 168；
-///   槽距 step 40°（侧卡实测倾角约 40°，f_014 左右卡均清晰可读，非
-///   壳版公式在大卡下算出的 77°——视频版 R 更大）；pitch = 卡宽
-///   （f_014 中心卡 231–513px、左右卡内缘距中心卡约 15–27px，无重叠）；
-///   R = pitch / (2·sin 20°) ≈ 211 / 228 / 246。
+/// - 平面卡：卡宽 ≈ 0.486vw → compact 180 / standard 190 / large 209
+///   （39.6s 新视频：卡 350px/720px；旧 4s 视频是 0.51vw → 188/202/220），
+///   间距 16。
+/// - 环卡：卡宽 ≈ 0.382vw → compact 141 / standard 149 / large 164
+///   （新视频中心卡 275px/720px；旧视频 0.39vw → 144/156/168）；
+///   槽距 step 40°（侧卡实测倾角约 40°）；pitch = 卡宽×1.14
+///   （壳版 ring.js；旧视频 pitch=卡宽已作废）；
+///   R = pitch / (2·sin 20°) ≈ 235 / 248 / 273。
 /// - 7 个平台同一套环，不分平台分支。
 ///
 /// 内容：队列优先、每日兜底（与 r20 同款），两份都空就不显示环、
 /// 不编假封面；加载中 / 每日为空时显示与 DailyMarqueeView 同款文案。
-/// 平面态保留原生浅色样式（DailyMarqueeView 同款：纸面底 + 墨字）——
-/// 视频里深色每日卡是壳版样式，不在本轮改；环上不加「正在播」accent
+/// 平面态 r28 起按在播专辑取色（HomeView AlbumTone；旧句「浅色样式不改」
+/// 已作废，用户 01:58 澄清面板跟专辑走）；环上不加「正在播」accent
 /// 圈（视频里没有）。
 /// HomeView 里的 DailyMarqueeView 调用已撤掉：环的平面态就是每日跑马带，
 /// 两处并存会上下叠两条一样的带（DailyMarqueeView.swift 文件留着未删）。
@@ -196,6 +197,28 @@ import UIKit
 /// ⑤ 平面带在外层 ScrollView 的内容流里（面板 → 外层竖滑），竖滑页面时
 /// 跟着走、不滞留；展开态环是全屏固定覆盖层（壳版 .mring position:fixed
 /// 同款，按 stripCenter 锚到带子原位置），环本身不自动转。
+///
+/// r28（2026-11-21，39.6s 新视频 ~/workspace/user/media_library/video/a0/
+/// a03d735e…4a14d.mp4，逐帧规格 verification/shell-video-39s-home-3d.md；
+/// 以这段新视频为准，r21–r24 的 4 秒旧视频作废）：
+/// - 尺寸按新视频重标：平面卡 350px/720px ≈ 0.486vw → 180/190/209；
+///   环卡中心 275px/720px ≈ 0.382vw → 141/149/164；槽距 pitch =
+///   卡宽×1.14（壳版 ring.js；旧视频的 pitch=卡宽作废），step 仍 40°，
+///   R = pitch/(2·sin20°) ≈ 235/248/273。
+/// - 环卡字：歌名 15pt 白、歌手 13pt 灰（旧 13/11）；平面卡歌名 16pt、
+///   歌手 14pt（旧 14/13），颜色跟面板深场走（白字/墨字，见 panelIsDark）。
+/// - 松手恢复：平面带拖动松手后 1200ms 恢复自动走（旧 1.0s；
+///   resumeMs=1200 一直是这个值，dragResumeDwell 之前没对上）。
+/// - 变暗：径向变暗改 0.36/0.58/0.78（新视频整页实测 0.42 倍；旧
+///   0.40/0.70/0.88 按面积均值算约 0.26 倍，太暗）；提示字 11pt。
+/// - 卡行底座：平面带 + 提示行外面一块更深的圆角底（黑 0.18，视频
+///   f_001 里卡行就在一块更深的圆角底上）。
+/// - 不自动开环（用户 01:57 原话「3d 环不是自动展开的是我手滑动才展开的」）：
+///   本文件核对过——openRing 只有一个调用点，用户手动触发
+///   （平面带横向拖动 stripTouchMoved；入口按钮点按 entryHintRow
+///   已在 r28 删掉，点按开环不在触发里），没有任何定时器、onAppear、
+///   加载完成回调能开环；tickFlat 只走跑马带，从不写 ringPhase。
+///   常态永远是平面跑马带。
 
 // MARK: - 状态机
 
@@ -218,6 +241,10 @@ final class HomeCoverRingModel: ObservableObject {
     @Published var dailyEmptyReason: String?
     @Published var marqueeSpeed: CGFloat = 24
     @Published var tier: PlayerTokens.PlayerSizeTier = .standard
+    /// 面板是否为深场（调用方按专辑取色 field 同步，见 HomeView AlbumTone）：
+    /// 深场时平面卡歌名/歌手/提示用白字，浅场用墨字。默认 true
+    /// （默认 tone #5b5bd6/#b04f8c/#2f6f8f 是深场，见 AlbumTone.default）。
+    @Published var panelIsDark = true
 
     // MARK: 平面跑马带
 
@@ -292,7 +319,9 @@ final class HomeCoverRingModel: ObservableObject {
     static let dragGain: CGFloat = 1.45          // 拖动增益
     static let resumeMs: Double = 1200           // 平面带松手后多久恢复自动走
     static let initialDwell: Double = 2.5        // 初画/回卷后停多久再走
-    static let dragResumeDwell: Double = 1.0     // 平面带拖动松手后停多久再走
+    static let dragResumeDwell: Double = 1.2     // 平面带拖动松手后停多久再走
+    // r28：与上面 resumeMs=1200 对上（39.6s 视频规格：松手 1200ms 后恢复；
+    // 之前 dragResumeDwell=1.0，resumeMs 白定义了没人用）。
     static let closeResumeMs: Double = 220       // 收回后多久恢复自动走
     static let swipeDownExit: CGFloat = 90       // 环里下滑超 90px 退出
 
@@ -319,7 +348,8 @@ final class HomeCoverRingModel: ObservableObject {
     func syncInputs(daily: [Track], isLoading: Bool,
                     emptyReason: String?, playing: Track?,
                     speed: CGFloat,
-                    tier: PlayerTokens.PlayerSizeTier) {
+                    tier: PlayerTokens.PlayerSizeTier,
+                    panelIsDark: Bool = true) {
         startFlatTimer()
         let oldIDs = tracks.map(\.id)
         dailyTracks = daily
@@ -328,6 +358,7 @@ final class HomeCoverRingModel: ObservableObject {
         dailyEmptyReason = emptyReason
         marqueeSpeed = speed
         self.tier = tier
+        self.panelIsDark = panelIsDark
         if tracks.map(\.id) != oldIDs {
             if ringPhase != .closed { closeRing() }
             flatOffsetX = 0
@@ -337,12 +368,13 @@ final class HomeCoverRingModel: ObservableObject {
 
     // MARK: 尺寸（视频实测，见文件头分档表）
 
-    /// 平面卡宽：compact 188 / standard 202 / large 220（≈0.51vw）。
+    /// 平面卡宽：compact 180 / standard 190 / large 209（≈0.486vw，
+    /// 39.6s 新视频卡 350px/720px）。
     var flatCard: CGFloat {
         switch tier {
-        case .compact: return 188
-        case .standard: return 202
-        case .large: return 220
+        case .compact: return 180
+        case .standard: return 190
+        case .large: return 209
         }
     }
 
@@ -350,23 +382,26 @@ final class HomeCoverRingModel: ObservableObject {
 
     var flatPitch: CGFloat { flatCard + flatGap }
 
-    /// 平面带高：卡 + 间距 7 + 歌名行 + 间距 7 + 歌手行。
-    var flatHeight: CGFloat { flatCard + 49 }
+    /// 平面带高：卡 + 间距 7 + 16pt 歌名行 + 间距 7 + 14pt 歌手行
+    /// （r28：字号 14/13→16/14，行高跟着涨 3pt，旧 +49 会裁掉歌手行）。
+    var flatHeight: CGFloat { flatCard + 52 }
 
-    /// 环卡宽：compact 144 / standard 156 / large 168（≈0.39vw）。
+    /// 环卡宽：compact 141 / standard 149 / large 164（≈0.382vw，
+    /// 39.6s 新视频中心卡 275px/720px）。
     var ringCard: CGFloat {
         switch tier {
-        case .compact: return 144
-        case .standard: return 156
-        case .large: return 168
+        case .compact: return 141
+        case .standard: return 149
+        case .large: return 164
         }
     }
 
     /// 相邻槽位夹角 40°（视频实测侧卡倾角）。
     var ringStep: CGFloat { 40 }
 
-    /// 槽距 = 卡宽（视频实测：中心卡与侧卡内缘约 15–27px 间隙，无重叠）。
-    var ringPitch: CGFloat { ringCard }
+    /// 槽距 = 卡宽×1.14（壳版 ring.js；39.6s 视频侧卡 ±40° 倾角下此槽距
+    /// 不重叠；旧视频的 pitch=卡宽已作废）。
+    var ringPitch: CGFloat { ringCard * 1.14 }
 
     /// 圆柱半径（弦长公式 pitch = 2R·sin(step/2)）。
     var ringRadius: CGFloat {
@@ -378,8 +413,9 @@ final class HomeCoverRingModel: ObservableObject {
         (180 / (.pi * ringRadius)) * Self.dragGain
     }
 
-    /// 环卡总高：封面 + 间距 5 + 歌名行 + 间距 2 + 歌手行。
-    var ringCardHeight: CGFloat { ringCard + 35 }
+    /// 环卡总高：封面 + 间距 5 + 15pt 歌名行 + 间距 5 + 13pt 歌手行
+    /// （r28：歌名 13→15、歌手 11→13，见 RingCardView）。
+    var ringCardHeight: CGFloat { ringCard + 46 }
 
     // MARK: 平面跑马带
 
@@ -433,7 +469,7 @@ final class HomeCoverRingModel: ObservableObject {
         return mod(Int(pos.rounded()), tracks.count)
     }
 
-    /// 平面带正中间那张卡的下标（入口按钮开环的锚点）。
+    /// 平面带正中间那张卡的下标（r28：入口按钮已删，本函数暂无调用方，留作备用）。
     func centerCardIndex() -> Int {
         guard !tracks.isEmpty else { return 0 }
         let cx = stripSize.width > 0 ? stripSize.width / 2 : flatCard / 2
@@ -533,14 +569,16 @@ final class HomeCoverRingModel: ObservableObject {
 
     // MARK: 开环 / 收回
 
-    /// 开环（r24：第 3 件后入口只剩两处——平面带横向拖动、入口按钮点按；
-    ///   上滑入口已删）。
+    /// 开环（r28：入口只剩一处——平面带横向拖动 stripTouchMoved；
+    ///   入口按钮点按已删，上滑入口 r24 已删）。
     /// - `beginDrag: true`（平面带横向拖动）：展开这根手指不用抬起，直接记为
     ///   拖动起点，继续拖就是转环（ring.js enterRing 同款；同一根手指的后续移动
     ///   由平面带的 `StripTouchView` 接着转发，不走覆盖层新挂的手势）。
-    /// - `beginDrag: false`（入口按钮点按）：只展开、不接管手指；下一根
-    ///   手指落在覆盖层上时由覆盖层手势重新 `ringDragStart`（liziHome 坐标，
-    ///   与本轮的 `ringStartX` 不混用——一根拖动内的 x 必须同一坐标系）。
+    /// - `beginDrag: false`：只展开、不接管手指；下一根手指落在覆盖层上时
+    ///   由覆盖层手势重新 `ringDragStart`（liziHome 坐标，与本轮的
+    ///   `ringStartX` 不混用——一根拖动内的 x 必须同一坐标系）。
+    ///   r28：传 false 的唯一调用方（入口按钮）已删，现无调用方传 false，
+    ///   参数保留（默认 true），拖动入口 `stripTouchMoved` 不传它。
     /// - 锚点（r26-3D，用户 22:33「当前播的歌在环中间」）：在播曲目在当前
     ///   列表里时锚点就是它（`playingIndex`），手指卡/`anchor` 参数只在
     ///   在播曲目不在列表里时用（回落壳版/视频的手指卡规则）。拖动连续性
@@ -867,6 +905,8 @@ struct HomeCoverRingView: View {
     var marqueeSpeed: CGFloat = 24
     /// 尺寸档（调用方按实测屏宽经 `PlayerTokens.sizeTier(for:topInset:)` 传入）。
     var tier: PlayerTokens.PlayerSizeTier = .standard
+    /// 面板深场（调用方传 HomeView 的专辑取色 field；默认深场）。
+    var panelIsDark = true
 
     var body: some View {
         Group {
@@ -877,12 +917,20 @@ struct HomeCoverRingView: View {
                     emptyView
                 }
             } else {
-                // 平面带 + 入口提示行（r22c）：提示行与「展开 3D 环」按钮是环的
-                // 可见入口——用户现在根本找不到环，光靠上滑手势不够。
+                // 平面带 + 入口提示行（r22c）：提示行是环的可见入口
+                // （r28：「展开 3D 环」按钮已删，点按开环不在触发里；
+                // 只留提示文字 + 平面带横向拖动开环）。
+                // r28：外面一块更深的圆角底（黑 0.18）——39.6s 视频 f_001
+                // 里卡行就在一块比面板再暗一档的圆角底上。
                 VStack(alignment: .leading, spacing: 6) {
                     flatStrip
                     entryHintRow
                 }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 14)
+                        .fill(Color.black.opacity(0.18))
+                )
             }
         }
         .onAppear { sync() }
@@ -892,6 +940,7 @@ struct HomeCoverRingView: View {
         .onChange(of: dailyEmptyReason) { _ in sync() }
         .onChange(of: marqueeSpeed) { _ in sync() }
         .onChange(of: tier) { _ in sync() }
+        .onChange(of: panelIsDark) { _ in sync() }
         .accessibilityLabel("封面环")
     }
 
@@ -906,7 +955,8 @@ struct HomeCoverRingView: View {
             emptyReason: dailyEmptyReason,
             playing: playback.currentTrack,
             speed: marqueeSpeed,
-            tier: tier
+            tier: tier,
+            panelIsDark: panelIsDark
         )
     }
 
@@ -917,7 +967,7 @@ struct HomeCoverRingView: View {
             ProgressView()
             Text("正在拉取每日推荐…")
                 .font(.liziBody(size: LiziTokens.size13))
-                .foregroundColor(LiziTokens.ink3)
+                .foregroundColor(model.panelIsDark ? .white.opacity(0.62) : LiziTokens.ink3)
         }
         .frame(maxWidth: .infinity, minHeight: model.flatHeight, alignment: .center)
     }
@@ -925,7 +975,7 @@ struct HomeCoverRingView: View {
     private var emptyView: some View {
         Text(model.dailyEmptyReason ?? "暂无推荐内容。")
             .font(.liziBody(size: LiziTokens.size13))
-            .foregroundColor(LiziTokens.ink3)
+            .foregroundColor(model.panelIsDark ? .white.opacity(0.62) : LiziTokens.ink3)
             .multilineTextAlignment(.center)
             .frame(maxWidth: .infinity, minHeight: model.flatHeight, alignment: .center)
             .padding(.horizontal, 24)
@@ -946,7 +996,7 @@ struct HomeCoverRingView: View {
                 ForEach(0..<2, id: \.self) { _ in
                     HStack(spacing: model.flatGap) {
                         ForEach(model.tracks.indices, id: \.self) { i in
-                            FlatRingCard(track: model.tracks[i], width: model.flatCard) {
+                            FlatRingCard(track: model.tracks[i], width: model.flatCard, isDark: model.panelIsDark) {
                                 model.playTrack(at: i, store: playback)
                             }
                         }
@@ -985,46 +1035,34 @@ struct HomeCoverRingView: View {
         }
     }
 
-    /// 入口提示行：左 = 手势提示，右 = 点按入口（「展开 3D 环」按钮，
-    /// 锚点 = 带子正中间那张卡；开环不接管手指，`beginDrag: false`）。
+    /// 入口提示行：只剩手势提示文字（「拖动展开 3D 环 · 拖动旋转」），
+    /// 不再有按钮。
     /// r24：第 3 件后提示改成拖动（上滑入口已删，chevron.up 图标也换掉，
     /// 别再暗示用户去上滑）。
+    /// r28：「展开 3D 环」按钮已删（点按开环不在 r24 定好的触发里）；
+    /// 开环只剩平面带横向拖动（`stripTouchMoved` → `openRing`），
+    /// 不加替代的提示按钮；颜色跟面板深场走（深场白字，浅场墨字）。
     private var entryHintRow: some View {
         HStack(spacing: 6) {
             Image(systemName: "arrow.left.and.right")
                 .font(.system(size: 10, weight: .semibold))
             Text("拖动展开 3D 环 · 拖动旋转")
                 .font(.liziBody(size: LiziTokens.size12))
-            Spacer()
-            Button(action: {
-                model.openRing(anchor: model.centerCardIndex(), atX: 0, beginDrag: false)
-            }) {
-                HStack(spacing: 4) {
-                    Text("展开 3D 环")
-                        .font(.liziBody(size: LiziTokens.size12, weight: .medium))
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 10, weight: .semibold))
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(LiziTokens.paper2)
-                .clipShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("展开 3D 封面环")
         }
-        .foregroundColor(LiziTokens.ink3)
+        .foregroundColor(model.panelIsDark ? .white.opacity(0.75) : LiziTokens.ink3)
     }
 }
 
-/// 平面带里的一张卡：封面 + 歌名 + 歌手（DailyMarqueeView.MarqueeCard 同款，
-/// 宽按档走 188/202/220）。
+/// 平面带里的一张卡：封面 + 歌名 + 歌手（r28：卡宽按档走 180/190/209；
+/// 歌名 16pt、歌手 14pt，39.6s 新视频实测；颜色跟面板深场走——
+/// 深场白字 + 灰字，浅场墨字）。
 ///
 /// 不是 Button：带子的触摸层（`StripTouchView`，盖在卡片上方）统一接管点按；
 /// Button 和识别器的 tap 会双重触发。VoiceOver 激活走 `.accessibilityAction`。
 private struct FlatRingCard: View {
     let track: Track
     let width: CGFloat
+    let isDark: Bool
     let onTap: () -> Void
 
     var body: some View {
@@ -1033,12 +1071,12 @@ private struct FlatRingCard: View {
                 .frame(width: width, height: width)
                 .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
             Text(track.title)
-                .font(.liziBody(size: LiziTokens.size14, weight: .medium))
-                .foregroundColor(LiziTokens.ink)
+                .font(.liziBody(size: LiziTokens.size16, weight: .medium))
+                .foregroundColor(isDark ? .white : LiziTokens.ink)
                 .lineLimit(1)
             Text(track.artist)
-                .font(.liziBody(size: LiziTokens.size13))
-                .foregroundColor(LiziTokens.ink3)
+                .font(.liziBody(size: LiziTokens.size14))
+                .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
                 .lineLimit(1)
         }
         .frame(width: width, alignment: .leading)
@@ -1094,7 +1132,7 @@ struct HomeRingOverlayView: View {
                 VStack {
                     Spacer()
                     Text("拖动旋转 · 点击播放 · 松手收回")
-                        .font(.system(size: 11.5))
+                        .font(.system(size: 11))
                         .foregroundColor(.white.opacity(0.74))
                         .shadow(color: .black.opacity(0.5), radius: 8, x: 0, y: 1)
                         .padding(.bottom, max(16, geo.safeAreaInsets.bottom + 10))
@@ -1123,11 +1161,14 @@ struct HomeRingOverlayView: View {
     private func radialScrim(size: CGSize) -> some View {
         let dark = Color(red: 9 / 255, green: 10 / 255, blue: 16 / 255)
         let darker = Color(red: 5 / 255, green: 6 / 255, blue: 10 / 255)
+        // r28：0.36/0.58/0.78——39.6s 新视频整页实测 0.42 倍（f_001 均值
+        // 121.3 → f_050 51.4）；旧 0.40/0.70/0.88 按面积均值算约 0.26 倍，
+        // 太暗（Hero 区实测 0.40 倍、顶栏 0.31 倍，新值约 0.49/0.33，见交回）。
         return RadialGradient(
             gradient: Gradient(stops: [
-                .init(color: dark.opacity(0.40), location: 0),
-                .init(color: dark.opacity(0.70), location: 0.56),
-                .init(color: darker.opacity(0.88), location: 1),
+                .init(color: dark.opacity(0.36), location: 0),
+                .init(color: dark.opacity(0.58), location: 0.56),
+                .init(color: darker.opacity(0.78), location: 1),
             ]),
             center: UnitPoint(x: 0.5, y: 0.48),
             startRadius: 0,
@@ -1203,12 +1244,12 @@ private struct RingCardView: View {
                 )
                 .shadow(color: .black.opacity(0.8), radius: 26, x: 0, y: 12)
             Text(track.title)
-                .font(.liziBody(size: 13, weight: .medium))
+                .font(.liziBody(size: 15, weight: .medium))
                 .foregroundColor(.white.opacity(0.9))
                 .lineLimit(1)
                 .shadow(color: .black.opacity(0.55), radius: 8, x: 0, y: 1)
             Text(track.artist)
-                .font(.liziBody(size: 11))
+                .font(.liziBody(size: 13))
                 .foregroundColor(.white.opacity(0.62))
                 .lineLimit(1)
                 .shadow(color: .black.opacity(0.55), radius: 8, x: 0, y: 1)

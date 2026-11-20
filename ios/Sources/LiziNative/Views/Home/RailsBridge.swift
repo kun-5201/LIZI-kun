@@ -29,13 +29,29 @@ import Foundation
 ///   再 /api/qishui/playlist/tracks；
 ///   bodian → 真名未核实到（fond 接口只回歌单对象、原生只取了 id，
 ///   仓内无字面记载），保持「我的喜欢」，不编；
-///   kuwo / kugou / applemusic → 没有喜欢接口，rail 里只有本地星标，
+///   kugou → get_all_list 里的「我喜欢」表（listId "2" / 名字含「喜欢」）
+///   取曲，未登录退回本地星标；
+///   kuwo / applemusic → 没有喜欢接口，rail 里只有本地星标，
 ///   标题如实叫「本地星标收藏」，没有就诚实空态写清原因。
-/// - playlists（我收藏的歌单）：netease → /api/user/playlist，分我创建
+///   r31-starred（用户 2026-11-21 06:44，QQ/酷狗优先）：平台喜欢
+///   拉不到（未登录/传输层没通/上游报错/拉到是空）时先看本地星标，
+///   有星标就显示星标（失败原因写进分组卡，整页不带 error），没星标
+///   才按原样报失败/空态；拉到了也把星标并进来（按喜欢复合键去重）。
+///   刷新：喜欢栏不缓存（`HomeViewModel.loadRailPage` 每次切回都重拉；
+///   面板/详情页每次出现也重拉），星标一点就变。
+///   r31：各平台收藏的东西（歌单/专辑）都并进这一栏——网易 subscribed 歌单、
+///   QQ 收藏歌单（subscribed 标记）+ 收藏专辑（user/albums）、酷狗非自有
+///   歌单 + 专辑、汽水非自有歌单（isOwned 标记）、波点收藏歌单/专辑
+///   （isOwned 标记 + albums 数组）；酷我/Apple Music 没有官方收藏接口，
+///   只有本地星标，不编假数据。
+/// - playlists（我收藏的歌单 → r31 改名「我的歌单」，只留用户自建的歌单，
+///   收藏的已并进 liked）：netease → /api/user/playlist，分我创建
 ///   （subscribed==false）/ 我收藏（subscribed==true），未登录 → 诚实空态；
-///   qq / qishui / bodian / kugou → 各自 /api/<platform>/user/playlists
-///   （汽水滤掉 isLikedPlaylist 那张；酷狗未登录回 401，调用方按失败/空态
-///   处理——首页登录墙（`LoginGate`）已随来源 chips 删掉）；kuwo → 无用户歌单接口，诚实空态；
+///   qq / qishui / bodian / kugou → 各自 /api/<platform>/user/playlists，
+///   按 subscribed / isOwned 标记只留自建（QQ：QQ.swift userPlaylists 打
+///   subscribed 标记；汽水：qishuiPlaylist 透传 isOwned；波点：路由打
+///   isOwned / isLikedPlaylist 标记；酷狗：kugouCollection 的 isOwned）；
+///   kuwo → 无用户歌单接口，诚实空态；
 ///   applemusic → /api/applemusic/playlists 兜底，前面插说明卡
 ///   「官方热门歌单（非本人收藏）」。
 /// - radio（电台）：netease → /api/netease/dj/recommend（8）；
@@ -143,6 +159,8 @@ enum RailEntry: Identifiable, Hashable {
     case track(Track)
     case playlist(Playlist)
     case station(RadioStation)
+    /// 专辑（r31：收藏的专辑并进「我喜欢」后新增；点卡进面板内专辑曲目）。
+    case album(Album)
     /// 分组说明卡（只展示，不可点）：网易「我创建的歌单 / 我收藏的歌单」、
     /// Apple Music「官方热门歌单（非本人收藏）」、本地星标说明。
     case groupHeader(String)
@@ -152,6 +170,7 @@ enum RailEntry: Identifiable, Hashable {
         case .track(let t): return "track-\(t.platform)-\(t.id)"
         case .playlist(let p): return "playlist-\(p.source)-\(p.id)"
         case .station(let s): return "station-\(s.platform)-\(s.id)"
+        case .album(let a): return "album-\(a.source)-\(a.id)"
         case .groupHeader(let text): return "group-\(text)"
         }
     }
@@ -190,6 +209,10 @@ struct RailResult {
     var stations: [RadioStation] {
         entries.compactMap { if case .station(let s) = $0 { return s } else { return nil } }
     }
+
+    var albums: [Album] {
+        entries.compactMap { if case .album(let a) = $0 { return a } else { return nil } }
+    }
 }
 
 extension NativeBridge {
@@ -226,7 +249,13 @@ extension NativeBridge {
         case "netease":
             if f == "newsong" {
                 guard let d = await call(path: "/api/personalized") else {
-                    return railFailed(kind: .featured, platform: platform, feed: f)
+                    // r31：传输层没通（断网/超时/上游无响应）时写明端点，
+                    // 不再回通用 searchErrorText——实测接口、解析、登录
+                    // 三者都没问题（见 verification/r31-featured.cjs），
+                    // 剩下的失败只能出在传输层；文案写明端点，下次真机
+                    // 复现时凭这一句就能区分是没连上还是上游空回。
+                    return RailResult(kind: .featured, platform: platform, feed: f,
+                                    error: "网易推荐新歌拉取失败：/api/personalized 未连通（网络或上游超时），请检查网络后重试")
                 }
                 if let e = railError(d) {
                     return RailResult(kind: .featured, platform: platform, feed: f, error: e)
@@ -238,12 +267,26 @@ extension NativeBridge {
             }
             guard let d = await call(path: "/api/top/playlist",
                                      query: ["limit": "12", "cat": "全部", "order": "hot"]) else {
-                return railFailed(kind: .featured, platform: platform, feed: f)
+                // r31：同 newsong 分支——传输层失败写明端点，不回通用文案。
+                return RailResult(kind: .featured, platform: platform, feed: f,
+                                error: "网易精选歌单拉取失败：/api/top/playlist 未连通（网络或上游超时），请检查网络后重试")
             }
             if let e = railError(d) {
                 return RailResult(kind: .featured, platform: platform, feed: f, error: e)
             }
-            let lists = railRows(d, keys: ["playlists"]).compactMap { railPlaylistFrom($0, platform: platform) }
+            var lists = railRows(d, keys: ["playlists"]).compactMap { railPlaylistFrom($0, platform: platform) }
+            if lists.isEmpty {
+                // r31：上游 200 但空列表时再抽一次（order=new）：实测
+                // /personalized/playlist 是轮换推荐（每次返回的集合都
+                // 不同），单次空抽不应直接判死；两次都空才回诚实空态。
+                // 只在「通了但空」时重试，传输层失败/上游报错不走这里。
+                if let d2 = await call(path: "/api/top/playlist",
+                                       query: ["limit": "12", "cat": "全部", "order": "new"]),
+                   railError(d2) == nil {
+                    lists = railRows(d2, keys: ["playlists"])
+                        .compactMap { railPlaylistFrom($0, platform: platform) }
+                }
+            }
             return railDone(kind: .featured, platform: platform, feed: f,
                             entries: lists.map { RailEntry.playlist($0) },
                             emptyReason: "网易云没返回推荐歌单")
@@ -361,74 +404,203 @@ extension NativeBridge {
         switch platform {
         case "netease":
             guard let uid = await neteaseUserId() else {
+                // r31-starred：未登录也先看本地星标——星标的歌照样进「我喜欢」；
+                // 没星标才回原来的「先登录」诚实空态。
+                if let fb = await localStarredFallback(platform: platform, note: "还没登录，先显示星标的歌") { return fb }
                 return railEmpty(kind: .liked, platform: platform,
                                  reason: "先在设置里登录网易云，才能看「我喜欢的音乐」（登录流程在 P4，未登录时这里是空的）。")
             }
             guard let d = await call(path: "/api/user/playlist", query: ["uid": uid]) else {
+                if let fb = await localStarredFallback(platform: platform, note: "「我喜欢的音乐」暂时拉不到，先显示星标的歌") { return fb }
                 return railFailed(kind: .liked, platform: platform)
             }
             if let e = railError(d) {
+                if let fb = await localStarredFallback(platform: platform, note: e) { return fb }
                 return RailResult(kind: .liked, platform: platform, error: e)
             }
             let lists = railRows(d, keys: ["playlists"])
             let like = lists.first { ($0["specialType"] as? NSNumber)?.intValue == 5 }
                 ?? lists.first { (($0["name"] as? String) ?? "").contains("喜欢的音乐") }
-            guard let like, let likeId = railString(like["id"]), !likeId.isEmpty else {
-                return railEmpty(kind: .liked, platform: platform, reason: "没找到「我喜欢的音乐」歌单")
+            var entries: [RailEntry] = []
+            if let like, let likeId = railString(like["id"]), !likeId.isEmpty {
+                let detail = await playlistDetail(platform: platform, id: likeId)
+                entries.append(contentsOf: detail.tracks.map { RailEntry.track($0) })
             }
-            let detail = await playlistDetail(platform: platform, id: likeId)
-            return railDone(kind: .liked, platform: platform,
-                            entries: detail.tracks.map { RailEntry.track($0) },
-                            emptyReason: "这张歌单没有曲目")
+            // r31：收藏的歌单（subscribed==true）并进「我喜欢」，放分组卡后。
+            let subs = lists.filter { ($0["subscribed"] as? NSNumber)?.boolValue == true }
+                .compactMap { railPlaylistFrom($0, platform: platform) }
+            if !subs.isEmpty {
+                entries.append(.groupHeader("我收藏的歌单"))
+                entries.append(contentsOf: subs.map { RailEntry.playlist($0) })
+            }
+            // r31-starred：登录态下星标的歌也并进来（去重：平台喜欢表里已有的不重复）。
+            await appendLocalStarred(&entries, platform: platform)
+            if entries.isEmpty {
+                return railEmpty(kind: .liked, platform: platform, reason: "没找到「我喜欢的音乐」歌单，也没有收藏歌单")
+            }
+            return RailResult(kind: .liked, platform: platform, entries: entries)
         case "qq":
-            guard let d = await call(path: "/api/qq/user/liked-songs", query: ["limit": "100"]) else {
+            // r31：喜欢曲目 + 收藏的歌单（subscribed==true）+ 收藏的专辑，
+            // 三路并行取。
+            // r31-starred（用户 2026-11-21 06:44：QQ 优先）：登录了但喜欢
+            // 拉不到（传输层没通 / 上游报登录态已失效）时，不再直接报红错
+            // 空页——有本地星标就回落到星标（分组卡里原样带上失败原因，
+            // 登录失效的信号不丢，只是不再用它把整页挡掉）；没星标才按
+            // 原样返回失败。喜欢曲目空 + 收藏也空时同样先看星标。
+            async let likedD = call(path: "/api/qq/user/liked-songs", query: ["limit": "100"])
+            async let listsD = call(path: "/api/qq/user/playlists")
+            async let albumsD = call(path: "/api/qq/user/albums", query: ["limit": "100"])
+            guard let liked = await likedD else {
+                if let fb = await localStarredFallback(platform: platform, note: "「我喜欢」暂时拉不到，先显示星标的歌") { return fb }
                 return railFailed(kind: .liked, platform: platform)
             }
-            if let e = railError(d) {
+            if let e = railError(liked) {
+                if let fb = await localStarredFallback(platform: platform, note: e) { return fb }
                 return RailResult(kind: .liked, platform: platform, error: e)
             }
-            let tracks = railRows(d, keys: ["tracks"]).compactMap { Track.from(dict: $0, platform: platform) }
-            return railDone(kind: .liked, platform: platform,
-                            entries: tracks.map { RailEntry.track($0) },
-                            emptyReason: "QQ 音乐的「我喜欢」是空的")
+            var entries: [RailEntry] = railRows(liked, keys: ["tracks"])
+                .compactMap { Track.from(dict: $0, platform: platform) }
+                .map { RailEntry.track($0) }
+            if let lists = await listsD, railError(lists) == nil {
+                let subs = railRows(lists, keys: ["playlists"])
+                    .filter { ($0["subscribed"] as? NSNumber)?.boolValue == true }
+                    .compactMap { railPlaylistFrom($0, platform: platform) }
+                if !subs.isEmpty {
+                    entries.append(.groupHeader("我收藏的歌单"))
+                    entries.append(contentsOf: subs.map { RailEntry.playlist($0) })
+                }
+            }
+            if let albums = await albumsD, railError(albums) == nil {
+                let list = railRows(albums, keys: ["data"])
+                    .compactMap { railAlbumFrom($0, platform: platform) }
+                if !list.isEmpty {
+                    entries.append(.groupHeader("我收藏的专辑"))
+                    entries.append(contentsOf: list.map { RailEntry.album($0) })
+                }
+            }
+            // r31-starred：登录态下星标的歌也并进来（去重）；平台喜欢 +
+            // 收藏全空时星标就是整页内容，不空页。
+            await appendLocalStarred(&entries, platform: platform)
+            if entries.isEmpty {
+                return railEmpty(kind: .liked, platform: platform, reason: "QQ 音乐的「我喜欢」是空的，也没有收藏的歌单/专辑")
+            }
+            return RailResult(kind: .liked, platform: platform, entries: entries)
         case "qishui":
             guard let d = await call(path: "/api/qishui/user/playlists", query: ["limit": "100"]) else {
+                if let fb = await localStarredFallback(platform: platform, note: "「我喜欢的音乐」暂时拉不到，先显示星标的歌") { return fb }
                 return railFailed(kind: .liked, platform: platform)
             }
             if let e = railError(d) {
+                if let fb = await localStarredFallback(platform: platform, note: e) { return fb }
                 return RailResult(kind: .liked, platform: platform, error: e)
             }
             let lists = railRows(d, keys: ["playlists"])
             let like = lists.first { ($0["isLikedPlaylist"] as? NSNumber)?.boolValue == true }
                 ?? lists.first { (($0["name"] as? String) ?? "").contains("喜欢的音乐") }
-            guard let like, let likeId = railString(like["id"]), !likeId.isEmpty else {
-                return railEmpty(kind: .liked, platform: platform, reason: "没找到汽水的「我喜欢的音乐」歌单")
+            var entries: [RailEntry] = []
+            if let like, let likeId = railString(like["id"]), !likeId.isEmpty {
+                // r31：喜欢曲目走 playlistAllTracks 翻页取全量（旧实现只取一页 50 首）。
+                let tracks = await playlistAllTracks(platform: platform, id: likeId)
+                entries.append(contentsOf: tracks.map { RailEntry.track($0) })
             }
-            guard let t = await call(path: "/api/qishui/playlist/tracks",
-                                     query: ["id": likeId, "limit": "50"]) else {
-                return railFailed(kind: .liked, platform: platform)
+            // r31：收藏的歌单（isOwned==false）并进来；喜欢表本身不重复出现。
+            let subs = lists.filter { ($0["isOwned"] as? NSNumber)?.boolValue == false }
+                .filter { ($0["isLikedPlaylist"] as? NSNumber)?.boolValue != true }
+                .compactMap { railPlaylistFrom($0, platform: platform) }
+            if !subs.isEmpty {
+                entries.append(.groupHeader("我收藏的歌单"))
+                entries.append(contentsOf: subs.map { RailEntry.playlist($0) })
             }
-            if let e = railError(t) {
-                return RailResult(kind: .liked, platform: platform, error: e)
+            // r31-starred：同网易/QQ——拉到内容时星标并进来（去重），
+            // 喜欢表 + 收藏全空时星标兜底，不空页。
+            await appendLocalStarred(&entries, platform: platform)
+            if entries.isEmpty {
+                return railEmpty(kind: .liked, platform: platform, reason: "没找到汽水的「我喜欢的音乐」歌单，也没有收藏歌单")
             }
-            let tracks = railRows(t, keys: ["tracks"]).compactMap { Track.from(dict: $0, platform: platform) }
-            return railDone(kind: .liked, platform: platform,
-                            entries: tracks.map { RailEntry.track($0) },
-                            emptyReason: "这张歌单没有曲目")
+            return RailResult(kind: .liked, platform: platform, entries: entries)
         case "bodian":
             guard let d = await call(path: "/api/bodian/liked_songs") else {
+                if let fb = await localStarredFallback(platform: platform, note: "「我的喜欢」暂时拉不到，先显示星标的歌") { return fb }
                 return railFailed(kind: .liked, platform: platform)
             }
             if let e = railError(d) {
+                if let fb = await localStarredFallback(platform: platform, note: e) { return fb }
                 return RailResult(kind: .liked, platform: platform, error: e)
             }
-            let tracks = railRows(d, keys: ["tracks"]).compactMap { Track.from(dict: $0, platform: platform) }
-            return railDone(kind: .liked, platform: platform,
-                            entries: tracks.map { RailEntry.track($0) },
-                            emptyReason: "波点的「我的喜欢」是空的")
-        case "kuwo", "kugou", "applemusic":
-            // 这三家没有「我喜欢的音乐」列表接口：只显示本地星标（P2 起 PlaybackStore
-            // 同时持久化完整 Track），没有就诚实空态写清原因，不编假数据。
+            var entries: [RailEntry] = railRows(d, keys: ["tracks"])
+                .compactMap { Track.from(dict: $0, platform: platform) }
+                .map { RailEntry.track($0) }
+            // r31：收藏的歌单（isOwned==false）+ 收藏的专辑并进来。
+            if let u = await call(path: "/api/bodian/user/playlists"), railError(u) == nil {
+                let subs = railRows(u, keys: ["playlists"])
+                    .filter { ($0["isOwned"] as? NSNumber)?.boolValue == false }
+                    .filter { ($0["isLikedPlaylist"] as? NSNumber)?.boolValue != true }
+                    .compactMap { railPlaylistFrom($0, platform: platform) }
+                if !subs.isEmpty {
+                    entries.append(.groupHeader("我收藏的歌单"))
+                    entries.append(contentsOf: subs.map { RailEntry.playlist($0) })
+                }
+                let albums = railRows(u, keys: ["albums"])
+                    .compactMap { railAlbumFrom($0, platform: platform) }
+                if !albums.isEmpty {
+                    entries.append(.groupHeader("我收藏的专辑"))
+                    entries.append(contentsOf: albums.map { RailEntry.album($0) })
+                }
+            }
+            // r31-starred：同网易/QQ/汽水——星标并进来（去重），全空时星标兜底。
+            await appendLocalStarred(&entries, platform: platform)
+            if entries.isEmpty {
+                return railEmpty(kind: .liked, platform: platform, reason: "波点的「我的喜欢」是空的，也没有收藏内容")
+            }
+            return RailResult(kind: .liked, platform: platform, entries: entries)
+        case "kugou":
+            // r31：酷狗以前只有本地星标——get_all_list 里其实有「我喜欢」那张
+            // 表（listId "2" / 名字含「喜欢」），以前被当成普通歌单。未登录
+            // 时 user/playlists 回 401，退回本地星标（旧行为），不报错。
+            // r31-starred（用户 2026-11-21 06:44：酷狗优先）：登录了但
+            // user/playlists 拉不到时同款回落——以前只有含「登录」的报错
+            // 才回落，其它报错（上游异常/非 200）直接报红空页；现在任何
+            // 拉不到都先看星标，有星标就显示星标，没星标才报原来的错。
+            guard let d = await call(path: "/api/kugou/user/playlists") else {
+                return await railLocalLiked(kind: .liked, platform: platform)
+            }
+            if let e = railError(d) {
+                if e.contains("登录") { return await railLocalLiked(kind: .liked, platform: platform) }
+                if let fb = await localStarredFallback(platform: platform, note: e) { return fb }
+                return RailResult(kind: .liked, platform: platform, error: e)
+            }
+            let lists = railRows(d, keys: ["playlists"])
+            var entries: [RailEntry] = []
+            if let liked = lists.first(where: { isKugouLikedList($0) }),
+               let likedId = railString(liked["id"]), !likedId.isEmpty {
+                let tracks = await playlistAllTracks(platform: platform, id: likedId)
+                entries.append(contentsOf: tracks.map { RailEntry.track($0) })
+            }
+            let subs = lists.filter { ($0["isOwned"] as? NSNumber)?.boolValue != true }
+                .filter { !isKugouLikedList($0) }
+                .compactMap { railPlaylistFrom($0, platform: platform) }
+            if !subs.isEmpty {
+                entries.append(.groupHeader("我收藏的歌单"))
+                entries.append(contentsOf: subs.map { RailEntry.playlist($0) })
+            }
+            let albums = railRows(d, keys: ["albums"])
+                .compactMap { railAlbumFrom($0, platform: platform) }
+            if !albums.isEmpty {
+                entries.append(.groupHeader("我收藏的专辑"))
+                entries.append(contentsOf: albums.map { RailEntry.album($0) })
+            }
+            // r31-starred：星标并进来——旧实现不去重，同一首歌既在酷狗
+            // 「我喜欢」表里又被星标过会在页里出现两次；现走共用去重。
+            await appendLocalStarred(&entries, platform: platform)
+            if entries.isEmpty {
+                return railEmpty(kind: .liked, platform: platform,
+                                 reason: "酷狗没有返回「我喜欢」与收藏内容——登录后才有；未登录时只有本地星标")
+            }
+            return RailResult(kind: .liked, platform: platform, entries: entries)
+        case "kuwo", "applemusic":
+            // 这两家没有「我喜欢的音乐」列表接口，也没有用户收藏接口：
+            // 只显示本地星标（P2 起 PlaybackStore 同时持久化完整 Track），
+            // 没有就诚实空态写清原因，不编假数据。
             return await railLocalLiked(kind: .liked, platform: platform)
         default:
             return railEmpty(kind: .liked, platform: platform,
@@ -436,9 +608,71 @@ extension NativeBridge {
         }
     }
 
-    /// 本地星标兜底（kuwo / kugou / applemusic 的喜欢 rail，标题是
-    /// 「本地星标收藏」）：有星标就列出来并在前面插一张说明卡，
-    /// 没有就诚实空态。
+    /// 酷狗 get_all_list 里的「我喜欢」表：listId "2"（见
+    /// specs/sidecars.md canAddToKugouPlaylist 注释），或名字含「喜欢」。
+    private static func isKugouLikedList(_ d: [String: Any]) -> Bool {
+        if let listId = d["listId"] as? String, listId == "2" { return true }
+        if let n = d["listId"] as? NSNumber, n.intValue == 2 { return true }
+        return ((d["name"] as? String) ?? "").contains("喜欢")
+    }
+
+    /// 专辑字典 → Album（QQ user/albums、酷狗 user/playlists 的 albums、
+    /// 波点 user/playlists 的 albums 三路共用；字段名各家不一，按宽容读）。
+    private static func railAlbumFrom(_ d: [String: Any], platform: String) -> Album? {
+        guard let id = railString(d["id"]), !id.isEmpty else { return nil }
+        let title = (d["name"] as? String) ?? (d["title"] as? String) ?? ""
+        guard !title.isEmpty else { return nil }
+        let cover = railFirstNonEmpty([d["cover"] as? String, d["coverImgUrl"] as? String,
+                                       d["picUrl"] as? String, d["pic"] as? String])
+        var artist = ""
+        if let a = d["artists"] as? [[String: Any]] {
+            artist = a.compactMap { $0["name"] as? String }.filter { !$0.isEmpty }.joined(separator: " / ")
+        }
+        if artist.isEmpty { artist = (d["artists"] as? String) ?? "" }
+        if artist.isEmpty, let c = d["creator"] as? [String: Any] { artist = (c["nickname"] as? String) ?? "" }
+        let trackCount = (d["trackCount"] as? NSNumber)?.intValue ?? 0
+        return Album(id: id, title: title, artist: artist,
+                     coverURL: cover.isEmpty ? nil : URL(string: cover),
+                     source: platform, trackCount: trackCount)
+    }
+
+    /// r31-starred：平台喜欢列表拉不到时的本地星标回落（QQ/酷狗优先，
+    /// 其余 5 台同款；kuwo / applemusic 本来就只走本地星标，不经这里）。
+    /// - 有星标：回整页结果（分组卡 + 星标曲目），`error` 为 nil——
+    ///   面板/详情页遇 `error` 非空就只显示报错、把条目盖掉，所以回落
+    ///   页不能带 error；失败原因写进分组卡括号里（登录失效的信号不丢，
+    ///   只是不再用它把整页挡掉）。
+    /// - 没星标：回 nil，调用方按原样返回失败/空态（不编假数据）。
+    private static func localStarredFallback(platform: String, note: String) async -> RailResult? {
+        let local = await PlaybackStore.likedTracks().filter { $0.platform == platform }
+        guard !local.isEmpty else { return nil }
+        let platformName = LiziPlatforms.all.first(where: { $0.id == platform })?.name ?? platform
+        var entries: [RailEntry] = [.groupHeader("本地星标收藏（\(platformName)：\(note)）")]
+        entries.append(contentsOf: local.map { RailEntry.track($0) })
+        return RailResult(kind: .liked, platform: platform, entries: entries)
+    }
+
+    /// r31-starred：平台喜欢拉到了，星标的歌也并进同一页（分组卡
+    /// 「本地星标收藏」；酷狗 r31 起已有这路，旧实现不去重）。
+    /// 去重按喜欢复合键（`PlaybackStore.likeKey`：platform + id）——
+    /// 同一首歌既在平台喜欢表里又被星标过，只留平台那一行。
+    /// 没星标 / 星标全已在页里时什么都不加。
+    private static func appendLocalStarred(_ entries: inout [RailEntry], platform: String) async {
+        let local = await PlaybackStore.likedTracks().filter { $0.platform == platform }
+        guard !local.isEmpty else { return }
+        let seen = Set(entries.compactMap { entry -> String? in
+            if case .track(let t) = entry { return PlaybackStore.likeKey(for: t) }
+            return nil
+        })
+        let fresh = local.filter { !seen.contains(PlaybackStore.likeKey(for: $0)) }
+        guard !fresh.isEmpty else { return }
+        entries.append(.groupHeader("本地星标收藏"))
+        entries.append(contentsOf: fresh.map { RailEntry.track($0) })
+    }
+
+    /// 本地星标兜底（kuwo / applemusic 的喜欢 rail，标题是
+    /// 「本地星标收藏」；酷狗 r31 起走平台喜欢表，未登录时退回这里）：
+    /// 有星标就列出来并在前面插一张说明卡，没有就诚实空态。
     /// r22l 编译修：PlaybackStore 是 @MainActor（第 22 轮第 5 件，代际计数器
     /// 设计靠它，不许摘），它的 static likedTracks() 也是主隔离；本函数原来是
     /// 同步非隔离，同步调它报硬错。改成 async 后用 await 跨隔离取（调用方
@@ -512,7 +746,11 @@ extension NativeBridge {
             if let e = railError(d) {
                 return RailResult(kind: .playlists, platform: platform, error: e)
             }
-            let lists = railRows(d, keys: ["playlists"]).compactMap { railPlaylistFrom($0, platform: platform) }
+            // r31：「我的歌单」只留自建（subscribed==true 的收藏已并进「我喜欢」，
+            // 见 QQ.swift userPlaylists 的打标记）。
+            let lists = railRows(d, keys: ["playlists"])
+                .filter { ($0["subscribed"] as? NSNumber)?.boolValue != true }
+                .compactMap { railPlaylistFrom($0, platform: platform) }
             return railDone(kind: .playlists, platform: platform,
                             entries: lists.map { RailEntry.playlist($0) },
                             emptyReason: "QQ 音乐没有返回歌单")
@@ -525,6 +763,7 @@ extension NativeBridge {
             }
             let lists = railRows(d, keys: ["playlists"])
                 .filter { ($0["isLikedPlaylist"] as? NSNumber)?.boolValue != true }
+                .filter { ($0["isOwned"] as? NSNumber)?.boolValue != false }
                 .compactMap { railPlaylistFrom($0, platform: platform) }
             return railDone(kind: .playlists, platform: platform,
                             entries: lists.map { RailEntry.playlist($0) },
@@ -536,7 +775,12 @@ extension NativeBridge {
             if let e = railError(d) {
                 return RailResult(kind: .playlists, platform: platform, error: e)
             }
-            let lists = railRows(d, keys: ["playlists"]).compactMap { railPlaylistFrom($0, platform: platform) }
+            // r31：只留自建（isOwned==false 的收藏已并进「我喜欢」；fond
+            // 喜欢表本身不进歌单列表，曲目已在 liked 那路）。
+            let lists = railRows(d, keys: ["playlists"])
+                .filter { ($0["isOwned"] as? NSNumber)?.boolValue != false }
+                .filter { ($0["isLikedPlaylist"] as? NSNumber)?.boolValue != true }
+                .compactMap { railPlaylistFrom($0, platform: platform) }
             return railDone(kind: .playlists, platform: platform,
                             entries: lists.map { RailEntry.playlist($0) },
                             emptyReason: "波点没有返回歌单")
@@ -547,7 +791,11 @@ extension NativeBridge {
             if let e = railError(d) {
                 return RailResult(kind: .playlists, platform: platform, error: e)
             }
-            let lists = railRows(d, keys: ["playlists"]).compactMap { railPlaylistFrom($0, platform: platform) }
+            // r31：只留自有（isOwned==true；非自有的收藏已并进「我喜欢」；
+            // 专辑不进歌单列表，收藏的专辑在 liked 那路）。
+            let lists = railRows(d, keys: ["playlists"])
+                .filter { ($0["isOwned"] as? NSNumber)?.boolValue == true }
+                .compactMap { railPlaylistFrom($0, platform: platform) }
             return railDone(kind: .playlists, platform: platform,
                             entries: lists.map { RailEntry.playlist($0) },
                             emptyReason: "酷狗没有返回歌单")
@@ -726,46 +974,16 @@ extension NativeBridge {
 
     // MARK: - 歌单曲目（详情页下钻）
 
-    /// 点歌单卡进曲目列表。`feed` 只在 kuwo 榜单时用（ranks feed 的卡走
-    /// /api/kuwo/rank/tracks，拿不到再回普通歌单接口）。
-    /// bodian 走 /api/bodian/playlist/tracks（playlistDetail 没接 bodian）；
-    /// 其余平台复用 NativeBridge.playlistDetail。
+    /// 点歌单卡进曲目列表。r31：曲目走 `playlistAllTracks` 翻页取全量
+    /// （旧实现只取一页：汽水/波点 limit 50、酷狗 30、酷我榜单 50，
+    /// 50 首以上的歌单会被截断；面板「点歌单看全部歌曲」就靠这里不断）。
+    /// 网易/QQ/Apple Music 的 detail 本身回全量，playlistAllTracks 内部
+    /// 直接调 playlistDetail，不另翻页。
     static func railPlaylistTracks(platform: String, playlist: Playlist, feed: String? = nil) async -> RailResult {
-        switch platform {
-        case "bodian":
-            guard let d = await call(path: "/api/bodian/playlist/tracks",
-                                     query: ["id": playlist.id, "limit": "50"]) else {
-                return railFailed(kind: .playlists, platform: platform)
-            }
-            if let e = railError(d) {
-                return RailResult(kind: .playlists, platform: platform, error: e)
-            }
-            let tracks = railRows(d, keys: ["tracks"]).compactMap { Track.from(dict: $0, platform: platform) }
-            return railDone(kind: .playlists, platform: platform,
-                            entries: tracks.map { RailEntry.track($0) },
-                            emptyReason: "这张歌单没有曲目")
-        case "kuwo":
-            if feed == "ranks" {
-                if let d = await call(path: "/api/kuwo/rank/tracks",
-                                      query: ["id": playlist.id, "limit": "50"]),
-                   railError(d) == nil {
-                    let tracks = railRows(d, keys: ["tracks"]).compactMap { Track.from(dict: $0, platform: platform) }
-                    if !tracks.isEmpty {
-                        return RailResult(kind: .playlists, platform: platform,
-                                          entries: tracks.map { RailEntry.track($0) })
-                    }
-                }
-            }
-            let detail = await playlistDetail(platform: platform, id: playlist.id)
-            return railDone(kind: .playlists, platform: platform,
-                            entries: detail.tracks.map { RailEntry.track($0) },
-                            emptyReason: "这张歌单没有曲目")
-        default:
-            let detail = await playlistDetail(platform: platform, id: playlist.id)
-            return railDone(kind: .playlists, platform: platform,
-                            entries: detail.tracks.map { RailEntry.track($0) },
-                            emptyReason: "这张歌单没有曲目")
-        }
+        let tracks = await playlistAllTracks(platform: platform, id: playlist.id, isRank: playlist.isRank)
+        return railDone(kind: .playlists, platform: platform,
+                        entries: tracks.map { RailEntry.track($0) },
+                        emptyReason: "这张歌单没有曲目")
     }
 
     // MARK: - 登录态（网易喜欢 / 收藏歌单用；未登录返回 nil）

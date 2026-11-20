@@ -52,7 +52,7 @@ struct PlatformStripView: View {
     @EnvironmentObject private var nav: AppNavigation
 
     /// 标题实测宽（PreferenceKey 回写；初值 100 = 「每日推荐」4 字 × 19pt
-    /// 预估 + chevron；最长来源「用户创建的歌单」约 133pt，实测后自纠）。
+    /// 预估 + chevron；最长来源「我的歌单」约 100pt，实测后自纠）。
     @State private var nameWidth: CGFloat = 100
 
     /// r28 tone-aware：调用方（HomeView）按在播专辑取色 `panelTone.isDark`

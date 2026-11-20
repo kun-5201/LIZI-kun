@@ -29,7 +29,10 @@ struct DailyMarqueeView: View {
     @State private var dragBase: CGFloat = 0
     @State private var dwellUntil = Date().addingTimeInterval(2.5)
 
-    private let timer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
+    // r31-120hz：Timer 驱动的动画帧率——旧 1/30（30Hz）步进 0.8px 肉眼一顿一顿；
+    // 改 1/120，步长同步改 /120.0（速度不变）；Timer 不是 vsync 同步，120Hz 机型
+    // 仍可能抖动，本视图自 r21 起未挂载（备用），真要重新挂载应改 CADisplayLink。
+    private let timer = Timer.publish(every: 1.0 / 120.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Group {
@@ -102,7 +105,7 @@ struct DailyMarqueeView: View {
 
     private func tick() {
         guard !tracks.isEmpty, setWidth > 0, !isDragging, Date() >= dwellUntil else { return }
-        offsetX = normalized(offsetX - speedPxPerSecond / 30.0)
+        offsetX = normalized(offsetX - speedPxPerSecond / 120.0)
     }
 
     /// 把偏移收进 (-setWidth, 0]，保证两份循环无缝。

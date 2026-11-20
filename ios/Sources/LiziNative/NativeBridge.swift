@@ -44,7 +44,10 @@ enum NativeBridge {
     /// 一次取链的结果（`url` 为空 = 这一档拿不到地址；调用方按编排继续往下一档）。
     struct SongURLResult {
         var url: URL?
-        /// 上游实际回的档位（显示音质 = 这个，绝不显示请求的档位）。
+        /// 上游实际回的档位（显示音质 = 这个，绝不显示请求的档位；
+        /// r31：canon 的结果再过 AudioQuality.verified，按实际地址的
+        /// 实证（QQ 文件名前缀 / 容器 / 码率）校验，宣称高于实证上限
+        /// 时往下压、给不出时为 nil，UI 不挂徽章）。
         var actualQuality: AudioQuality?
         /// 是否试听片段（官方只给了 freeTrialInfo / preview）。
         var isTrial: Bool
@@ -187,12 +190,17 @@ let urlString = (item["url"] as? String) ?? ""
 let isTrial = item["freeTrialInfo"] != nil && !(item["freeTrialInfo"] is NSNull)
 let br = (item["br"] as? NSNumber)?.intValue ?? 0
 let served = (item["level"] as? String) ?? ""
+// r31 真实音质：type 是上游回的文件容器（mp3/flac），与 level/br 一起
+// 作实证——level 只认上游宣称时，宣称与实际文件不符就挂假徽章
+//（要了 dolby、实际只给了 320k mp3 时 level 仍可能报 dolby）。
 if urlString.isEmpty {
 let code = (item["code"] as? NSNumber)?.intValue ?? 0
 return SongURLResult(reason: code == -110 ? "vip" : "unavailable", via: "platform")
 }
-return SongURLResult(url: Upstream.url(from: urlString).map { Upstream.upgradedAudioURL($0) },
-actualQuality: AudioQuality.canon(platform: "netease", served: served, bitrate: br),
+let streamURL = Upstream.url(from: urlString).map { Upstream.upgradedAudioURL($0) }
+let streamType = (item["type"] as? String) ?? ""
+return SongURLResult(url: streamURL,
+actualQuality: AudioQuality.verified(claimed: AudioQuality.canon(platform: "netease", served: served, bitrate: br), url: streamURL, bitrate: br, format: streamType),
 isTrial: isTrial, reason: "", via: "platform", bitrate: br)
 case "qq":
 let d = await call(path: "/api/qq/song/url",
@@ -238,6 +246,10 @@ return SongURLResult(reason: "unavailable", via: "platform")
 /// 升级表只含实测支持 https 的域（.music.126.net/.qq.com/
 /// .kuwo.cn/.kugou.com/.kglink.com）；汽水 CDN 域（.365yg.com 等）未实测，不进表、
 /// 不编——汽水地址原样走直链/代理，行为与修前一致。
+/// r31 真实音质：served 只是边车回的宣称档位（汽水/波点上游不给档位时
+/// 服务端曾直接拿请求档位顶，见 Qishui/Bodian song/url 的修法），
+/// 这里再按实际地址的实证校验一遍（QQ 文件名前缀 / 容器后缀）：
+/// 宣称高于实证上限时往下压，宣称与实证都给不出时回 nil（不挂徽章）。
 private static func songURLFromSidecar(_ d: [String: Any]?, platform: String,
 quality: AudioQuality) -> SongURLResult {
 guard let d else { return SongURLResult(reason: "network", via: "platform")}
@@ -249,8 +261,10 @@ if urlString.isEmpty {
 let reason = (d["reason"] as? String) ?? (d["error"] as? String) ?? "unavailable"
 return SongURLResult(reason: reason.isEmpty ? "unavailable" : reason, via: "platform")
 }
-return SongURLResult(url: Upstream.url(from: urlString).map { Upstream.upgradedAudioURL($0) },
-actualQuality: AudioQuality.canon(platform: platform, served: served),
+let streamURL = Upstream.url(from: urlString).map { Upstream.upgradedAudioURL($0) }
+let streamFormat = (d["format"] as? String) ?? ""
+return SongURLResult(url: streamURL,
+actualQuality: AudioQuality.verified(claimed: AudioQuality.canon(platform: platform, served: served), url: streamURL, format: streamFormat.isEmpty ? nil : streamFormat),
 isTrial: preview, isPreview: preview,
 reason: "", via: "platform", clipStartMs: clipStartMs)
 }
@@ -337,7 +351,7 @@ return ca.isEmpty || ca.contains(artistKey) || artistKey.contains(ca)
 /// bd 映射见 LXResolver.sourceMap——但今天没有任何已注册源声明 bd，
 /// 波点 LX 仍走不到真取链，缺的是源不是映射，见 LX.swift）。
 /// Apple Music / Spotify 没有 LX 解析：LX 生态的源 id 只有 kw/kg/tx/wy/mg
-///（赞助源另扩展了 qs），不存在 Apple Music 的源 id，不编假映射。
+///（用户自加的自定义源可扩展 qs），不存在 Apple Music 的源 id，不编假映射。
 static func lxSongURL(track: Track, quality: AudioQuality) async -> SongURLResult? {
 guard let lxSource = LXResolver.sourceMap[track.platform],!lxSource.isEmpty else { return nil}
 var query: [String: String] = ["source": track.platform,
@@ -386,8 +400,19 @@ DiagLog.shared.recordPlaybackStep("lx song/url return source=\(track.platform) i
 // 酷我 发如雪那条 http://car-er.kuwo.cn 直播 "Cannot Open"、代理拉又被
 // ATS -1022 拦，根因就是播/探用的不是同一条地址。升级表见
 // Upstream.audioHTTPSSuffixes（.kuwo.cn 在表里，VM 实测 https 通）。
-return SongURLResult(url: Upstream.url(from: urlString).map { Upstream.upgradedAudioURL($0) },
-actualQuality: AudioQuality.canon(platform: "lx", served: served),
+// r31 真实音质（假「杜比全景声」根因）：LX 引擎返回的 tier 是「脚本
+// 在这一档调用里成功了」，不是「这条流真是这一档」——脚本要 atmos
+// 档时只消返回任意一条能播的地址（常是 320k mp3 / QQ M800 直链），
+// 引擎就原样报 atmos，canon 直译成 .dolby，芯片就挂了假杜比。
+// 没会员时 LX 先跑（PlaybackStore.resolveURL 的 lxFirst），QQ 匿名
+// vkey 对这首歌根本不给 purl、官方腿走不到，所以用户实际听到的就
+// 是 LX 这条 mp3，却顶着杜比徽章。这里按实际地址的实证校验：
+// QQ 文件名前缀（M800/Q001…）定档，.mp3 上限 320k，
+// 不透明地址才保留脚本宣称（残留风险：脚本 tier 是唯一证据时仍
+// 可能虚高，见 AudioQuality.verified 的注释——不编更多证据）。
+let streamURL = Upstream.url(from: urlString).map { Upstream.upgradedAudioURL($0) }
+return SongURLResult(url: streamURL,
+actualQuality: AudioQuality.verified(claimed: AudioQuality.canon(platform: "lx", served: served), url: streamURL),
 reason: "", via: "lx")
 }
 
@@ -569,51 +594,197 @@ return false
     ///   （公开排行榜 RSS）。三家形状都是 { tracks }，已核对，不动。
     /// - r28：整链包一层 dailyTimeout（25s）硬超时，见 dailyTimeout 注释；
     ///   超时按空处理，loadDaily 走诚实空态，不留 spinner。
-    static func dailyRecommend(platform: String) async -> [DailyTrack] {
-        (try? await withTimeout(seconds: Self.dailyTimeout) {
-            await dailyRecommendUntimed(platform: platform)
-        }) ?? []
+    /// - r31-daily：超时壳改成“弃子竞速”——取数腿跑在脱离的 Task 里，
+    ///   壳里只竞 `opTask.value` 与 25s 睡眠。根因（用户 2026-11-21 05:58
+    ///   “每日推荐一直拉取不到数据，面板一直在转圈圈”）：旧壳把取数腿
+    ///   本身放进 withThrowingTaskGroup 当子任务，超时后群组退出要先等
+    ///   该子任务完成（取消只是请求，腿里不响应取消的挂起——如 `try?`
+    ///   吞掉取消的重试 sleep、URLSession 在弱网 connect/DNS 里不立即
+    ///   退——群组就一直等，loadDaily 永远到不了 `isLoadingDaily = false`，
+    ///   spinner 无限转；r28 的 25s 壳只掐了超时任务本身，没掐住加载）。
+    ///   竞 `task.value` 时取消立即打断等待者（等值挂起本身响应取消），
+    ///   25s 一到必回空结果，spinner 必停；被弃的腿留在后台、自己到腿
+    ///   超时就停（各腿 15–25s 都有上限），它只读上游、不写任何 UI 状态。
+    ///   超时/取消时也顺手 cancel 掉被弃任务（尽力而为，UI 不等它）。
+    /// - r31-daily：回值改成 DailyResult（曲目 + 空原因）：旧写法只回
+    ///   [DailyTrack]，主腿 301/401（未登录）与请求失败的信息全丢了，
+    ///   空态只能写一句通用话，用户问“是不是系统不认登录”答不上来。
+    ///   现在腿结果（DailyLeg）把 unauthorized / failed 原样带上来，
+    ///   空时 loadDaily 能说清是没登录、没网还是上游没内容。
+    struct DailyResult {
+        var tracks: [DailyTrack]
+        /// 为空时的诚实原因（nil = 用 loadDaily 的 emptyReason(for:) 通用文案）。
+        var emptyReason: String?
     }
 
-    /// 每日推荐整链（无超时；dailyRecommend 的超时壳调这里）。
-    private static func dailyRecommendUntimed(platform: String) async -> [DailyTrack] {
-        switch platform {
-        case "netease":
-            if let tracks = await dailyTracks(path: "/api/recommend/songs", platform: platform),
-               !tracks.isEmpty { return tracks }
-            return await dailyTracks(path: "/api/personalized", platform: platform) ?? []
-        case "qq":
-            if let tracks = await dailyTracks(path: "/api/qq/user/daily-songs", platform: platform),
-               !tracks.isEmpty { return tracks }
-            return await dailyTracks(path: "/api/qq/recommend/radar",
-                                     query: ["page": "1"], platform: platform) ?? []
-        case "qishui":
-            return await dailyTracks(path: "/api/qishui/feed",
-                                     query: ["count": "20"], platform: platform) ?? []
-        case "bodian":
-            return await dailyTracks(path: "/api/bodian/ai/playlist",
-                                     query: ["index": "0"], platform: platform) ?? []
-        case "kuwo":
-            return await dailyTracks(path: "/api/kuwo/daily", platform: platform) ?? []
-        case "kugou":
-            return await dailyTracks(path: "/api/kugou/everyday/recommend", platform: platform) ?? []
-        case "applemusic":
-            return await dailyTracks(path: "/api/applemusic/daily", platform: platform) ?? []
-        default:
-            return []
+    static func dailyRecommend(platform: String) async -> DailyResult {
+        let opTask = Task { await dailyRecommendUntimed(platform: platform) }
+        do {
+            return try await withTimeout(seconds: Self.dailyTimeout) {
+                await opTask.value
+            }
+        } catch is CancellationError {
+            opTask.cancel()
+            return DailyResult(tracks: [], emptyReason: nil)
+        } catch {
+            // 超时（TimeoutError）必走这里：25s 一到即回，不等被弃的腿。
+            opTask.cancel()
+            return DailyResult(tracks: [], emptyReason: "每日推荐拉取超时（25 秒无响应），请检查网络后重试。")
         }
     }
 
-    /// 每日推荐一行请求的归一化读数（{ tracks } / { data } / { songs }；
-    /// 请求本身没通（call 回 nil）或上游回空都给 []，调用方按空走下一条兜底）。
+    /// 每日推荐整链（无超时；dailyRecommend 的超时壳调这里）。
+    private static func dailyRecommendUntimed(platform: String) async -> DailyResult {
+        switch platform {
+        case "netease":
+            let main = await dailyTracks(path: "/api/recommend/songs", platform: platform)
+            if !main.tracks.isEmpty { return DailyResult(tracks: main.tracks, emptyReason: nil) }
+            let fallback = await dailyTracks(path: "/api/personalized", platform: platform)
+            if !fallback.tracks.isEmpty { return DailyResult(tracks: fallback.tracks, emptyReason: nil) }
+            if main.unauthorized {
+                return DailyResult(tracks: [], emptyReason: "未登录网易云：每日推荐需要登录才能拉取；推荐新歌也没返回内容，请登录网易云后重试，或检查网络。")
+            }
+            if main.failed && fallback.failed {
+                return DailyResult(tracks: [], emptyReason: "网易云每日推荐和推荐新歌都请求失败，请检查网络后重试。")
+            }
+            return DailyResult(tracks: [], emptyReason: nil)
+        case "qq":
+            let main = await dailyTracks(path: "/api/qq/user/daily-songs", platform: platform)
+            if !main.tracks.isEmpty { return DailyResult(tracks: main.tracks, emptyReason: nil) }
+            let fallback = await dailyTracks(path: "/api/qq/recommend/radar",
+                                             query: ["page": "1"], platform: platform)
+            if !fallback.tracks.isEmpty { return DailyResult(tracks: fallback.tracks, emptyReason: nil) }
+            if main.unauthorized {
+                return DailyResult(tracks: [], emptyReason: "未登录 QQ 音乐：每日推荐需要登录才能拉取；雷达推荐也没返回内容，请登录 QQ 音乐后重试，或检查网络。")
+            }
+            if main.failed && fallback.failed {
+                return DailyResult(tracks: [], emptyReason: "QQ 音乐每日推荐和雷达推荐都请求失败，请检查网络后重试。")
+            }
+            return DailyResult(tracks: [], emptyReason: nil)
+        case "qishui":
+            let leg = await dailyTracks(path: "/api/qishui/feed",
+                                        query: ["count": "20"], platform: platform)
+            return DailyResult(tracks: leg.tracks,
+                               emptyReason: leg.tracks.isEmpty
+                                ? (leg.failed ? "汽水推荐流请求失败，请检查网络后重试。" : nil) : nil)
+        case "bodian":
+            let leg = await dailyTracks(path: "/api/bodian/ai/playlist",
+                                        query: ["index": "0"], platform: platform)
+            return DailyResult(tracks: leg.tracks,
+                               emptyReason: leg.tracks.isEmpty
+                                ? (leg.failed ? "波点潮趣日推请求失败，请检查网络后重试。" : nil) : nil)
+        case "kuwo":
+            let leg = await dailyTracks(path: "/api/kuwo/daily", platform: platform)
+            return DailyResult(tracks: leg.tracks,
+                               emptyReason: leg.tracks.isEmpty
+                                ? (leg.failed ? "酷我每日推荐请求失败，请检查网络后重试。" : nil) : nil)
+        case "kugou":
+            let leg = await dailyTracks(path: "/api/kugou/everyday/recommend", platform: platform)
+            return DailyResult(tracks: leg.tracks,
+                               emptyReason: leg.tracks.isEmpty
+                                ? (leg.failed ? "酷狗每日推荐请求失败，请检查网络后重试。" : nil) : nil)
+        case "applemusic":
+            let leg = await dailyTracks(path: "/api/applemusic/daily", platform: platform)
+            return DailyResult(tracks: leg.tracks,
+                               emptyReason: leg.tracks.isEmpty
+                                ? (leg.failed ? "Apple Music 每日推荐请求失败，请检查网络后重试。" : nil) : nil)
+        default:
+            return DailyResult(tracks: [], emptyReason: nil)
+        }
+    }
+
+    /// 每日推荐一行请求的归一化读数（{ tracks } / { data } / { songs }）。
+    /// r31-daily：回腿结果不只给曲目——上游 301/401（未登录）与请求失败
+    /// （call 回 nil / 包里 code 非 200）要原样带给调用方，空态才能说清
+    /// 是没登录还是没网；rows 仍只认 { tracks } / { data } / { songs }，
+    /// 不编假数据。code 缺键时按 200（成功）算，不把无 code 的成功包判失败。
+    private struct DailyLeg {
+        var tracks: [DailyTrack]
+        /// 上游明确说没登录（包里 code 301/401，如网易 301、QQ 401）。
+        var unauthorized: Bool
+        /// 请求本身没通（call 回 nil）或包里 code 非 200/301/401。
+        var failed: Bool
+    }
+
     private static func dailyTracks(path: String, query: [String: String] = [:],
-                                    platform: String) async -> [DailyTrack]? {
-        guard let d = await call(path: path, query: query) else { return nil }
+                                    platform: String) async -> DailyLeg {
+        guard let d = await call(path: path, query: query) else {
+            return DailyLeg(tracks: [], unauthorized: false, failed: true)
+        }
+        let code = (d["code"] as? NSNumber)?.intValue ?? 200
         let rows: [[String: Any]] = (d["tracks"] as? [[String: Any]])
             ?? (d["data"] as? [[String: Any]])
             ?? (d["songs"] as? [[String: Any]]) ?? []
-        return rows.compactMap { Track.from(dict: $0, platform: platform) }
+        let tracks = rows.compactMap { Track.from(dict: $0, platform: platform) }
             .map { DailyTrack(track: $0) }
+        return DailyLeg(tracks: tracks,
+                        unauthorized: code == 301 || code == 401,
+                        failed: code != 200 && code != 301 && code != 401)
+    }
+
+    /// 歌单全量曲目（r31：面板「点歌单看全部歌曲」用；旧实现只取一页——汽水/
+    /// 波点 limit 50、酷狗 30、酷我榜单 50，50 首以上的歌单会被截断）。
+    /// - netease / qq：detail 本身回全量（网易 n=1000 + trackIds 补全；QQ CGI，
+    ///   code-10 时 musicu 内部分页），直接调 playlistDetail 取 tracks。
+    /// - applemusic：iTunes lookup 单次回全量（无分页参数），直接调 playlistDetail。
+    /// - qishui / bodian：playlist/tracks 支持 limit + offset + more，offset
+    ///   翻页直到 more 为 false（每页 100，最多 20 页）。
+    /// - kugou：playlist/tracks 支持 page + pagesize（≤100），翻页直到回包不足
+    ///   一页（最多 20 页）。
+    /// - kuwo：playlist/tracks 与 rank/tracks 都支持 limit + page + total，
+    ///   翻页直到取满 total（最多 10 页）。
+    /// `source` 只给波点专辑用（source=6，见 albumDetail 波点分支）。
+    static func playlistAllTracks(platform: String, id: String, isRank: Bool = false,
+                                  source: Int? = nil) async -> [Track] {
+        switch platform {
+        case "netease", "qq", "applemusic":
+            return await playlistDetail(platform: platform, id: id, isRank: isRank).tracks
+        case "qishui", "bodian":
+            let path = "/api/\(platform)/playlist/tracks"
+            var all: [Track] = []
+            var offset = 0
+            for _ in 0..<20 {
+                var query: [String: String] = ["id": id, "limit": "100", "offset": "\(offset)"]
+                if let source { query["source"] = "\(source)" }
+                guard let d = await call(path: path, query: query),
+                      (d["code"] as? NSNumber)?.intValue == 200 else { break }
+                let rows = (d["tracks"] as? [[String: Any]]) ?? []
+                let tracks = rows.compactMap { Track.from(dict: $0, platform: platform) }
+                all.append(contentsOf: tracks)
+                offset += tracks.count
+                let more = (d["more"] as? NSNumber)?.boolValue == true
+                if !more || tracks.isEmpty { break }
+            }
+            return all
+        case "kugou":
+            var all: [Track] = []
+            for page in 1...20 {
+                guard let d = await call(path: "/api/kugou/playlist/tracks",
+                                         query: ["id": id, "limit": "100", "page": "\(page)"]),
+                      (d["code"] as? NSNumber)?.intValue == 200 else { break }
+                let rows = (d["tracks"] as? [[String: Any]]) ?? []
+                let tracks = rows.compactMap { Track.from(dict: $0, platform: platform) }
+                all.append(contentsOf: tracks)
+                if tracks.count < 100 { break }
+            }
+            return all
+        case "kuwo":
+            let path = isRank ? "/api/kuwo/rank/tracks" : "/api/kuwo/playlist/tracks"
+            var all: [Track] = []
+            for page in 1...10 {
+                guard let d = await call(path: path, query: ["id": id, "limit": "200", "page": "\(page)"]),
+                      (d["code"] as? NSNumber)?.intValue == 200 else { break }
+                let rows = (d["tracks"] as? [[String: Any]]) ?? []
+                let tracks = rows.compactMap { Track.from(dict: $0, platform: platform) }
+                all.append(contentsOf: tracks)
+                let total = (d["total"] as? NSNumber)?.intValue ?? 0
+                if total > 0, all.count >= total { break }
+                if tracks.count < 200 { break }
+            }
+            return all
+        default:
+            return await playlistDetail(platform: platform, id: id, isRank: isRank).tracks
+        }
     }
 
     /// 歌单详情（含曲目）。r25-B2：按平台分三档（逐家核对服务端路由后定，
@@ -656,17 +827,13 @@ return false
             return playlistFrom(dict: d, platform: platform, id: id)
         case "qishui", "bodian", "kugou":
             let detailPath: String
-            let tracksPath: String
             switch platform {
             case "qishui":
                 detailPath = "/api/qishui/playlist/detail"
-                tracksPath = "/api/qishui/playlist/tracks"
             case "bodian":
                 detailPath = "/api/bodian/playlist/detail"
-                tracksPath = "/api/bodian/playlist/tracks"
             default: // kugou
                 detailPath = "/api/kugou/playlist/detail"
-                tracksPath = "/api/kugou/playlist/tracks"
             }
             var pl = Playlist(id: id, source: platform)
             if let meta, !meta.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -674,16 +841,9 @@ return false
             } else if let d = await call(path: detailPath, query: ["id": id]) {
                 pl = playlistFrom(dict: d, platform: platform, id: id)
             }
-            if let t = await call(path: tracksPath, query: ["id": id, "limit": "50"]) {
-                let tp = playlistFrom(dict: t, platform: platform, id: id)
-                pl.tracks = tp.tracks
-                if pl.trackCount == 0 { pl.trackCount = tp.trackCount }
-                // tracks 回包若带了名/封面而 detail 没给，补上（只取上游给的，不编）。
-                if pl.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    pl.title = tp.title
-                }
-                if pl.coverURL == nil { pl.coverURL = tp.coverURL }
-            }
+            // r31：曲目走 playlistAllTracks 翻页取全量（旧实现只取一页 limit 50）。
+            pl.tracks = await playlistAllTracks(platform: platform, id: id)
+            if pl.trackCount == 0 { pl.trackCount = pl.tracks.count }
             return pl
         case "kuwo":
             let path: String
@@ -698,7 +858,13 @@ return false
             guard let d = await call(path: path, query: query) else {
                 return Playlist(id: id, source: platform)
             }
-            return playlistFrom(dict: d, platform: platform, id: id)
+            var pl = playlistFrom(dict: d, platform: platform, id: id)
+            // r31：榜单 / 非榜单都翻页取全量（旧实现只取一页）。
+            if pl.trackCount > pl.tracks.count || pl.tracks.count >= 50 {
+                pl.tracks = await playlistAllTracks(platform: platform, id: id, isRank: isRank)
+                if pl.trackCount == 0 { pl.trackCount = pl.tracks.count }
+            }
+            return pl
         case "applemusic":
             guard let d = await call(path: "/api/applemusic/playlist/tracks",
                                      query: ["id": id]) else {
@@ -796,6 +962,49 @@ return false
             var album = Album(id: id, source: platform)
             album.tracks = ((d["tracks"] as? [[String: Any]]) ?? [])
                 .compactMap { Track.from(dict: $0, platform: platform) }
+            album.trackCount = album.tracks.count
+            return album
+        case "qq":
+            // r31：QQ 专辑曲目走服务端新加的 /api/qq/album/tracks（网页 CGI
+            // fcg_v8_album_info_cp，见 QQ.swift albumTracks）。
+            guard let d = await call(path: "/api/qq/album/tracks", query: ["id": id]) else {
+                return Album(id: id, source: platform)
+            }
+            var album = Album(id: id, source: platform)
+            album.title = (d["name"] as? String) ?? ""
+            if let cover = d["cover"] as? String, !cover.isEmpty { album.coverURL = URL(string: cover) }
+            album.tracks = ((d["tracks"] as? [[String: Any]]) ?? [])
+                .compactMap { Track.from(dict: $0, platform: platform) }
+            album.trackCount = (d["trackCount"] as? NSNumber)?.intValue ?? album.tracks.count
+            return album
+        case "kugou":
+            // r31：酷狗专辑详情（名/封面/歌手）+ 曲目翻页（album_songs 每页
+            // ≤50，见 FoliaKugou albumDetail / albumSongs，本来就有的路由）。
+            var album = Album(id: id, source: platform)
+            if let d = await call(path: "/api/kugou/album/detail", query: ["id": id]),
+               let a = d["album"] as? [String: Any] {
+                album.title = (a["name"] as? String) ?? ""
+                album.artist = (a["artists"] as? String) ?? ""
+                if let cover = a["cover"] as? String, !cover.isEmpty { album.coverURL = URL(string: cover) }
+            }
+            var tracks: [Track] = []
+            for page in 1...10 {
+                guard let d = await call(path: "/api/kugou/album/songs",
+                                         query: ["id": id, "limit": "50", "page": "\(page)"]),
+                      (d["code"] as? NSNumber)?.intValue == 200 else { break }
+                let rows = (d["tracks"] as? [[String: Any]]) ?? []
+                let pageTracks = rows.compactMap { Track.from(dict: $0, platform: platform) }
+                tracks.append(contentsOf: pageTracks)
+                if pageTracks.count < 50 { break }
+            }
+            album.tracks = tracks
+            album.trackCount = tracks.count
+            return album
+        case "bodian":
+            // r31：波点专辑取曲走歌单曲目接口 source=6（专辑的 sourceType；
+            // 未实测——上游不认时回空，面板按诚实空态显示，不编曲目）。
+            var album = Album(id: id, source: platform)
+            album.tracks = await playlistAllTracks(platform: platform, id: id, source: 6)
             album.trackCount = album.tracks.count
             return album
         default:

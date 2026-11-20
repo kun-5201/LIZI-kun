@@ -32,12 +32,31 @@ import SwiftUI
 /// `railPage` / `railPageTitle` / `showRailPage` / `moveRailPage` 全删；
 /// 来源改成点平台条标题弹小菜单切（壳版 `#hall-src-menu` 思路），
 /// 状态只剩 `selectedSource` + `selectSource(_:)`；取数层
-/// （`railResults` / `loadRailPage` / `railEntries` / `railEmptyReason` /
-/// `isMixedPlaylistsPage`）原样保留、只换触发点，`HomeRailPage` 枚举
-/// 改叫来源列表（顺序与标题不变）。
+/// （`railResults` / `loadRailPage` / `railEntries` / `railEmptyReason`）
+/// 原样保留、只换触发点，`HomeRailPage` 枚举改叫来源列表（顺序与标题不变）。
 /// 注：`selectedSource` / `selectSource` 的名字与 r26 删掉的旧
 /// `Source` 枚举那套同名，但不是同一套——r26 那套是 chips 的
 /// `Source` 枚举，r30 这套是 `HomeRailPage` 来源。
+///
+/// r31（用户 2026-11-21 06:02–06:05 决定，三件一起落地）：
+/// - 「用户收藏」来源删掉，只剩 5 项（每日推荐 / 精选 / 我喜欢 / 我的歌单 /
+///   电台）；它的数据全并进「我喜欢」（见 `RailsBridge.railLiked` 各平台
+///   收藏合并：网易 subscribed 歌单、QQ 收藏歌单+专辑、酷狗非自有歌单+专辑、
+///   汽水非自有歌单、波点收藏歌单+专辑；酷我/Apple Music 没有官方收藏接口，
+///   只有本地星标，不编）。
+/// - 「用户创建的歌单」改名「我的歌单」（只改名，入口和逻辑不动），里面只留
+///   用户自建的歌单（各家按 subscribed / isOwned 标记分流，见
+///   `RailsBridge.railMyPlaylists`）。
+/// - 面板内打开歌单/专辑（`openedPlaylist` / `openedAlbum`，见本文件末尾）：
+///   点「我的歌单」/「我喜欢」里的歌单或专辑卡，不跳详情页，面板原地换成
+///   该集合的全部歌曲卡片（曲目走 `railPlaylistTracks` / `albumDetail`
+///   全量取数），返回键回列表。
+///
+/// r31-daily（用户 2026-11-21 05:58 每日推荐无限转圈）：`loadDaily`
+/// 改成 defer 结算 spinner（五条返回路径都落下）+ 用
+/// `NativeBridge.dailyRecommend` 回的 `DailyResult`（曲目 + 空原因，
+/// 未登录 / 没网说清）；超时壳改成弃子竞速（取数腿跑脱离 Task，
+/// 壳里只竞 `task.value` 与 25s 睡眠），见两处函数头注释。
 @MainActor
 final class HomeViewModel: ObservableObject {
     // MARK: - 持久化键（原生版全部加 lizi.native 前缀，与壳版 localStorage 隔离）
@@ -183,6 +202,7 @@ final class HomeViewModel: ObservableObject {
         dailyEmptyReason = nil
         isLoadingDaily = true
         selectedSource = .daily
+        closeOpened()
         railResults = [:]
         railLoadingPages = []
     }
@@ -194,12 +214,31 @@ final class HomeViewModel: ObservableObject {
     /// 代际守卫：Moumusic loadOnce 里每个 await 后都查 generation；
     /// r28：对不上（被新加载取代）才直接退、不碰状态，对得上时
     /// 加载态归本加载负责落下（见下面两步守卫的注释）。
+    /// r31-daily（用户 2026-11-21 05:58 “每日推荐一直拉取不到数据，
+    /// 面板一直在转圈圈”，不是空态）：根因不是登录——登录态每条请求
+    /// 都带上了（网易 Cookie 头、QQ 凭证 Cookie，见 NativeBridge
+    /// dailyRecommend 注释与驱动 §6），未登录也有匿名兜底
+    /// （personalized / 雷达），登录 alone 造不出无限转圈；根因是
+    /// 加载活性的两个单点：(1) r28 的 25s 壳把取数腿本身放进任务组，
+    /// 超时后群组退出要等腿完成，腿里不响应取消的挂起能让群组一直等，
+    /// loadDaily 永远到不了落 spinner 的那行（壳已改成弃子竞速，见
+    /// NativeBridge.dailyRecommend）；(2) 本函数代际守卫那步 return
+    /// 不碰任何状态，只在“新加载已接管”时才成立，却没有任何代码核实
+    /// 接管者真的在飞、真的会落下来。所以本函数改成 defer 结算：
+    /// 五条返回路径（成功 / 空 / 超时 / 取消 / 代际守卫）都经过同一
+    /// 个落点；当前代际的加载一定落下，旧加载只在代际已变且 dailyTask
+    /// 已空（无接管者）时才落下，不抢新加载的状态。
     func loadDaily(generation: Int? = nil) async {
         let platform = selectedPlatform
         let generation = generation ?? homeLoadGeneration
         isLoadingDaily = true
         dailyEmptyReason = nil
-        let tracks = await NativeBridge.dailyRecommend(platform: platform)
+        defer {
+            if generation == homeLoadGeneration || dailyTask == nil {
+                isLoadingDaily = false
+            }
+        }
+        let result = await NativeBridge.dailyRecommend(platform: platform)
         // r28 根因（a）：旧写法三条件一个 guard、早退不碰任何状态——
         // 代际变了（切台）或任务被取消时直接 return，isLoadingDaily
         // 永远留在 true，环永远停在「正在拉取每日推荐…」，歌单永不显示。
@@ -208,13 +247,14 @@ final class HomeViewModel: ObservableObject {
         // 归本加载负责——无论取消还是平台已变，先落 false 再退，
         // 绝不把 spinner 留给 UI。平台只在 selectPlatform 里变，
         // 那里必先代际 +1，所以「同代际但平台变了」到不了这里，
-        // 第二个 guard 只是兜底。
+        // 第二个 guard 只是兜底。r31-daily：上面两步 guard 仍在，但
+        // 落 spinner 的责任已交给 defer——即使走到这里 return，
+        // defer 也按“当前代际或无接管者”规则结算，不再有不落的出口。
         guard generation == homeLoadGeneration else { return }
-        isLoadingDaily = false
         guard platform == selectedPlatform, !Task.isCancelled else { return }
-        daily = tracks
-        if tracks.isEmpty {
-            dailyEmptyReason = emptyReason(for: platform)
+        daily = result.tracks
+        if result.tracks.isEmpty {
+            dailyEmptyReason = result.emptyReason ?? emptyReason(for: platform)
         }
     }
 
@@ -222,6 +262,10 @@ final class HomeViewModel: ObservableObject {
         switch platform {
         case "netease":
             return "网易云每日推荐和推荐新歌都没返回内容（登录后是真每日推荐，未登录退到推荐新歌），请检查网络后重试。"
+        case "qq":
+            // r31-daily：QQ 也有登录分支的诚实文案（旧写法只有网易分支，
+            // 其余全走一句通用话，未登录的用户看不出要登录）。
+            return "QQ 音乐每日推荐和雷达推荐都没返回内容（登录后是真每日推荐，未登录只有雷达推荐），请检查网络后重试。"
         default:
             return "该平台今日没有返回推荐内容。"
         }
@@ -238,7 +282,9 @@ final class HomeViewModel: ObservableObject {
 
     /// 切来源（菜单点选唯一入口；点当前来源也触发一次该栏拉取，
     /// 喜欢栏不缓存、每次切回都重拉，见 `loadRailPage`）。
+    /// 切来源时关掉面板内打开的歌单/专辑（r31），回到该来源列表。
     func selectSource(_ page: HomeRailPage) {
+        closeOpened()
         selectedSource = page
         loadRailPage(page)
     }
@@ -255,23 +301,16 @@ final class HomeViewModel: ObservableObject {
 
     /// 该栏在面板里显示的条目（groupHeader 不可点，只做分组说明）。
     /// - 每日推荐：不在这里取（走修好的 loadDaily 链路）。
-    /// - 用户收藏 / 用户创建的歌单：共用 railMyPlaylists 一份结果再分组。
-    ///   网易按 subscribed 分两组（groupHeader「我创建的歌单 / 我收藏的歌单」
-    ///   切分；只有一组时：只有自建组才带 header，没有 header 的一组必是收藏，
-    ///   见 RailsBridge.railMyPlaylists）；其余平台接口不分自建与收藏，
-    ///   两页就是同一份混列（不编假分组），面板底部用脚注如实说明
-    ///   （见 `isMixedPlaylistsPage(_:)`）。
+    /// - 我的歌单：网易按 subscribed 分两组，只取「我创建的歌单」那组
+    ///   （groupHeader 切分；其余平台 railMyPlaylists 已按 subscribed /
+    ///   isOwned 标记只留自建，直接取全量）。
     func railEntries(for page: HomeRailPage) -> [RailEntry] {
         guard let result = railResults[page] else { return [] }
-        guard page == .collections || page == .created else { return result.entries }
+        guard page == .created else { return result.entries }
         guard selectedPlatform == "netease" else { return result.entries }
         let entries = result.entries
         let mineIdx = entries.firstIndex(where: isMineGroupHeader)
         let subIdx = entries.firstIndex(where: isSubGroupHeader)
-        if page == .collections {
-            if let subIdx { return Array(entries[subIdx...]) }
-            return mineIdx == nil ? entries : []
-        }
         if let mineIdx {
             return Array(entries[mineIdx..<(subIdx ?? entries.endIndex)])
         }
@@ -279,49 +318,26 @@ final class HomeViewModel: ObservableObject {
     }
 
     /// 该栏的空态文案（面板内显示）：结果本身的 emptyReason 优先；
-    /// 网易自建/收藏分组切完后某组为空时，给该组的诚实原因（不是取数失败）。
+    /// 网易自建分组切完后为空时，给该组的诚实原因（不是取数失败）。
     /// 结果还没回来时返回 nil（调用方先看加载态）。
     func railEmptyReason(for page: HomeRailPage) -> String? {
         guard let result = railResults[page] else { return nil }
         if let reason = result.emptyReason { return reason }
         if result.entries.isEmpty { return "这一栏没有内容。" }
-        if (page == .collections || page == .created),
-           selectedPlatform == "netease", railEntries(for: page).isEmpty {
-            return page == .created ? "还没有创建歌单。" : "还没有收藏歌单。"
+        if page == .created, selectedPlatform == "netease", railEntries(for: page).isEmpty {
+            return "还没有创建歌单。"
         }
         return nil
-    }
-
-    /// 自建/收藏两页在非网易平台是同一份混列（接口不分）：
-    /// 面板底部脚注如实说明。网易（真分组）与 Apple Music（自带
-    /// 「官方热门歌单（非本人收藏）」说明卡）不显示。
-    func isMixedPlaylistsPage(_ page: HomeRailPage) -> Bool {
-        guard page == .collections || page == .created,
-              selectedPlatform != "netease",
-              let result = railResults[page],
-              !result.entries.isEmpty,
-              !result.entries.contains(where: {
-                  if case .groupHeader = $0 { return true }
-                  return false
-              })
-        else { return false }
-        return true
     }
 
     /// 首次访问该栏时拉取，之后用缓存（喜欢栏除外：本地星标一点就变，
     /// 壳版 renderRailNode 同款不缓存——每次切回喜欢栏都重拉）。
     /// 每栏加载/失败/空态走 RailDetailView 同款三态（RailResult.error /
-    /// emptyReason，文案由 RailsBridge 原样给）。自建/收藏共用一份
-    /// railMyPlaylists：另一页已取到就直接复用，不再发一次请求。
+    /// emptyReason，文案由 RailsBridge 原样给）。
     func loadRailPage(_ page: HomeRailPage, force: Bool = false) {
         guard page != .daily else { return }
         if page != .liked, !force, railResults[page] != nil { return }
         if railLoadingPages.contains(page) { return }
-        if (page == .collections || page == .created),
-           let other = railResults[page == .collections ? .created : .collections] {
-            railResults[page] = other
-            return
-        }
         railLoadingPages.insert(page)
         Task {
             let fetched: RailResult
@@ -333,7 +349,7 @@ final class HomeViewModel: ObservableObject {
                 fetched = await NativeBridge.railFeatured(platform: selectedPlatform)
             case .liked:
                 fetched = await NativeBridge.railLiked(platform: selectedPlatform)
-            case .collections, .created:
+            case .created:
                 fetched = await NativeBridge.railMyPlaylists(platform: selectedPlatform)
             case .radio:
                 fetched = await NativeBridge.railRadio(platform: selectedPlatform)
@@ -344,14 +360,88 @@ final class HomeViewModel: ObservableObject {
                 railLoadingPages.remove(page)
                 return
             }
-            if page == .collections || page == .created {
-                railResults[.collections] = fetched
-                railResults[.created] = fetched
-            } else {
-                railResults[page] = fetched
-            }
+            railResults[page] = fetched
             railLoadingPages.remove(page)
         }
+    }
+
+    // MARK: - 面板内打开歌单 / 专辑（r31）
+
+    /// 面板内打开的歌单（点「我的歌单」/「我喜欢」里的歌单卡后，面板原地
+    /// 换成该歌单的全部歌曲卡片，不跳详情页；`nil` = 没打开歌单）。
+    @Published var openedPlaylist: Playlist?
+    /// 面板内打开的专辑（同上，点专辑卡后原地换成专辑全部歌曲卡片）。
+    @Published var openedAlbum: Album?
+    /// 打开的集合的全部曲目（全量取数，见 `openPlaylist` / `openAlbum`）。
+    @Published var openedTracks: [Track] = []
+    /// 打开的集合的标题（歌单名 / 专辑名，面板内打开态的栏头用）。
+    @Published var openedTitle = ""
+    /// 打开的集合正在拉取曲目。
+    @Published var openedLoading = false
+    /// 打开的集合拉取失败的原因（nil = 没失败）。
+    @Published var openedError: String?
+    /// 打开的集合拉取成功但没有曲目时的诚实原因（nil = 有曲目或未取完）。
+    @Published var openedEmptyReason: String?
+
+    /// 是否正打开着一个歌单或专辑（面板显示集合曲目而不是来源列表）。
+    var isOpenedCollection: Bool { openedPlaylist != nil || openedAlbum != nil }
+
+    /// 点歌单卡：在面板内打开它，显示全部歌曲卡片（曲目走
+    /// `railPlaylistTracks` 全量翻页取数，50 首以上也不截断）。
+    func openPlaylist(_ playlist: Playlist) {
+        openedPlaylist = playlist
+        openedAlbum = nil
+        openedTitle = playlist.title
+        openedTracks = []
+        openedError = nil
+        openedEmptyReason = nil
+        openedLoading = true
+        Task {
+            let result = await NativeBridge.railPlaylistTracks(platform: playlist.source, playlist: playlist)
+            guard openedPlaylist?.id == playlist.id, openedPlaylist?.source == playlist.source else { return }
+            openedLoading = false
+            if let error = result.error {
+                openedError = error
+            } else if let reason = result.emptyReason {
+                openedEmptyReason = reason
+            } else {
+                openedTracks = result.tracks
+            }
+        }
+    }
+
+    /// 点专辑卡：在面板内打开它，显示全部歌曲卡片（曲目走 `albumDetail`；
+    /// 网易/酷我/QQ/酷狗/波点有专辑取曲接口，汽水/Apple Music 没有，
+    /// 取不到时按诚实空态显示，不编曲目）。
+    func openAlbum(_ album: Album) {
+        openedAlbum = album
+        openedPlaylist = nil
+        openedTitle = album.title
+        openedTracks = []
+        openedError = nil
+        openedEmptyReason = nil
+        openedLoading = true
+        Task {
+            let detail = await NativeBridge.albumDetail(platform: album.source, id: album.id)
+            guard openedAlbum?.id == album.id, openedAlbum?.source == album.source else { return }
+            openedLoading = false
+            if detail.tracks.isEmpty {
+                openedEmptyReason = "这张专辑没有曲目"
+            } else {
+                openedTracks = detail.tracks
+            }
+        }
+    }
+
+    /// 关掉面板内打开的歌单/专辑，回到该来源列表（返回键 / 切来源 / 切台时调）。
+    func closeOpened() {
+        openedPlaylist = nil
+        openedAlbum = nil
+        openedTracks = []
+        openedTitle = ""
+        openedLoading = false
+        openedError = nil
+        openedEmptyReason = nil
     }
 
     private func isMineGroupHeader(_ entry: RailEntry) -> Bool {
@@ -389,14 +479,13 @@ final class HomeViewModel: ObservableObject {
     }
 }
 
-/// 每日推荐面板的 6 个来源（r28 定稿顺序，用户 2026-11-21 01:21–01:38 确认；
-/// r30：上下翻页器撤掉，改点平台条标题弹菜单切来源，一次只显示一个来源）。
-/// 「用户收藏」与「用户创建的歌单」共用 railMyPlaylists 一个取数口
-/// （见 `HomeViewModel.railEntries(for:)` 的分组说明）。
+/// 每日推荐面板的 5 个来源（r28 定稿顺序，用户 2026-11-21 01:21–01:38 确认；
+/// r30：上下翻页器撤掉，改点平台条标题弹菜单切来源，一次只显示一个来源；
+/// r31：用户 2026-11-21 06:02 决定删掉「用户收藏」（数据并进「我喜欢」），
+/// 「用户创建的歌单」改名「我的歌单」）。
 enum HomeRailPage: Int, CaseIterable {
     case daily = 0
     case featured
-    case collections
     case liked
     case created
     case radio
@@ -406,9 +495,8 @@ enum HomeRailPage: Int, CaseIterable {
         switch self {
         case .daily: return "每日推荐"
         case .featured: return "精选"
-        case .collections: return "用户收藏"
         case .liked: return RailKind.likedTitle(for: platform)
-        case .created: return "用户创建的歌单"
+        case .created: return "我的歌单"
         case .radio: return "电台"
         }
     }
@@ -418,14 +506,14 @@ enum HomeRailPage: Int, CaseIterable {
         switch self {
         case .daily: return nil
         case .featured: return .featured
-        case .collections, .created: return .playlists
+        case .created: return .playlists
         case .liked: return .liked
         case .radio: return .radio
         }
     }
 
     /// 来源在菜单里的序号（1-based；r30：栏头「n/6」已随翻页器撤掉，
-    /// 序号只留作来源顺序的事实来源，不再显示）。
+    /// r31 起是 5 个来源，序号只留作来源顺序的事实来源，不再显示）。
     var position: Int { rawValue + 1 }
 }
 

@@ -190,18 +190,11 @@ targets:
       # ../assets/fonts/ 字体放 Resources/assets/fonts/，与 stages/
       # 平级，相对路径原样解析。
       - Sources/LiziNative/Resources/assets
-      - Sources/LiziNative/Resources/LXSponsored
-      # 赞助版 LX 源：构建机上由 secret LX_SPONSORED_URL 拉取的 linglan.js
-      #（见 workflow ipa-native job「Fetch sponsored LX source script」），
-      # 目录进包后原生侧按 Bundle 子目录 LXSponsored 找。目录本地只有
-      # .gitkeep 占位（构建机上拉取步骤会写入 linglan.js）；secret 未配
-      # 时目录为空，原生侧静默不注册该源。
     # 资源目录按结构进包（r19 验包发现）：XcodeGen 2.46 把 resources 里的目录
-    # 逐文件平拷进包根——run 44570863360 的包里 stages/GalleryHTML/assets/
-    # LXSponsored 全是平的，StageBridge 的 subdirectory:"stages" 查不到、
-    # GalleryHTML 的 ../../stages/ 与 ../vendor/ 全断、linglan.js 因不在
-    # LXSponsored/ 子目录下注册不上。照抄壳版「Copy public frontend」的做法，
-    # 用 post-build 脚本把 4 个目录按结构拷进 .app。舞台的包根平拷由本脚本
+    # 逐文件平拷进包根——run 44570863360 的包里 stages/GalleryHTML/assets
+    # 全是平的，StageBridge 的 subdirectory:"stages" 查不到、
+    # GalleryHTML 的 ../../stages/ 与 ../vendor/ 全断。照抄壳版「Copy public frontend」的做法，
+    # 用 post-build 脚本把 3 个目录按结构拷进 .app。舞台的包根平拷由本脚本
     # 末尾的 find 删掉（只留 index.html）；其余平拷留着——Fraunces 还要靠
     # 包根的平拷进 UIAppFonts，其余平拷文件只是占体积。
     postBuildScripts:
@@ -211,11 +204,10 @@ targets:
           set -e
           APP="$TARGET_BUILD_DIR/$PRODUCT_NAME.app"
           SRC="$SRCROOT/Sources/LiziNative/Resources"
-          rm -rf "$APP/stages" "$APP/GalleryHTML" "$APP/assets" "$APP/LXSponsored"
+          rm -rf "$APP/stages" "$APP/GalleryHTML" "$APP/assets"
           cp -R "$SRC/stages" "$APP/stages"
           cp -R "$SRC/GalleryHTML" "$APP/GalleryHTML"
           cp -R "$SRC/assets" "$APP/assets"
-          cp -R "$SRC/LXSponsored" "$APP/LXSponsored"
           # 去重：包根的舞台 html 平拷来自 sources: 的 `Sources/LiziNative`
           # 整目录 glob（XcodeGen 把该目录下的非代码文件自动收进包根），不是
           # resources 条目，删 resources 条目删不掉，只能在这里删。只删包根
@@ -234,6 +226,11 @@ targets:
         # NSSupportsLiveActivities 双写惯例：构建设置 + 下面 info.properties
         # 各写一遍，值一致。
         INFOPLIST_KEY_NSAppleMusicUsageDescription: "Apple Music 登录与整首播放需要访问你的 Apple Music 资料"
+        # r31-120hz：iPhone ProMotion 不加这个 key，Core Animation 全锁 60Hz
+        #（CADisplayLink 回调与 CAAnimation / SwiftUI 动画都上不了 120）；
+        # iPad 不需要这个 key。按上面双写惯例：构建设置 + 下面
+        # info.properties 各写一遍，值一致。
+        INFOPLIST_KEY_CADisableMinimumFrameDurationOnPhone: "YES"
     info:
       # info.path 是 XcodeGen 必填项（缺了整个 spec 解码失败，run 44537599094
       # 证实）——它不是「读磁盘上已有的 plist」，而是 XcodeGen 生成工程时
@@ -254,6 +251,10 @@ targets:
         # 系统弹授权框前直接杀进程（SIGABRT），StoreKit 兜底路同样崩；
         # 构建设置里再写一遍（INFOPLIST_KEY_…），双保险，值一致。
         NSAppleMusicUsageDescription: "Apple Music 登录与整首播放需要访问你的 Apple Music 资料"
+        # r31-120hz：ProMotion 解锁（见上面 settings 注释）：iPhone 上缺
+        # 这个 key，跑马带 / 3D 环 / 滚动 / SwiftUI 动画全锁 60Hz；
+        # 构建设置里再写一遍（INFOPLIST_KEY_…），双保险，值一致。
+        CADisableMinimumFrameDurationOnPhone: true
         # P3-D 打磨：Fraunces 随包字体注册（族名 Fraunces；文件见
         # Sources/LiziNative/Fonts/，resources 负责拷进包）。
         # 字体进包后 DesignTokens.liziDisplay 用 Font.custom("Fraunces")。

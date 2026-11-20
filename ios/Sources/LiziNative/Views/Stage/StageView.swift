@@ -38,12 +38,16 @@ import SwiftUI
 /// - 返回一律回首页；设置齿轮开本形态设置浮层（只有形态声明了
 ///   `__stagePanel` 才显示）；九宫格开形态下拉浮层（r26：两个都是盖在
 ///   当前舞台画面上的就地浮层，不跳页、不停歌，点外面收起，互斥）。
-/// - HUD 闲置 2.6 秒自动藏起（桥里 `startHudTimer`），藏起后非相机形态
-///   点一下屏幕就唤醒（全屏透明唤醒层，壳版 `#stage-tap` 同款）；相机形态
-///   不盖点屏层（拖动镜头不受影响），所以只在相机形态下保留「显示控制」
-///   小按钮作唤回入口（见 `wakeButton`），其余形态藏起后底部什么也不剩。
-/// - 相机形态（552 烟雨江南）：播放胶囊默认收起成封面 + 播放键，点封面展开
-///   （旧 bottomHUD 的收起态语义，原样搬进中央胶囊）。
+/// - HUD 闲置 2.6 秒自动藏起（桥里 `startHudTimer`），藏起后点一下屏幕
+///   就唤醒：非相机形态是全屏透明唤醒层（壳版 `#stage-tap` 同款）；
+///   相机形态（552 烟雨江南）不盖这层（会吃掉拖动手势），改走挂在 webView
+///   上的轻点识别器（见 StageWebViewCoordinator：只认轻点，拖动照常进
+///   形态）。r31 以前相机形态靠底部「显示控制」药丸唤回，药丸已删
+///   （用户 06:18），HUD 藏起后底部什么也不剩，所有形态一致。
+/// - 播放胶囊所有形态同一套：封面 + 歌名/歌手 + 上一首/播放/下一首 +
+///   进度条，不再有相机形态默认收起（只剩封面 + 播放键）的特殊态——
+///   r31 以前 552 默认收起，用户报控制行「只显示暂停」，与其它形态对齐
+///   后删掉了收起态（`pillExpanded` / `wakeButton` 一并删）。
 /// - 播放 / 暂停 / 切歌 / 进度 seek 接原来的 store 调用，一个不少；
 ///   无曲目时控制禁用，歌名「未播放」、副标题「—」，不编假数据。
 /// - 歌词行变化只读同一份 store（`PlaybackStore.currentLyricIndex`），
@@ -58,8 +62,6 @@ struct StageView: View {
 
     @State private var showPicker = false
     @State private var showSettings = false
-    /// 相机形态下播放胶囊默认收起；普通形态默认展开。
-    @State private var pillExpanded = true
     /// 进度条拖动态（拖动中显示拖动值、松手才 seek，与旧 Slider 的做法一致）。
     @State private var isDraggingProgress = false
     @State private var dragProgress: Double = 0
@@ -141,7 +143,9 @@ struct StageView: View {
 
                 // HUD 藏起时：全屏透明唤醒层（壳版 `#stage-tap` 同款——点一下只唤醒
                 // 浮层，不往形态里传；相机形态不盖这层，拖动镜头不受影响，
-                // 相机形态改走底部「显示控制」药丸唤回，见 wakeButton）。
+                // 相机形态改走 webView 上的轻点识别器唤醒，见
+                // StageWebViewCoordinator；r31 以前相机形态靠底部药丸唤回，
+                // 药丸已删，所有形态都不再有「显示控制」）。
                 if !bridge.hudVisible, !bridge.isCamera {
                     Color.clear
                         .contentShape(Rectangle())
@@ -167,13 +171,9 @@ struct StageView: View {
                         // 左下角字块下方预留屏高约 18%：字块顶落在约 75% 高处，
                         // 与截图一致，且不压到 519 自带的屏底 #meta。
                         Spacer().frame(height: geo.size.height * tokens.captionBottomReserve)
-                    } else if bridge.isCamera {
-                        // r28：非相机形态 HUD 藏起后点屏唤醒，底部不再留
-                        // 「显示控制」药丸；相机形态没有点屏唤醒层（拖镜头
-                        // 不受影响），只在相机形态下保留药丸作唤回入口，
-                        // 否则相机形态 HUD 藏起后回不来（见 wakeButton）。
-                        wakeButton(safeArea: geo.safeAreaInsets)
                     }
+                    // r31：HUD 藏起后底部什么也不剩（所有形态一致）。相机形态
+                    // 的唤回靠 webView 上的轻点识别器，不再有底部药丸。
                 }
                 .ignoresSafeArea()
             }
@@ -197,13 +197,9 @@ struct StageView: View {
             bridge.attach(store: store)
             let playback = store
             bridge.onSpaceKey = { Task { @MainActor in playback.togglePlay() } }
-            if bridge.isCamera { pillExpanded = false }
         }
         .onDisappear {
             bridge.detach()
-        }
-        .onChange(of: bridge.isCamera) { camera in
-            if camera { pillExpanded = false }
         }
         .onChange(of: showPicker) { open in
             bridge.hudSuspended = open || showSettings
@@ -359,31 +355,29 @@ struct StageView: View {
     }
 
     /// 横屏居中播放胶囊（v5：只横屏用，竖屏改走顶行紧凑胶囊）：
-    /// 取 min(档位理想宽, 内容宽)，相机收起态按内容宽；本体
-    /// `playerCapsule` 一字不动，只换了挂载位置（r28 竖直中央 → v5 顶行）。
+    /// 取 min(档位理想宽, 内容宽)；本体 `playerCapsule` 一字不动，只换了
+    /// 挂载位置（r28 竖直中央 → v5 顶行）。r31：删掉了相机收起态的按内容
+    /// 宽（胶囊不再收起，所有形态同一宽）。
     @ViewBuilder
     private func centeredPlayerCapsule(tokens: StageTokens, geo: GeometryProxy) -> some View {
         // 只横屏调用（topRow 已按横竖屏分流）；竖屏走顶行紧凑胶囊。
         let insets = geo.safeAreaInsets
         let contentW = geo.size.width - insets.leading - insets.trailing - tokens.sideMargin * 2
-        let collapsed = bridge.isCamera && !pillExpanded
-        let collapsedWidth = tokens.coverSize + 10 + tokens.playButtonFrame + tokens.capsuleHPadding * 2
-        let capsuleW: CGFloat = collapsed
-            ? collapsedWidth
-            : min(tokens.idealCapsuleWidthLandscape, contentW)
+        let capsuleW: CGFloat = min(tokens.idealCapsuleWidthLandscape, contentW)
         playerCapsule(tokens: tokens, width: capsuleW)
     }
 
     // MARK: - 播放胶囊（封面 + 歌名/歌手 + 上一首/播放/下一首 + 进度条）
 
     /// 播放胶囊。`width` 为 nil 时自适应（竖屏顶行里撑满剩余宽）；
-    /// 横屏传算好的固定宽。相机形态收起态只剩封面 + 播放键。
+    /// 横屏传算好的固定宽。r31：所有形态同一套完整胶囊——相机形态
+    /// 默认收起（只剩封面 + 播放键）已删，控制行永远是上一首/播放/
+    /// 下一首 + 进度条（用户报 552「只显示暂停」，就是收起态）。
     /// `compact`（v5 竖屏顶行）：内部尺寸走 `top*` 紧凑档（封面/字号/
     /// 三键各缩一档），进度条只留细条不带时间——与 v5 图一致，也是不带
     /// 时间才能在 208pt 槽位里放下 5 字歌名的原因；拖动 seek 不变。
     /// 副标题只写歌手（r29 task 8），歌名只在标题出现一次，这里不改。
     private func playerCapsule(tokens: StageTokens, width: CGFloat?, compact: Bool = false) -> some View {
-        let collapsed = bridge.isCamera && !pillExpanded
         let cover = compact ? tokens.topCoverSize : tokens.coverSize
         let titleF = compact ? tokens.topTitleFont : tokens.titleFont
         let artistF = compact ? tokens.topArtistFont : tokens.artistFont
@@ -394,55 +388,46 @@ struct StageView: View {
         let hPad = compact ? tokens.topCapsuleHPadding : tokens.capsuleHPadding
         let vPad = compact ? tokens.topCapsuleVPadding : tokens.capsuleVPadding
         return HStack(spacing: compact ? 8 : 10) {
-            // 封面（相机形态收起态：点封面展开完整胶囊）。
-            Button(action: {
-                bridge.wakeHUD()
-                if bridge.isCamera { pillExpanded.toggle() }
-            }) {
-                CoverImageView(url: store.currentTrack?.coverURL, placeholderIconSize: 16)
-                    .frame(width: cover, height: cover)
-                    .clipShape(RoundedRectangle(cornerRadius: tokens.coverCornerRadius))
-            }
-            .accessibilityLabel(bridge.isCamera ? (pillExpanded ? "收起播放器" : "展开播放器") : "封面")
+            // 封面（r31：只是封面，不再是按钮——原来相机形态点封面展开/
+            // 收起胶囊，收起态已删，封面不再承担开关）。
+            CoverImageView(url: store.currentTrack?.coverURL, placeholderIconSize: 16)
+                .frame(width: cover, height: cover)
+                .clipShape(RoundedRectangle(cornerRadius: tokens.coverCornerRadius))
+                .accessibilityLabel("封面")
 
-            if collapsed {
-                Spacer()
-                playButton(tokens: tokens, frame: playF, iconSize: playI)
-            } else {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(store.currentTrack?.title ?? "未播放")
-                                .font(.system(size: titleF, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .lineLimit(1)
-                            Text(trackSubtitle)
-                                .font(.system(size: artistF))
-                                .foregroundStyle(.white.opacity(0.75))
-                                .lineLimit(1)
-                        }
-                        .frame(minWidth: 20, alignment: .leading)
-
-                        Spacer(minLength: 6)
-
-                        transportButton(tokens: tokens,
-                                        systemName: "backward.fill",
-                                        iconSize: skipI,
-                                        frame: skipF,
-                                        label: "上一首") { store.previous() }
-                        playButton(tokens: tokens, frame: playF, iconSize: playI)
-                        transportButton(tokens: tokens,
-                                        systemName: "forward.fill",
-                                        iconSize: skipI,
-                                        frame: skipF,
-                                        label: "下一首") { store.next() }
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(store.currentTrack?.title ?? "未播放")
+                            .font(.system(size: titleF, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Text(trackSubtitle)
+                            .font(.system(size: artistF))
+                            .foregroundStyle(.white.opacity(0.75))
+                            .lineLimit(1)
                     }
+                    .frame(minWidth: 20, alignment: .leading)
 
-                    if compact {
-                        progressScrubber()
-                    } else {
-                        progressRow(tokens: tokens)
-                    }
+                    Spacer(minLength: 6)
+
+                    transportButton(tokens: tokens,
+                                    systemName: "backward.fill",
+                                    iconSize: skipI,
+                                    frame: skipF,
+                                    label: "上一首") { store.previous() }
+                    playButton(tokens: tokens, frame: playF, iconSize: playI)
+                    transportButton(tokens: tokens,
+                                    systemName: "forward.fill",
+                                    iconSize: skipI,
+                                    frame: skipF,
+                                    label: "下一首") { store.next() }
+                }
+
+                if compact {
+                    progressScrubber()
+                } else {
+                    progressRow(tokens: tokens)
                 }
             }
         }
@@ -576,28 +561,9 @@ struct StageView: View {
         .padding(.trailing, tokens.sideMargin)
     }
 
-    /// 「显示控制」药丸（r28：只在相机形态下保留）。非相机形态 HUD 藏起后
-    /// 点一下屏幕就唤醒（全屏透明唤醒层），不再需要它；相机形态不盖点屏层
-    /// （拖动镜头不受影响），且桥的 `activity` 回调在相机形态下不唤醒 HUD、
-    /// `startHudTimer` 照常 2.6 秒藏 HUD，所以药丸是相机形态下唤回控制栏
-    /// 的唯一入口——删了它，相机形态 HUD 藏起后就回不来了。点一下唤醒 HUD，
-    /// 不往形态里传。
-    private func wakeButton(safeArea: EdgeInsets) -> some View {
-        Button(action: { bridge.wakeHUD() }) {
-            HStack(spacing: 6) {
-                Image(systemName: "chevron.up")
-                    .font(.system(size: 13, weight: .semibold))
-                Text("显示控制")
-                    .font(.system(size: 13, weight: .medium))
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(.ultraThinMaterial, in: Capsule())
-        }
-        .accessibilityLabel("显示控制栏")
-        .padding(.bottom, safeArea.bottom + 24)
-    }
+    // r31：「显示控制」药丸已删（用户 06:18）。相机形态 HUD 藏起后的唤回
+    // 改走 webView 上的轻点识别器（见 StageWebViewCoordinator），不再有
+    // 底部药丸；`wakeButton` 整个函数随药丸一起删掉了。
 
     // MARK: - 派生文案
 

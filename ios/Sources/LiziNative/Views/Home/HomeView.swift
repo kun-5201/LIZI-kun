@@ -49,6 +49,36 @@ import UIKit
 ///   sourceContent、驱动不重建，切来源后 offset 不归零、不重停 2.5s，
 ///   接着滚。3D 环还是只手滑展开、不自动开，不动。
 ///
+/// r31 后续（用户 2026-11-21 06:02–06:05，四件同区落地，见
+/// HomeViewModel.swift 文件头 r31 节）：来源剩 5 项，「用户收藏」删掉
+/// （数据并进「我喜欢」）、「用户创建的歌单」改名「我的歌单」（只留自建）；
+/// 混列脚注随分流撤掉（各家现按 subscribed / isOwned 标记真分自建与收藏，
+/// 不再是同一份混列）；「我的歌单」/「我喜欢」里的歌单或专辑卡点后在
+/// 面板内打开（`RailSourceListView.openedView`：该集合全部歌曲卡片，
+/// 跑马带同驱动同速接着滚，返回键回列表），其余来源的歌单卡仍进详情页。
+///
+/// r31-marquee（用户 2026-11-21 06:25「跑马带里的卡片现在是卡着的，
+/// 不会一直向左滑」）：根因两处，都在本文件的 rail 驱动 + 两处代理
+/// （环平面带见 HomeCoverRingView.swift 文件头 r31-marquee 节）：
+/// 1. 硬停：`RailMarqueeDriver.isDragging` 只有一个出口
+///    （DragGesture.onEnded）；手势被打断（切来源/切平台/打开歌单时
+///    视图被拆、App 切后台、来电、滚动接管）时 onEnded 到不了，旗子
+///    永远卡住、带子永远停——r26 每日带就是这副样子，本轮 rail 驱动
+///    照抄了 r26 之前没看门狗的形状。修法（只动驱动）：linkFired 里
+///    加 10s 看门狗（与环 `tickFlat` 同款）+ 视图被拆时
+///    `dragCancelled()`（`RailMarqueeView.onDisappear` 调，不推 dwell）。
+///    第二推（登录态）查过：它没碰驱动（没调 start / 没写 isDragging /
+///    没停 display link），只改了来源数与面板内打开——但面板内打开
+///    多了一条视图拆建路径，让本来的单出口更容易撞上。
+/// 2. 一卡一卡：两处代理回调都经 `Task { @MainActor in }` 跳主线程——
+///    display link 已挂在 RunLoop.main 上，回调本身就在主线程；每帧
+///    一个 Task 让步长在任务队列里扎堆（几帧的量一次走完、再空几帧），
+///    dt 还是在 Task 里读的 link.timestamp（已更新的戳）。r31 第一推
+///    文件头写的是「去掉 Task 跳线程」，代码里其实还留着，本轮才真去掉：
+///    代理直接调 tick（`MainActor.assumeIsolated`，link 只加在 .main 上，
+///    回调只可能在主线程）。速度 24px/s、dt 夹 0.1s、回卷归一化、
+///    初画 2.5s、松手 1.2s 一律不动。驱动见 verification/r31-marquee.cjs。
+///
 /// r28（用户 2026-11-21 01:52：39.6s 套壳视频逐帧重做，见
 /// verification/shell-video-39s-home-3d.md；另 01:57「环只手滑展开」、
 /// 01:58「面板跟专辑取色」两条澄清）：
@@ -122,6 +152,40 @@ import UIKit
 ///
 /// 设置齿轮的决定（P3-C）：点按进设置页（AppNavigation.settings），
 /// P1 的空态提示横幅已撤掉。
+///
+/// r31-landscape（用户 2026-11-21 06:29 横屏卡死 + 06:30 竖屏卡片滑不到顶，
+/// 06:30 确认是同一个问题；06:31 截图：竖屏 Hero「复刻回忆」在顶、面板两张
+/// 大卡「尚可」「山楂树の恋」，再往上滑就顶住、卡片上不去）：
+/// 唯一根因——首页外层 ScrollView 滚不动，卡在面板那一层，两件都是它：
+/// 1. 手势被抢（主因，横屏卡死与竖屏顶住都是它）：`dailyRingContent` 里
+///    包了一层竖向 ScrollView（面板内竖滑）。同向嵌套 ScrollView，
+///    面板里的竖向拖动全被内层吃掉，外层一次都轮不到——SwiftUI/UIKit
+///    里内层滚动视图的 pan 优先认领同一根触摸，外层 pan 被取消。
+///    `StripTouchView` 的 `shouldBeRequiredToFailBy`（HomeCoverRingView，
+///    未动）还让外层 pan 必须等环触摸层先失败，内层 pan 判向失败后先
+///    认领，等于判了外层死刑。竖屏内层根本滚不动：环内容 283pt <
+///    面板窗 331pt，行程 0，手指在卡片上一滑只剩内层回弹；
+///    横屏内层先滚完自己的 255.5pt 才停，外层始终不动——页面看着卡死。
+///    不是主线程堵：跑马带 CADisplayLink 每帧只改 0.4px offset，
+///    取色 32×32/k=4 只在切歌时跑一次；卡住的位置是确定的（内层行程
+///    尽头 / 最大偏移），不是随机卡顿。
+/// 2. 行程不够（竖屏「滑不到顶」差的那一段）：竖屏 390×844 标准档，
+///    面板顶滑到顶栏下要 218.3pt 偏移，内容只比视口高 112.3pt——
+///    哪怕手势修好，卡片也只能到半屏（面板顶停在 y≈201），到不了顶。
+///    402×874 差 136pt；横屏 844×390 行程够（236 > 203.5），不差。
+/// 修法（只动本文件，两处，都在外层 ScrollView 这一条线上）：
+/// ① 拆掉 `dailyRingContent` 的内层竖向 ScrollView，竖滑归外层整页
+///    （r30 定好的意图当时没做到，这次做实）；面板框加顶对齐
+///    （`.frame(…, alignment: .top)`），环内容超出横屏面板窗的部分
+///    由面板圆角裁掉（模板原意「齐底边裁断」），平台条钉在面板顶不动。
+///    拆完后环触摸层竖向判向失败照常交还——这次交还的对象只剩外层，
+///    页面接着滚；横向仍开环、点按仍播歌，环手势不动。
+/// ② 底部留白改成 `homeBottomPad`（底数 50 不变）：量到外层内容实高后
+///    按公式重算，行程不够就补底边距凑到「面板顶 + 8pt 越过量」，
+///    行程够了缩回 50（幂等，不震荡；旋转/本地音乐展开后自动重算）。
+///    390×844 → 164.0，402×874 → 194.0，横屏 → 50 不变。
+///    竖屏 Hero / 面板高度、尺寸分档、取色、本地音乐、两卡拖动、
+///    跑马带速度一律不动。驱动见 verification/r31-landscape.cjs。
 struct HomeView: View {
     @EnvironmentObject var playback: PlaybackStore
     @EnvironmentObject var nav: AppNavigation
@@ -170,6 +234,20 @@ struct HomeView: View {
     @State private var heroFractionLandscape: CGFloat = HomeView.loadHeroFraction(landscape: true)
     /// 正在拖分界手柄：外层 ScrollView `.scrollDisabled(dragging)` 停滚。
     @State private var dividerDragging = false
+    /// r31-landscape：首页底部留白（不是固定 50，见 body 里
+    /// `.onPreferenceChange(HomeContentHeightKey.self)` 的重算）：
+    /// 底数 50 = 16 净空 + 34 Home Indicator（r28 原值）；行程不够时
+    /// 在此基础上补——面板顶要滑到顶栏下，需要 gapTop + heroH + gapMid
+    /// 的偏移，内容不够高就补底边距凑行程（见根因注释，文件头 r31 节）。
+    @State private var homeBottomPad: CGFloat = 50
+    /// r31-landscape：外层 ScrollView 内容实高（见 body 里
+    /// `.background(GeometryReader…preference…)` 的量取点）。
+    private struct HomeContentHeightKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = nextValue()
+        }
+    }
     /// 本次拖动的起始 Hero 高（onChanged 第一次进来时记，松手清掉；
     /// translation 是从手势起点累计的，必须配一个固定的起点算 newHeroH）。
     @State private var dragStartHeroH: CGFloat?
@@ -395,16 +473,49 @@ struct HomeView: View {
                             }
                         }
                         .padding(.top, 24)
-                        // 底部留白 50 = 16 净空 + 34 Home Indicator
-                        // （底部安全区已忽略，见 ignoresSafeArea；滑到底时
-                        // 本地音乐导入钮离 Home Indicator 还有 16pt 净空）。
-                        .padding(.bottom, 50)
+                        // r31-landscape：底部留白是 `homeBottomPad`（底数 50 =
+                        // 16 净空 + 34 Home Indicator，底部安全区已忽略，
+                        // 见 ignoresSafeArea；滑到底时本地音乐导入钮离
+                        // Home Indicator 还有 16pt 净空）。行程不够时
+                        // onPreferenceChange 会把它补大（见 ScrollView 后的
+                        // 重算），让面板顶能滑到顶栏下；行程够了就缩回 50。
+                        .padding(.bottom, homeBottomPad)
                     }
+                    // r31-landscape：量外层内容实高（供 homeBottomPad 重算；
+                    // background 里的 GeometryReader 量的是整个内容 VStack，
+                    // 含底边距，见 onPreferenceChange 里的公式）。
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(key: HomeContentHeightKey.self, value: geo.size.height)
+                        }
+                    )
                 }
                 // r24：拖分界手柄时外层整页 ScrollView 不许跟着滚
                 // （dividerDragging 只在竖向拖动里置 true，松手清掉；
                 // minOS 16.2 可用，本项目已有 LyricsPanelView 同款用法）。
                 .scrollDisabled(dividerDragging)
+                .onPreferenceChange(HomeContentHeightKey.self) { measured in
+                    // r31-landscape：底部留白重算（面板顶能不能滑到顶栏下，
+                    // 就看这一行）。measured 含当前 homeBottomPad；
+                    // 不含底边距的最大偏移 = measured − homeBottomPad − 视口高；
+                    // 面板顶到顶栏下需要 gapTop + heroH + gapMid 的偏移。
+                    // 差多少就把底边距补多少（+8pt 越过量，让面板顶能贴进
+                    // 顶栏下沿）；行程够了就缩回 50。
+                    // 公式是幂等的：补完再算一次得出的还是同一个值，不震荡；
+                    // 内容变高（本地音乐展开/有歌了）或旋转后自动重算。
+                    // 数（390×844 竖屏标准档）：视口 749、面板顶 218.3、
+                    // 不含底边距的最大偏移 62.3 → 底边距 164.0（比 50 多补 114.0）；
+                    // 402×874：底边距 194.0；横屏 844×390：不含底边距的最大偏移
+                    // 已够（186.0，面板顶 203.5 + 8 越过量 = 211.5 < 236.0），
+                    // 底边距仍是 50。见 verification/r31-landscape.cjs §3。
+                    let viewportH = outer.size.height - topPad - topBarH
+                    let maxOffsetWithoutPad = measured - homeBottomPad - viewportH
+                    let need = gapTop + heroH + gapMid
+                    let target = max(50, need - maxOffsetWithoutPad + 8)
+                    if abs(target - homeBottomPad) > 0.5 {
+                        homeBottomPad = target
+                    }
+                }
                 .background(LiziTokens.paper)
             }
             // r21：环的纵向锚点用这个坐标空间量（平面带把自己的 frame 报到
@@ -423,7 +534,8 @@ struct HomeView: View {
         // GeometryReader 原点 = 屏顶、size = 整屏（390×844 档 viewHeight
         // 从 781 变 874，Hero 高随之变，见驱动 2b；sizeTier 只看宽度，
         // 不受影响；"liziHome" 坐标系与环覆盖层同系，相对位置不变）。
-        // 底部留白由内容自己留 50（16 净空 + 34 Home Indicator），
+        // 底部留白由内容自己留（`homeBottomPad`，底数 50 = 16 净空 +
+        // 34 Home Indicator，行程不够时自动补，见 r31-landscape），
         // 不靠系统安全区。
         .ignoresSafeArea(edges: [.top, .bottom])
         .task {
@@ -470,8 +582,8 @@ struct HomeView: View {
     /// 每日推荐铺色面板（壳版 `#hall-plat` 内容；r28：底色是专辑取色渐变，
     /// 见 `panelTone` 与文件尾 `AlbumTone`）：
     /// 圆角 22、内边距 10、底色 tone-a→tone-b→tone-c 对角渐变；
-    /// 只有环在窗内竖滑（横屏面板 140 比内容矮得多；模板里面板封面本来
-    /// 就是齐底边裁断的）。顺序：条 → 内容（r30：栏头已删，条之下直接是
+    /// 环内容超出面板窗的部分从底边裁掉（横屏面板 140 比内容矮得多；
+    /// 模板里面板封面本来就是齐底边裁断的）。顺序：条 → 内容（r30：栏头已删，条之下直接是
     /// 一次一栏的内容区；r28 分页器的栏头/圆点/上下钮/竖滑切栏全撤，
     /// 来源改点条标题弹小菜单切，见 `sourceMenuOverlay`）。
     /// r23h：平台条钉在面板顶、不进竖滑 ScrollView——
@@ -489,6 +601,11 @@ struct HomeView: View {
     /// 点按播歌/进详情；横屏面板只有约 140 高，条占掉大半后 rail 栏
     /// 只剩约一行的位置，「查看全部」进整页看全量，
     /// 见 `RailSourceListView`（原 `HomeRailPageView`）的文件头注释。
+    /// r31-landscape：r30 这句「竖滑归外层 ScrollView」当时并没做到——
+    /// `dailyRingContent` 里还包着一层竖向 ScrollView（面板内竖滑），
+    /// 它才是首页滑不动的根因（见文件头 r31 节），本轮已拆掉；
+    /// r23h 上面那段「多了一层面板内 ScrollView，展开手势是否仍优先」
+    /// 也随之作废：面板里不再有第二层 ScrollView 可争。
     /// r22l 编译修：真类型名是 PlayerTokens.PlayerSizeTier
     ///（PlayerTokens.swift 里 `enum PlayerSizeTier`，r20 约定名），
     /// 之前写的 SizeTier 不存在。
@@ -518,7 +635,12 @@ struct HomeView: View {
                 .transition(.opacity)
         }
         .padding(10)
-        .frame(width: width, height: height)
+        // r31-landscape：顶对齐——环内容比横屏面板窗高（内容 302 >
+        // 窗口 46.5），frame 默认居中会把平台条顶出窗外；顶对齐后
+        // 条钉在面板顶、超出的环内容从底边裁掉（模板原意「齐底边裁断」，
+        // 由下面 clipShape 裁；dailyRingContent 的内层竖滑已拆，
+        // 竖滑归外层整页，见文件头 r31 节）。
+        .frame(width: width, height: height, alignment: .top)
         .background(
             LinearGradient(
                 colors: [panelTone.a, panelTone.b, panelTone.c],
@@ -538,7 +660,7 @@ struct HomeView: View {
     }
 
     /// r30 来源内容：一次只显示一个来源。每日推荐走修好的环/跑马带，
-    /// 其余 5 栏走 rail 卡片跑马带（取数见 `HomeViewModel.loadRailPage`，
+    /// 其余 4 栏走 rail 卡片跑马带（取数见 `HomeViewModel.loadRailPage`，
     /// 首次访问拉取、之后缓存，喜欢栏每次切回都重拉）。
     @ViewBuilder
     private func sourceContent(
@@ -547,7 +669,7 @@ struct HomeView: View {
         switch viewModel.selectedSource {
         case .daily:
             dailyRingContent(tier: tier)
-        case .featured, .collections, .liked, .created, .radio:
+        case .featured, .liked, .created, .radio:
             // r31：卡宽与环平面带同档（compact 180 / standard 190 / large 209，
             // 见 HomeCoverRingModel.flatCard），6 个来源卡片同尺寸；
             // isDark 跟面板取色走；跑马带驱动归 HomeView 所有（切来源不重建）。
@@ -560,8 +682,9 @@ struct HomeView: View {
         }
     }
 
-    /// r30 来源小菜单浮层：标题下 6 行来源（每日推荐 / 精选 / 用户收藏 /
-    /// 喜欢的歌曲 / 用户创建的歌单 / 电台），当前来源打勾；点行切来源并关菜单，
+    /// r30 来源小菜单浮层：标题下 5 行来源（每日推荐 / 精选 /
+    /// 喜欢的歌曲 / 我的歌单 / 电台；r31 起「用户收藏」已删、数据并进
+    /// 「我喜欢」，「用户创建的歌单」改名「我的歌单」），当前来源打勾；
     /// 点菜单外任意处只关菜单。壳版 `#hall-src-menu`（public/index.html
     /// 约 250 行 + hall/option-wheel.js）同款思路：浮层挂在标题下、
     /// 内容由来源列表填、点选切换；原生不用滚轮，用点选列表。
@@ -617,30 +740,37 @@ struct HomeView: View {
     /// 内容是播放队列（非空时）或每日推荐（队列为空时），
     /// 两份都空时不显示。环本身的实现是另一个工人的，
     /// 本轮只动它在面板里的位置，不动 HomeCoverRingView.swift。
+    /// r31-landscape：这里原来包了一层竖向 ScrollView（面板内竖滑），
+    /// 已拆掉——那层就是首页滑不动的根因（见文件头 r31 节）：
+    /// 同向嵌套 ScrollView，面板里的竖向拖动全被它吃掉，外层滚不到；
+    /// 竖屏它根本滚不动（内容 283 < 窗口 331），横屏它先滚完自己的
+    /// 255.5pt 才停，外层一次都轮不到。拆掉后面板内容超出窗的部分
+    /// 由面板圆角裁掉（模板原意「齐底边裁断」），竖滑归外层整页。
     private func dailyRingContent(
         tier: PlayerTokens.PlayerSizeTier
     ) -> some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            HomeCoverRingView(
-                model: ringModel,
-                dailyTracks: viewModel.daily.map { $0.track },
-                isLoadingDaily: viewModel.isLoadingDaily,
-                dailyEmptyReason: viewModel.dailyEmptyReason,
-                marqueeSpeed: viewModel.marqSpeedPxPerSecond,
-                tier: tier,
-                panelIsDark: panelTone.isDark
-            )
-        }
+        HomeCoverRingView(
+            model: ringModel,
+            dailyTracks: viewModel.daily.map { $0.track },
+            isLoadingDaily: viewModel.isLoadingDaily,
+            dailyEmptyReason: viewModel.dailyEmptyReason,
+            marqueeSpeed: viewModel.marqSpeedPxPerSecond,
+            tier: tier,
+            panelIsDark: panelTone.isDark
+        )
     }
 
-    /// r31：面板里 5 个 rail 来源（精选 / 用户收藏 / 喜欢的歌曲 /
-    /// 用户创建的歌单 / 电台）改成与每日推荐同款的横向卡片跑马带
+    /// r31：面板里 4 个 rail 来源（精选 / 喜欢的歌曲 /
+    /// 我的歌单 / 电台；「用户收藏」已删、数据并进「我喜欢」，
+    /// 「用户创建的歌单」改名「我的歌单」）改成与每日推荐同款的横向卡片跑马带
     /// （`RailMarqueeView`），不再是竖向列表。r30 的列表行（曲目 =
     /// TrackRowView 56pt 行，歌单/电台 = 56pt 横行）已删：
     /// - 曲目卡 = 封面 + 歌名 + 歌手（环平面带 FlatRingCard 同款形状，
     ///   卡宽与环同档），点一张播一首（setQueue 整份曲目）；
-    /// - 歌单/电台卡 = 该集合本身（封面 + 名字 + 创建者·数量），
-    ///   点一张进歌单详情 / 电台页，不显示成文字列表；
+    /// - 歌单/专辑/电台卡 = 该集合本身（封面 + 名字 + 创建者·数量），
+    ///   点一张进面板内集合曲目（r31：我的歌单 / 我喜欢里的歌单或专辑卡
+    ///   点后不跳详情页，面板原地换成该集合的全部歌曲卡片，返回键回列表；
+    ///   精选/电台里的歌单卡仍进歌单详情页），不显示成文字列表；
     /// - 分组说明卡（网易「我创建的歌单 / 我收藏的歌单」、Apple Music
     ///   「官方热门歌单（非本人收藏）」、本地星标说明）不是内容，
     ///   不进跑马带（壳版 marq__card--group 同款说明只在详情页出现）；
@@ -657,9 +787,12 @@ struct HomeView: View {
     /// 大半后 rail 栏只剩约一行的位置、其余裁断是模板原意，
     /// 与每日推荐横屏同款。
     /// 点卡行为与 RailDetailView 一致：曲目点播（setQueue 整份曲目，含分组卡
-    /// 之后的全部曲目）、歌单卡进歌单详情页（.playlist 路由）、电台频道卡
-    /// 进电台整页（.rail radio；频道下钻在详情页里点，面板不另做下钻层；
-    /// 波点电台本身就是曲目，点行直接播）。
+    /// 之后的全部曲目）、歌单卡在我的歌单 / 我喜欢里进面板内集合曲目
+    /// （`viewModel.openPlaylist`，r31），其余来源进歌单详情页
+    /// （.playlist 路由）、电台频道卡进电台整页（.rail radio；频道下钻在
+    /// 详情页里点，面板不另做下钻层；波点电台本身就是曲目，点行直接播）。
+    /// 专辑卡（r31：收藏的专辑在「我喜欢」里）点后进面板内专辑曲目
+    /// （`viewModel.openAlbum`）。
     /// 加载/失败/空态走 RailDetailView 同款三态（文案由 RailsBridge 原样给）。
     /// 取数在 `HomeViewModel.loadRailPage`（切到某栏时再拉该栏、首次拉取后缓存，
     /// 喜欢栏每次切回都重拉——本地星标一点就变，壳版同款不缓存）。
@@ -680,7 +813,9 @@ struct HomeView: View {
 
         var body: some View {
             Group {
-                if viewModel.isRailPageLoading(page) || viewModel.railResults[page] == nil {
+                if viewModel.isOpenedCollection {
+                    openedView
+                } else if viewModel.isRailPageLoading(page) || viewModel.railResults[page] == nil {
                     loadingView
                 } else if let error = viewModel.railResults[page]?.error {
                     errorView(error: error)
@@ -691,6 +826,122 @@ struct HomeView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .onAppear {
+                // r31-starred：从播放页点完星标/取消星标回来，喜欢栏要看到
+                // 新状态——喜欢栏不缓存（loadRailPage 每次切回都重拉），
+                // 这里在面板每次出现时也重拉一次喜欢栏；其它栏不动。
+                // 只在已经拉过一次后重拉（首次进入由 selectSource 拉，
+                // 在飞的由 railLoadingPages 守卫挡，不会双拉）。
+                if page == .liked, viewModel.railResults[.liked] != nil {
+                    viewModel.loadRailPage(.liked, force: true)
+                }
+            }
+        }
+
+        // MARK: - 面板内打开的歌单 / 专辑（r31）
+
+        /// 点「我的歌单」/「我喜欢」里的歌单或专辑卡后，面板原地换成该集合的
+        /// 全部歌曲卡片（真封面 + 歌名 + 歌手，点一首就播；跑马带与来源列表
+        /// 同一个驱动、同一速度一直向左滚；没封面用 DefaultCoverArt，见
+        /// `RailMarqueeCardView.coverArt`）。歌多时曲目已全量取数
+        /// （`railPlaylistTracks` / `albumDetail` 翻页取满），带子接着滚，
+        /// 面板竖向可滚看全量——不是只放前几首。返回键回该来源列表。
+        private var openedView: some View {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 8) {
+                    Button(action: { viewModel.closeOpened() }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("返回\(page.title(platform: platform))")
+                        }
+                        .font(.liziBody(size: LiziTokens.size13, weight: .medium))
+                        .foregroundColor(LiziTokens.ink2)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("返回\(page.title(platform: platform))")
+                    Text(viewModel.openedTitle)
+                        .font(.liziBody(size: LiziTokens.size15, weight: .semibold))
+                        .foregroundColor(isDark ? .white : LiziTokens.ink)
+                        .lineLimit(1)
+                    Spacer()
+                    if !viewModel.openedTracks.isEmpty {
+                        Text("共 \(viewModel.openedTracks.count) 首")
+                            .font(.liziBody(size: LiziTokens.size12))
+                            .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
+                    }
+                }
+                .padding(.bottom, 8)
+                if viewModel.openedLoading {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("正在拉取\(viewModel.openedTitle)…")
+                            .font(.liziBody(size: LiziTokens.size13))
+                            .foregroundColor(LiziTokens.ink3)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                } else if let error = viewModel.openedError {
+                    errorView(error: error)
+                } else if let reason = viewModel.openedEmptyReason {
+                    emptyView(reason: reason)
+                } else {
+                    RailMarqueeView(
+                        cards: openedTrackCards,
+                        cardWidth: cardWidth,
+                        isDark: isDark,
+                        driver: marqueeDriver,
+                        speed: viewModel.marqSpeedPxPerSecond
+                    )
+                    .frame(height: cardWidth + 52)
+                    Spacer(minLength: 0)
+                    openedViewAllButton
+                }
+            }
+        }
+
+        /// 打开的集合的全部歌曲卡片：封面 + 歌名 + 歌手，点一张播一首
+        /// （setQueue 整份曲目，从点中的那首起播）。
+        private var openedTrackCards: [RailMarqueeCard] {
+            let tracks = viewModel.openedTracks
+            return tracks.map { track in
+                RailMarqueeCard(
+                    id: "track-\(track.platform)-\(track.id)",
+                    coverURL: track.coverURL,
+                    title: track.title,
+                    subtitle: track.artist,
+                    onTap: { playback.setQueue(tracks, startAt: trackIndex(track, in: tracks)) }
+                )
+            }
+        }
+
+        /// 打开态的「查看全部」：进歌单/专辑详情整页（带子滚动看全量）。
+        @ViewBuilder
+        private var openedViewAllButton: some View {
+            if let playlist = viewModel.openedPlaylist {
+                Button(action: { nav.show(.playlist(platform: playlist.source, id: playlist.id, isRank: playlist.isRank)) }) {
+                    HStack(spacing: 4) {
+                        Text("查看全部（共 \(viewModel.openedTracks.count) 首）")
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .font(.liziBody(size: LiziTokens.size13, weight: .medium))
+                    .foregroundColor(LiziTokens.ink2)
+                }
+                .padding(.top, 8)
+                .accessibilityLabel("查看全部\(viewModel.openedTitle)")
+            } else if let album = viewModel.openedAlbum {
+                Button(action: { nav.show(.album(platform: album.source, id: album.id)) }) {
+                    HStack(spacing: 4) {
+                        Text("查看全部（共 \(viewModel.openedTracks.count) 首）")
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .font(.liziBody(size: LiziTokens.size13, weight: .medium))
+                    .foregroundColor(LiziTokens.ink2)
+                }
+                .padding(.top, 8)
+                .accessibilityLabel("查看全部\(viewModel.openedTitle)")
+            }
         }
 
         // MARK: - 卡片跑马带层（r31：竖向列表改成与每日带同款的横向卡片跑马带）
@@ -713,21 +964,17 @@ struct HomeView: View {
                 // 卡高 = 卡宽 + 52（封面 + 间距 7 + 16pt 名行 + 间距 7 + 14pt
                 // 副标题行，与环平面带 flatHeight 同高）。
                 .frame(height: cardWidth + 52)
-                if viewModel.isMixedPlaylistsPage(page) {
-                    Text("该平台接口不区分自建与收藏，两页显示同一份歌单。")
-                        .font(.liziBody(size: LiziTokens.size12))
-                        .foregroundColor(LiziTokens.ink3)
-                        .padding(.top, 6)
-                }
                 Spacer(minLength: 0)
                 viewAllButton(total: total)
             }
         }
 
         /// 面板卡片（r31）：把该栏条目展平成一张张卡——曲目卡（封面 + 歌名 +
-        /// 歌手）与集合卡（歌单/电台本身：封面 + 名字 + 创建者·数量）同一形状；
-        /// 分组说明卡（groupHeader）不是内容、不进带子。点按行为与旧列表行一致
-        /// （曲目点播 / 歌单进详情 / 电台进整页）。
+        /// 歌手）与集合卡（歌单/专辑/电台本身：封面 + 名字 + 创建者·数量）同一形状；
+        /// 分组说明卡（groupHeader）不是内容、不进带子。点按行为：
+        /// 曲目点播；「我的歌单」/「我喜欢」里的歌单卡点后在面板内打开
+        /// （`viewModel.openPlaylist`），专辑卡在面板内打开
+        /// （`viewModel.openAlbum`）；其余来源的歌单卡进详情页。
         private func marqueeCards(entries: [RailEntry]) -> [RailMarqueeCard] {
             let tracks = entries.compactMap { entry -> Track? in
                 if case .track(let track) = entry { return track }
@@ -751,7 +998,21 @@ struct HomeView: View {
                         coverURL: playlist.coverURL,
                         title: playlist.title,
                         subtitle: playlistSubtitle(playlist: playlist),
-                        onTap: { nav.show(.playlist(platform: playlist.source, id: playlist.id, isRank: playlist.isRank)) }
+                        onTap: {
+                            if page == .created || page == .liked {
+                                viewModel.openPlaylist(playlist)
+                            } else {
+                                nav.show(.playlist(platform: playlist.source, id: playlist.id, isRank: playlist.isRank))
+                            }
+                        }
+                    )
+                case .album(let album):
+                    return RailMarqueeCard(
+                        id: entry.id,
+                        coverURL: album.coverURL,
+                        title: album.title,
+                        subtitle: albumSubtitle(album: album),
+                        onTap: { viewModel.openAlbum(album) }
                     )
                 case .station(let station):
                     return RailMarqueeCard(
@@ -788,6 +1049,13 @@ struct HomeView: View {
             var parts: [String] = []
             if !playlist.creator.isEmpty { parts.append(playlist.creator) }
             if playlist.trackCount > 0 { parts.append("\(playlist.trackCount) 首") }
+            return parts.joined(separator: " · ")
+        }
+
+        private func albumSubtitle(album: Album) -> String {
+            var parts: [String] = []
+            if !album.artist.isEmpty { parts.append(album.artist) }
+            if album.trackCount > 0 { parts.append("\(album.trackCount) 首") }
             return parts.joined(separator: " · ")
         }
 
@@ -870,6 +1138,12 @@ struct HomeView: View {
     /// - 初画 2.5s dwell 只在驱动创建时走一次（与环的 initialDwell 同值）；
     ///   拖动松手停 1.2s（与环的 dragResumeDwell 同值）；速度由调用方按
     ///   viewModel.marqSpeedPxPerSecond 同步（默认 24px/s）。
+    /// - r31-marquee（卡住修）：`isDragging` 原来只有一个出口
+    ///   （DragGesture.onEnded），手势被打断就永远卡住、带子永远停；
+    ///   现补两处出口——linkFired 里的 10s 看门狗（与环平面带 tickFlat
+    ///   同款，拖动 10s 无位移即清）+ 视图被拆时 `dragCancelled()`
+    ///   （RailMarqueeView.onDisappear 调）；回调不再经 Task 跳主线程
+    ///   （见 `RailMarqueeLinkProxy`）。
     @MainActor
     final class RailMarqueeDriver: ObservableObject {
         @Published var offsetX: CGFloat = 0
@@ -880,6 +1154,8 @@ struct HomeView: View {
 
         private var dwellUntil = Date().addingTimeInterval(2.5)
         private var dragBase: CGFloat = 0
+        /// 本次拖动的最后一次位移时间（r31-marquee 看门狗用，见 linkFired）。
+        private var draggingSince: Date?
         private var displayLink: CADisplayLink?
         private var linkProxy: RailMarqueeLinkProxy?
         private var lastTimestamp: CFTimeInterval = 0
@@ -892,6 +1168,7 @@ struct HomeView: View {
             guard displayLink == nil else { return }
             let proxy = RailMarqueeLinkProxy(driver: self)
             let link = CADisplayLink(target: proxy, selector: #selector(RailMarqueeLinkProxy.fired(_:)))
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
             link.add(to: .main, forMode: .common)
             linkProxy = proxy
             displayLink = link
@@ -905,16 +1182,31 @@ struct HomeView: View {
 
         func dragBegan() {
             isDragging = true
+            draggingSince = Date()
             dragBase = offsetX
         }
 
         func dragMoved(_ dx: CGFloat) {
+            // 有位移 = 拖动还活着，看门狗计时从这次位移重算（见 linkFired）。
+            draggingSince = Date()
             offsetX = normalized(dragBase + dx)
         }
 
         func dragEnded() {
             isDragging = false
+            draggingSince = nil
             dwellUntil = Date().addingTimeInterval(1.2)
+        }
+
+        /// 拖动被外力打断后的清理（r31-marquee）：DragGesture 只有 onEnded
+        /// 一个出口；视图在拖动中被拆掉（切来源/切平台/打开歌单/专辑、
+        /// 分支切加载态）或手势被系统取消时 onEnded 到不了，isDragging
+        /// 永远卡住、带子永远停。RailMarqueeView.onDisappear 调这里；
+        /// 不推 dwell——带子应当接着滚，不停、不跳。
+        /// 没在拖动时是空操作（正常切来源不影响带子）。
+        func dragCancelled() {
+            isDragging = false
+            draggingSince = nil
         }
 
         /// display link 回调（主线程）：步长 = 速度 × 真实帧间隔 dt。
@@ -928,6 +1220,18 @@ struct HomeView: View {
                 dt = link.timestamp - lastTimestamp
             }
             lastTimestamp = link.timestamp
+            // r31-marquee 看门狗（与环平面带 tickFlat 的 10s 看门狗同款，
+            // 见 HomeCoverRingView.swift）：isDragging 只有一个出口
+            // （DragGesture.onEnded）；手势被打断（App 切后台、来电、
+            // 滚动接管、视图被拆）时 onEnded 到不了，旗子永远卡住、
+            // 带子永远停——r26 每日带就是这副样子（走了约 1s 的量后冻住）。
+            // 10s 内没有任何拖动位移就不是真实拖动，直接清掉、让带子恢复；
+            // dragMoved 每步都刷新计时，活拖动不会被误清。
+            if isDragging, let since = draggingSince,
+               Date().timeIntervalSince(since) > 10 {
+                isDragging = false
+                draggingSince = nil
+            }
             guard setWidth > 0, !isDragging, Date() >= dwellUntil else { return }
             let clamped = min(max(dt, 0), 0.1)
             guard clamped > 0 else { return }
@@ -946,7 +1250,13 @@ struct HomeView: View {
 
     /// r31：display link 回调代理（与 HomeCoverRingView.swift 的
     /// `FlatDisplayLinkProxy` 同款：link 强持 target，代理只弱持驱动，
-    /// 不循环引用；跳主线程用 `Task { @MainActor in }`）。
+    /// 不循环引用）。
+    /// r31-marquee：回调不再经 `Task { @MainActor in }` 跳主线程——
+    /// display link 已挂在 RunLoop.main 上，回调本身就在主线程；每帧
+    /// 一个 Task 会让步长在任务队列里扎堆（几帧的量一次走完、再空几帧），
+    /// 就是「一卡一卡」，dt 也要在回调当下读 link.timestamp，Task 里
+    /// 读到的是更新后的戳。`MainActor.assumeIsolated` 在这里是安全的：
+    /// link 只加在 .main 上，回调只可能在主线程触发。
     private final class RailMarqueeLinkProxy: NSObject {
         weak var driver: RailMarqueeDriver?
 
@@ -955,7 +1265,9 @@ struct HomeView: View {
         }
 
         @objc func fired(_ link: CADisplayLink) {
-            Task { @MainActor in self.driver?.linkFired(link) }
+            MainActor.assumeIsolated {
+                self.driver?.linkFired(link)
+            }
         }
     }
 
@@ -993,6 +1305,10 @@ struct HomeView: View {
                 driver.speed = speed
                 driver.noteContentChanged()
             }
+            // r31-marquee：视图被拆掉时清掉可能残留的拖动旗（切来源/切平台/
+            // 打开歌单/专辑、分支切加载态都走这里拆视图；DragGesture.onEnded
+            // 在视图被拆时到不了，见 `RailMarqueeDriver.dragCancelled`）。
+            .onDisappear { driver.dragCancelled() }
             .onChange(of: cards.map(\.id)) { _ in driver.noteContentChanged() }
             .onChange(of: speed) { _ in driver.speed = speed }
         }
@@ -1077,15 +1393,21 @@ struct HomeView: View {
     /// 与壳版 DOM 顺序一致）、品牌真居中。
     ///
     /// 品牌不是抠图、不是图片资源（用户 04:56 纠正：抠图以后会出新 bug，
-    /// 两张抠图已删，不许再用）：LI 标记和 LIZI 四个字母是 SwiftUI Path
-    /// 按壳版内联 SVG 坐标照抄画出来的矢量（`BrandMarkView` /
-    /// `BrandWordView`，缩放不糊、深浅底都不怕）；kun 是真文字
-    /// （Fraunces 斜体 500、11px，包里 r19 已接的字体，直接 Text 打）。
+    /// 两张抠图已删，不许再用；2026-11-21 06:35 再明确：品牌是打上去
+    /// 而不是贴图）：LI 标记和 LIZI 四个字母是 SwiftUI Path
+    /// 按壳版内联 SVG 坐标照抄画出来的矢量（`BrandViews.swift` 的
+    /// `BrandMarkView` / `BrandWordView`，缩放不糊、深浅底都不怕）；
+    /// kun 是真文字（Fraunces 斜体 500、11px，包里 r19 已接的字体，
+    /// 直接 Text 打）。三件套合在 `BrandLockupView` 里，顶栏与设置
+    /// 关于页共用同一份。
     /// r28：尺寸不再照壳版 CSS（17×17 / 34×15），按用户首页截图实测
     /// 1:1 校准——LI 16.7×11.7、LIZI 33.3×10.7、kun 宽 18.3、
     /// 间距 LI→LIZI 9.3、LIZI→kun 9.7（截图 1206×2622 @3x，÷3 为 pt）；
     /// 整体仍居中，纵向位置不动。旧 gap 9（壳版 `.brand` gap 9px）
-    /// 已被 r28 的 9.3 / 9.7 取代，见 `topBar` 内 HStack 处。
+    /// 已被 r28 的 9.3 / 9.7 取代，见 `BrandLockupView`。
+    /// r31：LI 标记曾画在屏外（`scale.concatenating(translate)` 的
+    /// 拼接顺序与字面相反，r26「修复」等于没改，见 BrandViews.swift
+    /// 文件头）；本轮改成写死合成矩阵，墨迹回到 16.7×11.7 框内。
     ///
     /// 居中做法：HStack（左列按钮 + Spacer）+ `.overlay(alignment:
     /// .center)` 放品牌——overlay 以整行全宽为基准居中，品牌不随左列
@@ -1134,28 +1456,10 @@ struct HomeView: View {
         .padding(.trailing, 16)
         .frame(height: 64)
         .overlay(alignment: .center) {
-            // r28：间距按用户截图实测（1206×2622 @3x，÷3 为 pt）——
-            // LI→LIZI 28px = 9.3pt；LIZI→kun 29px = 9.7pt，
-            // 用 spacing 9.3 + kun 前 0.4pt 补齐（HStack 只有一个
-            // spacing，两段不等距只能这样分）。
-            HStack(alignment: .center, spacing: 9.3) {
-                BrandMarkView()
-                BrandWordView()
-                Text("kun")
-                    .font(.custom("Fraunces", size: 11).italic().weight(.medium))
-                    // r28：字号仍 11pt（k 高 8.1pt ≈ 图里 7.7pt，见下）；
-                    // tracking 0.22 → 1.1——图里 kun 宽 55px = 18.3pt，
-                    // 11pt Fraunces 斜体实测墨宽仅 ~16.3pt（见 r28 交回），
-                    // 字号加大到 12pt 会把 k 高顶到 8.7pt（超图 1.0pt），
-                    // 只能靠字距补宽：tracking 1.1 时墨宽 18.1～18.7pt。
-                    .tracking(1.1)
-                    .foregroundColor(LiziTokens.ink2)
-                    .padding(.leading, 0.4) // 补到 LIZI→kun 间距 9.7pt
-                    // r28：删 `.offset(y: 2)`——旧 2pt 是按 15pt 高的
-                    // LIZI 配的；LIZI 改 10.7pt 后，kun 不偏移时 k 顶
-                    // 正在 LIZI 顶下 1.2pt（图里 4px = 1.3pt），
-                    // 再 +2 就掉到 3.2pt，错 1.9pt。
-            }
+            // r31：品牌三件套见 BrandViews.swift 的 BrandLockupView
+            // （LI + LIZI + kun，r28 定稿尺寸/间距，同一基线）；
+            // 设置关于页用的也是它，两处是同一枚品牌。
+            BrandLockupView()
         }
         .padding(.top, topPad) // 品牌纵向中心 = topPad + 32（屏顶起算，见上）
     }
@@ -1175,107 +1479,6 @@ private struct HomeResizeHandle: View {
                 .frame(width: 49, height: 5)
         }
         .contentShape(Rectangle())
-    }
-}
-
-/// 品牌 LI 标记：SwiftUI Path 按壳版 `public/index.html` 内联 SVG 照抄
-/// （`viewBox="328 329 368 366"`，4 个 polygon，坐标一个数都不改；
-/// 只是先平移 viewBox 原点、再缩放——Path 里的数字就是壳版原数）。
-/// r28：缩放不再是等比 17pt——用户截图实测标记 50×35px = 16.7×11.7pt
-/// （宽高比 1.43:1，不是壳版 SVG 的近正方形），按图横向缩 16.7/368、
-/// 纵向缩 11.7/366，框 16.7×11.7；几何底本仍是
-/// `public/forms-labs/assets/logo.svg`（已核对，4 个 polygon 与此处
-/// 逐点一致，就是同一枚标记）。
-/// 不是图片资源，不是抠图；填墨色（壳版 `.brand__mark` fill currentColor，
-/// 浅色顶栏上就是墨色）。
-private struct BrandMarkView: View {
-    var body: some View {
-        Path { path in
-            // polygon 1
-            path.move(to: CGPoint(x: 328.94, y: 329.76))
-            path.addLine(to: CGPoint(x: 396.71, y: 329.76))
-            path.addLine(to: CGPoint(x: 396.71, y: 569.57))
-            path.addLine(to: CGPoint(x: 458.02, y: 519.41))
-            path.addLine(to: CGPoint(x: 458.02, y: 545.48))
-            path.addLine(to: CGPoint(x: 328.94, y: 649.91))
-            path.closeSubpath()
-            // polygon 2
-            path.move(to: CGPoint(x: 328.94, y: 672.81))
-            path.addLine(to: CGPoint(x: 396.71, y: 617.97))
-            path.addLine(to: CGPoint(x: 396.71, y: 630.67))
-            path.addLine(to: CGPoint(x: 554.47, y: 630.67))
-            path.addLine(to: CGPoint(x: 587.80, y: 694.32))
-            path.addLine(to: CGPoint(x: 328.94, y: 694.32))
-            path.closeSubpath()
-            // polygon 3
-            path.move(to: CGPoint(x: 627.86, y: 329.76))
-            path.addLine(to: CGPoint(x: 695.15, y: 329.76))
-            path.addLine(to: CGPoint(x: 695.15, y: 372.74))
-            path.addLine(to: CGPoint(x: 627.86, y: 428.80))
-            path.closeSubpath()
-            // polygon 4
-            path.move(to: CGPoint(x: 490.18, y: 566.83))
-            path.addLine(to: CGPoint(x: 695.15, y: 395.57))
-            path.addLine(to: CGPoint(x: 695.15, y: 694.32))
-            path.addLine(to: CGPoint(x: 627.86, y: 694.32))
-            path.addLine(to: CGPoint(x: 627.86, y: 479.80))
-            path.addLine(to: CGPoint(x: 490.18, y: 595.37))
-            path.closeSubpath()
-        }
-        // r26 修：顺序必须是「先平移 viewBox 原点、再缩放」。旧写法
-        // `CGAffineTransform(translationX: -328, y: -329).scaledBy(...)`
-        // 是 scaledBy 拼在平移之后，点先被缩放（~0.046×）再平移 -328，
-        // 标记落在约 (-313,-314)，屏外看不见。现用 scale.concatenating(translate)：
-        // 点先平移 (-328,-329)、再缩放。r28 再核：缩放改非等比
-        // （16.7/368 × 11.7/366）后，墨迹落在 x 0.04…16.66、
-        // y 0.02…11.68 的框内，仍在 16.7×11.7 框里，不出屏。
-        .transform(CGAffineTransform(scaleX: 16.7 / 368, y: 11.7 / 366)
-            .concatenating(CGAffineTransform(translationX: -328, y: -329)))
-        .fill(LiziTokens.ink)
-        .frame(width: 16.7, height: 11.7)
-    }
-}
-
-/// 品牌 LIZI 四个字母：SwiftUI Path 按壳版 `public/index.html` 内联 SVG
-/// 照抄（`viewBox="0 0 224 100"`；L = polygon，I = rect，
-/// Z = rect + polygon + rect，I = rect）。
-/// r28：按用户截图实测 100×32px = 33.3×10.7pt 校准（壳版是 34×15，
-/// 纵向压到约 0.71×）。只等比缩会让字母间距剩 2.7pt（图里 3.3pt），
-/// 所以字母 x 坐标各右移——I +3、Z 组 +6、末 I +9（总宽 224→233
-/// 单位，间距 18→21 单位），再非等比缩到 33.3×10.7；字形本身
-/// （L 斜切脚、Z 斜笔）一个点都没改，只是整体平移。
-/// 不是字体打出来的（壳版本来就不是字体，是多边形），不是图片资源。
-private struct BrandWordView: View {
-    var body: some View {
-        Path { path in
-            // L：polygon (0,0 19,0 19,81 47,81 66,100 0,100)——r28 未动
-            path.move(to: CGPoint(x: 0, y: 0))
-            path.addLine(to: CGPoint(x: 19, y: 0))
-            path.addLine(to: CGPoint(x: 19, y: 81))
-            path.addLine(to: CGPoint(x: 47, y: 81))
-            path.addLine(to: CGPoint(x: 66, y: 100))
-            path.addLine(to: CGPoint(x: 0, y: 100))
-            path.closeSubpath()
-            // I：rect x87 y0 w19 h100（r28：壳版 x84，+3 拉开字母间距）
-            path.addRect(CGRect(x: 87, y: 0, width: 19, height: 100))
-            // Z：rect(127,0,66,18) + polygon(175,18 193,18 145,82 127,82)
-            //    + rect(127,82,66,18)（r28：壳版 x121，+6）
-            path.addRect(CGRect(x: 127, y: 0, width: 66, height: 18))
-            path.move(to: CGPoint(x: 175, y: 18))
-            path.addLine(to: CGPoint(x: 193, y: 18))
-            path.addLine(to: CGPoint(x: 145, y: 82))
-            path.addLine(to: CGPoint(x: 127, y: 82))
-            path.closeSubpath()
-            path.addRect(CGRect(x: 127, y: 82, width: 66, height: 18))
-            // I：rect x214 y0 w19 h100（r28：壳版 x205，+9）
-            path.addRect(CGRect(x: 214, y: 0, width: 19, height: 100))
-        }
-        // r28：非等比缩到截图实测 33.3×10.7（总宽 233 单位：33.3/233；
-        // 高 100 单位：10.7/100）。字母实测：L/Z 9.43、I 2.72、
-        // 间距 3.00，相对图里 9.7 / 2.7 / 3.3 误差 ≤0.30pt。
-        .transform(CGAffineTransform(scaleX: 33.3 / 233, y: 10.7 / 100))
-        .fill(LiziTokens.ink)
-        .frame(width: 33.3, height: 10.7)
     }
 }
 

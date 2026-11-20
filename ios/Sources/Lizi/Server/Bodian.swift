@@ -487,7 +487,9 @@ final class BodianService {
                   Self.bdValidateAudioURL(url) else {
                 throw BodianError(code: "not-playable", message: "波点试听信息缺失", upstreamCode: nil)
             }
-            return ["url": url, "quality": "standard",
+            // r31 真实音质：试听片段的实际档位上游没给，不编 "standard"——
+            // 空串进桥后 canon 回 nil，UI 不挂徽章。
+            return ["url": url, "quality": "",
                     "fetchedAt": Int(Date().timeIntervalSince1970 * 1000),
                     "preview": ["startTime": start, "endTime": end]]
         }
@@ -639,7 +641,10 @@ final class BodianService {
         let collectedData = try await collectPage(offset: offset, limit: limit)
         let (owned, liked) = try await (ownedData, likedData)
         let collected = try Self.bdCollectionPage(collectedData, limit: limit, offset: offset, albums: false)
-        return ["owned": owned, "liked": liked, "collected": collected]
+        // r31：收藏的专辑（sourceType==6）也一次算出来，进「我喜欢」；
+        // 与歌单是同一份 collect 数据换过滤条件，不多发请求。
+        let collectedAlbums = try Self.bdCollectionPage(collectedData, limit: limit, offset: offset, albums: true)
+        return ["owned": owned, "liked": liked, "collected": collected, "collectedAlbums": collectedAlbums]
     }
 
     private func likedSongsOp(limit: Int, offset: Int) async throws -> [String: Any] {
@@ -848,10 +853,8 @@ final class BodianService {
                 let ladder = ["lossless", "high", "standard"]
                 let startIdx = ladder.firstIndex(of: q == "hires" ? "lossless" : q) ?? 2
                 var r: [String: Any] = [:]
-                var triedQ = q
                 for i in startIdx..<ladder.count {
-                    triedQ = ladder[i]
-                    r = await audioResult(id: req.string("id"), quality: triedQ, freeSign: req.string("freeSign"))
+                    r = await audioResult(id: req.string("id"), quality: ladder[i], freeSign: req.string("freeSign"))
                     if !scStr(r, "url").isEmpty { break }
                     let rsn = scStr(r, "reason")
                     if rsn == "auth-required" || (r["region"] as? NSNumber)?.boolValue == true { break }
@@ -866,7 +869,10 @@ final class BodianService {
                 return .json(200, ["code": 200, "id": req.string("id"), "url": url,
                                    "preview": preview,
                                    "previewRange": r["previewRange"] ?? NSNull(),
-                                   "quality": scStr(r, "quality").isEmpty ? triedQ : scStr(r, "quality"),
+                                   // r31 真实音质：上游没给档位时绝不拿试过的档位顶——
+                                   // 空串进桥后 canon 回 nil，UI 不挂徽章（原来
+                                   // `?? triedQ` 会把要的档位当成实际档位显示）。
+                                   "quality": scStr(r, "quality"),
                                    "reason": reason, "error": err])
             case "lyric":
                 guard !req.string("id").isEmpty else { return .error(400, "缺少 id") }
@@ -937,13 +943,24 @@ final class BodianService {
                 do {
                     let first = try await userPlaylistsOp(limit: 100, offset: 0)
                     var playlists: [[String: Any]] = []
-                    playlists.append(contentsOf: Self.bdRows(first["owned"]).map { Self.bodianPlaylist($0) })
+                    var albums: [[String: Any]] = []
+                    // r31：自建 / 收藏 / 喜欢表打标记再混列——以前三路混在一起不分，
+                    // 前端「用户收藏」删掉后，「我的歌单」要只留自建、收藏的进
+                    // 「我喜欢」，喜欢表（fond）本身就是「我喜欢」那张表，曲目已
+                    // 在 liked_songs 那路，不再当歌单卡重复出现。
+                    playlists.append(contentsOf: Self.bdRows(first["owned"]).map {
+                        var p = Self.bodianPlaylist($0); p["isOwned"] = true; return p
+                    })
                     if let liked = first["liked"] as? [String: Any], !scStr(liked, "id").isEmpty {
-                        playlists.append(Self.bodianPlaylist(liked))
+                        var p = Self.bodianPlaylist(liked); p["isLikedPlaylist"] = true; playlists.append(p)
                     }
                     // collected 按 bodianPagination.nextOffset 翻到底，最多 20 页。
                     var collected = (first["collected"] as? [String: Any]) ?? [:]
-                    playlists.append(contentsOf: Self.bdRows(collected["playLists"]).map { Self.bodianPlaylist($0) })
+                    var collectedAlbums = (first["collectedAlbums"] as? [String: Any]) ?? [:]
+                    playlists.append(contentsOf: Self.bdRows(collected["playLists"]).map {
+                        var p = Self.bodianPlaylist($0); p["isOwned"] = false; return p
+                    })
+                    albums.append(contentsOf: Self.bdRows(collectedAlbums["albumList"]).map { Self.bodianUserAlbum($0) })
                     var pages = 1
                     while pages < 20 {
                         let pag = (collected["bodianPagination"] as? [String: Any]) ?? [:]
@@ -951,14 +968,20 @@ final class BodianService {
                               let next = pag["nextOffset"] as? NSNumber, next.intValue > 0 else { break }
                         let data = try await collectPage(offset: next.intValue, limit: 100)
                         let nextCollected = try Self.bdCollectionPage(data, limit: 100, offset: next.intValue, albums: false)
-                        let rows = Self.bdRows(nextCollected["playLists"]).map { Self.bodianPlaylist($0) }
+                        let rows = Self.bdRows(nextCollected["playLists"]).map {
+                            var p = Self.bodianPlaylist($0); p["isOwned"] = false; return p
+                        }
                         if rows.isEmpty { break }
                         playlists.append(contentsOf: rows)
                         collected = nextCollected
+                        let nextCollectedAlbums = try Self.bdCollectionPage(data, limit: 100, offset: next.intValue, albums: true)
+                        albums.append(contentsOf: Self.bdRows(nextCollectedAlbums["albumList"]).map { Self.bodianUserAlbum($0) })
+                        collectedAlbums = nextCollectedAlbums
                         pages += 1
                     }
                     playlists = playlists.filter { !scStr($0, "id").isEmpty }
-                    return .json(200, ["code": 200, "source": "bodian", "playlists": playlists])
+                    albums = albums.filter { !scStr($0, "id").isEmpty }
+                    return .json(200, ["code": 200, "source": "bodian", "playlists": playlists, "albums": albums])
                 } catch let e as BodianError {
                     return bdAuthFail(e)
                 }

@@ -41,14 +41,14 @@ final class StageBridge: NSObject, ObservableObject {
     /// 形态发过一次 ready（init 已下发）。
     @Published private(set) var isReady = false
     /// 相机形态（ready payload 里 `camera: true`；552 烟雨江南唯一一个）：
-    /// HUD 切极简，迷你播放器默认收起。
+    /// 只有两处特殊：不盖 SwiftUI 点屏唤醒层（会吃掉拖动手势，改走 webView
+    /// 上的轻点识别器，见 StageWebViewCoordinator），形态内活动不唤醒 HUD。
+    /// r31：相机形态不再有任何别的特殊——胶囊不再默认收起、「显示控制」
+    /// 药丸已删（用户 06:18），控制行与唤醒方式与其它形态一致。
     @Published private(set) var isCamera = false
-    /// 当前形态声明的设置面板（`window.__stagePanel`；85 个已收录形态全有声明）。
+    /// 当前形态声明的设置面板（`window.__stagePanel`；r31 起 85 个已收录形态
+    /// 全有声明，359 在 r31 补了 shake 面板，此前是唯一没有的）。
     @Published private(set) var panelSpec: StagePanelSpec?
-    /// 形态外发的最后一条 error（仅诊断展示用，不弹窗）。
-    @Published private(set) var lastError: String?
-    /// 形态里鼠标/触摸活动（供 HUD 闲置计时续命；相机形态触屏拖动不唤醒，见下）。
-    @Published private(set) var activityTick = 0
     /// HUD 是否可见（壳版 `stage-hud` 的 `is-idle` 反状态：2.6 秒无操作自动藏起）。
     @Published private(set) var hudVisible = true
 
@@ -197,7 +197,6 @@ final class StageBridge: NSObject, ObservableObject {
         isReady = false
         isCamera = form.isCamera
         panelSpec = nil
-        lastError = nil
         lastInitSig = ""
         lastLyricIndex = -1
         loadSettings()
@@ -237,7 +236,9 @@ final class StageBridge: NSObject, ObservableObject {
                 self.isReady = true
                 self.fetchPanelSpec()
                 self.pushInit(force: true)
-                self.pushAllSettings()
+                // r31：设置重推不在这里调——fetchPanelSpec 是异步的，此时
+                // panelSpec 还是 nil，调了也直接 return（见 fetchPanelSpec
+                // 里的完成回调，那里 spec 已到才推）。
             }
         }
         readyFallback = work
@@ -252,20 +253,15 @@ final class StageBridge: NSObject, ObservableObject {
             onReady(payload: payload)
         case "activity":
             // 壳版 onActivity：相机形态在触屏上拖动不唤醒 HUD，其余活动都 wake()。
-            activityTick += 1
             if !isCamera { wakeHUD() }
         case "key":
             if let key = payload?["key"] as? String, key == "Space" {
                 wakeHUD()
                 onSpaceKey?()
             }
-        case "error":
-            if let p = payload {
-                lastError = p["message"] as? String ?? p.description
-            } else {
-                lastError = "stage error"
-            }
         default:
+            // 'error' 形态外发也经 forwardScript 转来，但桥上没有任何读者
+            // （r31 删掉了只写不读的 lastError），直接忽略，不回环。
             break
         }
     }
@@ -281,7 +277,9 @@ final class StageBridge: NSObject, ObservableObject {
         readyFallback?.cancel()
         fetchPanelSpec()
         pushInit(force: true)
-        pushAllSettings()
+        // r31：设置重推不在这里调——fetchPanelSpec 是异步的，此时 panelSpec
+        // 还是 nil，调了也直接 return（切形态/重进后已存的调节全丢、形态按
+        // JS 默认值画，就是这次修的 bug；重推在 fetchPanelSpec 完成回调里）。
         startTick()
     }
 
@@ -521,13 +519,13 @@ final class StageBridge: NSObject, ObservableObject {
         let key = Self.settingsKey(for: currentForm.formId)
         guard let raw = UserDefaults.standard.string(forKey: key),
               let data = raw.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data, options: []),
-              let dict = obj as? [String: Any] else { return }
-        for (k, v) in dict {
-            if let b = v as? Bool { settings[k] = .bool(b) }
-            else if let n = v as? NSNumber { settings[k] = .number(n.doubleValue) }
-            else if let s = v as? String { settings[k] = .string(s) }
-        }
+              let dict = try? JSONDecoder().decode([String: StagePanelValue].self, from: data) else { return }
+        settings = dict
+        // r31：之前这里用 JSONSerialization + `v as? Bool` 先判 Bool——NSNumber
+        // 会桥接成 Bool（非零数都判成 true、0 判成 false），存过的滑杆值（如
+        // camSpeed 2.2）重进/切形态回来全被读成 true/false，滑杆跳到 1.0/0.0。
+        // JSONDecoder 按 JSON 类型解码（true/false 只认真布尔，数字只认数字），
+        // StagePanelValue 的 Decodable 顺序（Bool → Double → String）与之配套。
     }
 
     private func saveSettings() {
@@ -575,6 +573,14 @@ final class StageBridge: NSObject, ObservableObject {
 
     /// 读形态声明的 `window.__stagePanel`（壳版直接读 `contentWindow.__stagePanel`；
     /// 原生侧用 `evaluateJavaScript` 序列化后解码；读不到 = 该形态没声明面板）。
+    ///
+    /// r31：全量重推（pushAllSettings）只能在这里调——evaluateJavaScript 是
+    /// 异步的，spec 只有进了这个完成回调才真正到手。之前 onReady /
+    /// armReadyFallback 里 fetch 后立刻 pushAllSettings()，那时 panelSpec
+    /// 还是 nil，全量重推直接 return：切形态 / 重进舞台后，已存的调节一次
+    /// 也没发给新文档，形态全按 JS 默认值画，用户调过的值"丢了"（直到再
+    /// 动一次控件才单条补发）。现在 spec 一到就推，形态一 ready 就拿到
+    /// 全部已存值；resetSettings() 的重推不受影响（那时 spec 已在）。
     func fetchPanelSpec() {
         guard let webView else { return }
         webView.evaluateJavaScript("JSON.stringify(window.__stagePanel || null)") { [weak self] result, _ in
@@ -585,7 +591,10 @@ final class StageBridge: NSObject, ObservableObject {
                 Task { @MainActor in self.panelSpec = nil }
                 return
             }
-            Task { @MainActor in self.panelSpec = spec }
+            Task { @MainActor in
+                self.panelSpec = spec
+                self.pushAllSettings()
+            }
         }
     }
 }
@@ -714,7 +723,8 @@ struct StageWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
-        // 形态切换由桥的 load(form:) 触发（见 coordinator.loadIfNeeded）；
+        // 形态切换由桥的 load(form:) 触发（r31：删掉了这里原来写的
+        // coordinator.loadIfNeeded——那个方法从来不存在，是写死的旧引用）；
         // 这里只做兜底：webView 空着（首次 / 切形态后）就按当前形态装一次。
         if uiView.url == nil, let url = StageBridge.fileURL(for: bridge.currentForm) {
             let readAccess = StageBridge.readAccessURL() ?? url.deletingLastPathComponent()
@@ -729,11 +739,18 @@ struct StageWebView: UIViewRepresentable {
 
 /// 导航代理 + message handler 持有者（桥本身不直接当 handler，避免
 /// `userContentController` 强引用 handler 造成循环引用）。
-final class StageWebViewCoordinator: NSObject, WKNavigationDelegate {
+///
+/// r31：还管点屏唤醒的轻点识别器（见 attach）。SwiftUI 的全屏透明唤醒层
+/// 不能盖在相机形态（552）上——会吃掉拖动手势；原来相机形态只剩底部
+/// 「显示控制」药丸唤回，药丸 r31 已删（用户 06:18），唤醒统一改走这个
+/// recognizer：只认轻点（`cancelsTouchesInView = false` + 同时识别），
+/// 拖动、滚动照常进形态，相机转头不受影响。非相机形态的轻点本来就被
+/// SwiftUI 唤醒层截获，不会走到这里；HUD 已显示时轻点只重置闲置计时。
+final class StageWebViewCoordinator: NSObject, WKNavigationDelegate, UIGestureRecognizerDelegate {
     let handler = StageMessageHandler()
     private weak var bridge: StageBridge?
     private weak var webView: WKWebView?
-    private var loadedFormId: String?
+    private var tapRecognizer: UITapGestureRecognizer?
 
     init(bridge: StageBridge) {
         self.bridge = bridge
@@ -744,19 +761,36 @@ final class StageWebViewCoordinator: NSObject, WKNavigationDelegate {
     func attach(webView: WKWebView) {
         self.webView = webView
         bridge?.setWebView(webView)
-        loadedFormId = bridge?.currentForm.formId
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleStageTap))
+        tap.cancelsTouchesInView = false
+        tap.delegate = self
+        webView.addGestureRecognizer(tap)
+        tapRecognizer = tap
     }
 
     func detach(webView: WKWebView) {
+        if let tap = tapRecognizer {
+            webView.removeGestureRecognizer(tap)
+            tapRecognizer = nil
+        }
         webView.configuration.userContentController.removeScriptMessageHandler(forName: StageBridge.messageHandlerName)
         webView.navigationDelegate = nil
         bridge?.setWebView(nil)
     }
 
+    @objc private func handleStageTap() {
+        bridge?.wakeHUD()
+    }
+
+    /// 与 WKWebView 内部手势同时识别：本识别器只认轻点，拖动/滚动不抢，
+    /// 形态收到的触摸原样不动。
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        true
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
         // 文档换了：之前 `load(form:)` 的新文档已就绪；ready 由形态自己发，
         // 桥的 2 秒兜底只在没 ready 时补发 init（见 StageBridge.loadCurrentFile）。
-        loadedFormId = bridge?.currentForm.formId
     }
 }
 

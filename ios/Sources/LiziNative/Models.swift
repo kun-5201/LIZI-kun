@@ -169,6 +169,83 @@ enum AudioQuality: String, Codable, Hashable, CaseIterable {
         if bitrate > 0 { return .standard }
         return nil
     }
+
+    /// QQ 直链文件名档位前缀 → 真实档位（QQ vkey 的 purl 就是这个文件名：
+    /// C400=128k m4a、M500=128k mp3、M800=320k、A000=APE、F000=FLAC、
+    /// RS01=Hi-Res、Q001=全景声 5.1、Q000=全景声 2.0、AI00=母带。
+    /// 前缀只认大写——网易等平台的 URL 哈希是小写 hex，不会误撞）。
+    static func qqFilenameTier(_ prefix: String) -> AudioQuality? {
+        switch prefix {
+        case "C400", "M500": return .standard
+        case "M800": return .exhigh
+        case "A000", "F000": return .lossless
+        case "RS01": return .hires
+        case "Q001": return .dolby
+        case "Q000": return .spatial
+        case "AI00": return .master
+        default: return nil
+        }
+    }
+
+    /// 流实证校验（r31 真实音质）：上游宣称的档位（`claimed`，来自 canon）
+    /// 绝不能高于返回流本身能证明的上限；宣称高于上限时往下压，实证与
+    /// 宣称都给不出档位时回 nil（UI 不挂徽章，绝不拿请求档位顶）。
+    /// - `url`：实际要播的地址（代理前的上游原址）。QQ 直链的文件名含
+    ///   档位前缀时，前缀就是地面真相，直接定档、覆盖宣称。
+    /// - `format`：上游给的容器名（网易 `type`、酷我 `format`；没有时
+    ///   看 URL 后缀）。有损容器（mp3/m4a/aac/ogg）上限 320k（.exhigh）；
+    ///   无损容器（flac/ape/wav）不设上限——容器本身不矛盾时宣称原样。
+    /// - `bitrate`（bps）：≤ 400k 时证明不是无损及以上，按码率定档
+    ///   （无损容器除外：稀疏音频的 FLAC 也能到 400k 上下，不靠码率
+    ///   否定它）；> 400k 时不靠码率抬高或压低（Hi-Res/杜比/母带的
+    ///   码率都在 800k 以上，旧表按码率定档会把真 Hi-Res 压成无损）。
+    /// - 无实证（未知后缀、无码率、无前缀）时宣称原样——没有反证不
+    ///   否定上游；LX 不透明地址就是这一档（残留风险见 NativeBridge
+    ///   lxSongURL 的注释）。
+    static func verified(claimed: AudioQuality?, url: URL?,
+                         bitrate: Int = 0, format: String? = nil) -> AudioQuality? {
+        guard let claimed else { return nil }
+        // 1）QQ 文件名前缀 = 地面真相。
+        if let name = url?.lastPathComponent, name.count >= 5,
+           let q = qqFilenameTier(String(name.prefix(4))) { return q }
+        // 2）容器实证：format 优先，其次 URL 后缀（无后缀时扫全串，
+        // LX 的不透明地址常把 .mp3/.flac 藏在 query 里）。
+        let fmt = (format ?? "").lowercased()
+        var ext = (url?.pathExtension ?? "").lowercased()
+        if ext.isEmpty, let s = url?.absoluteString.lowercased() {
+            for cand in ["flac", "ape", "wav", "mp3", "m4a", "aac", "ogg"] where s.contains(".\(cand)") {
+                ext = cand
+                break
+            }
+        }
+        let lossyExts = ["mp3", "m4a", "aac", "ogg", "oga"]
+        let losslessExts = ["flac", "ape", "wav", "alac"]
+        // format（上游明给的容器）优先于 URL 后缀：网易 FLAC 流的地址
+        // 后缀常是 .mp3（type=flac 才是真的），以后缀否定它会把真无损
+        // 压成 320k；只有 format 没给/不认时才看后缀。
+        let lossy: Bool
+        let lossless: Bool
+        if lossyExts.contains(fmt) || losslessExts.contains(fmt) {
+            lossy = lossyExts.contains(fmt)
+            lossless = losslessExts.contains(fmt)
+        } else {
+            lossy = lossyExts.contains(ext)
+            lossless = losslessExts.contains(ext)
+        }
+        func capped(_ cap: AudioQuality) -> AudioQuality {
+            claimed.rank <= cap.rank ? claimed : cap
+        }
+        // 3）码率 ≤ 400k 证明不是无损及以上（无损容器除外）。
+        if bitrate > 0, bitrate <= 400_000, !lossless {
+            if bitrate >= 300_000 { return capped(.exhigh) }
+            if bitrate >= 180_000 { return capped(.higher) }
+            return capped(.standard)
+        }
+        // 4）有损容器：上限 320k。
+        if lossy { return capped(.exhigh) }
+        // 5）无损容器 / 无实证：宣称原样。
+        return claimed
+    }
 }
 
 // MARK: - 曲目

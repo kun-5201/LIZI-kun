@@ -258,6 +258,25 @@ window.__stage = function () {
 <script>
 (function () {
   'use strict';
+
+  /* ---- 形态设置面板（r31）：此前 359 是 85 个形态里唯一没有 __stagePanel
+     的，齿轮浮层不显示、震动开关无处可调；补一个与其它 55 个纯震动形态
+     同款的 shake 面板（002-starfield-lyrics 同款写法）。宿主在 ready 后
+     读 window.__stagePanel；震动关断走两道：桥侧 beat.level 归零
+     （StageBridge.shakeOff）+ 下面 onBeat 的 __liziShake 门。 */
+  window.__liziShake = true;
+  window.__stagePanel = {
+    title: '午夜访客',
+    items: [
+      { key: 'shake', label: '震动', type: 'switch', def: true }
+    ]
+  };
+  window.addEventListener('message', function (e) {
+    var d = e && e.data;
+    if (!d || d.__c100 !== 1 || d.type !== 'setting' || !d.payload) return;
+    if (d.payload.key === 'shake') window.__liziShake = d.payload.value !== false;
+  });
+
   var listEl = document.getElementById('list');
   var trackEl = document.getElementById('listTrack');
   var emptyEl = document.getElementById('empty');
@@ -1273,6 +1292,12 @@ window.__stage = function () {
   }
   function onBeat(p) {
     beatCount++;
+    if (beatCount % 12 === 0) bumpCounter(1);
+    /* r31：震动关断时不打闪光、不爆粒子（与 001/552 的 __liziShake 门一致）；
+       只关闪光，不关访客计数器；桥侧也会把 beat.level 归零，双保险。
+       注意：onBeat 里原来就有 0.30/0.25 的基线闪光，只靠桥侧归零关不掉，
+       所以这里必须再设一道门，否则新补的震动开关关了还闪。 */
+    if (window.__liziShake === false) return;
     var lvl = Number(p && p.level);
     if (!isFinite(lvl)) lvl = 0.6;
     lvl = Math.max(0, Math.min(1, lvl));
@@ -1282,7 +1307,6 @@ window.__stage = function () {
       spawnBurst(VW * (0.28 + Math.random() * 0.44), VH * (0.26 + Math.random() * 0.40), lvl > 0.62);
       if (lvl > 0.82) spawnBurst(VW * 0.5, VH * 0.46, true);
     }
-    if (beatCount % 12 === 0) bumpCounter(1);
   }
   function onLive(p) {
     if (!p || typeof p !== 'object') return;

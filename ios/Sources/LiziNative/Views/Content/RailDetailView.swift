@@ -79,7 +79,13 @@ struct RailDetailView: View {
             if feed == nil {
                 feed = NativeBridge.defaultFeaturedFeed(for: platform)
             }
-            await load()
+        }
+        // r31-starred：喜欢整页每次出现都重拉（不只是首次进页）——在
+        // 播放页点完星标/取消星标再回来，整页要看到新状态；其它栏重拉
+        // 一次也是同款行为（load 本身就是整页重取，无缓存）。
+        // load 不放 .task 里：.task 只在首次出现跑，返回时不重跑。
+        .onAppear {
+            Task { await load() }
         }
     }
 
@@ -149,6 +155,14 @@ struct RailDetailView: View {
         case .playlist(let playlist):
             Button(action: { Task { await drillPlaylist(playlist) } }) {
                 playlistCardRow(playlist: playlist)
+            }
+            .buttonStyle(.plain)
+            .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+            .listRowBackground(LiziTokens.paper)
+        case .album(let album):
+            // r31：收藏的专辑在「我喜欢」里以专辑卡出现，点进专辑页。
+            Button(action: { nav.show(.album(platform: album.source, id: album.id)) }) {
+                albumCardRow(album: album)
             }
             .buttonStyle(.plain)
             .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
@@ -280,6 +294,37 @@ struct RailDetailView: View {
         var parts: [String] = []
         if !playlist.creator.isEmpty { parts.append(playlist.creator) }
         if playlist.trackCount > 0 { parts.append("\(playlist.trackCount) 首") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func albumCardRow(album: Album) -> some View {
+        HStack(spacing: 12) {
+            CoverImageView(url: album.coverURL, placeholderIconSize: 20)
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(album.title)
+                    .font(.liziBody(size: LiziTokens.size16, weight: .semibold))
+                    .foregroundColor(LiziTokens.ink)
+                    .lineLimit(1)
+                Text(albumSubtitle(album: album))
+                    .font(.liziBody(size: LiziTokens.size13))
+                    .foregroundColor(LiziTokens.ink3)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(LiziTokens.ink3)
+        }
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+    }
+
+    private func albumSubtitle(album: Album) -> String {
+        var parts: [String] = []
+        if !album.artist.isEmpty { parts.append(album.artist) }
+        if album.trackCount > 0 { parts.append("\(album.trackCount) 首") }
         return parts.joined(separator: " · ")
     }
 

@@ -222,11 +222,13 @@ struct PlayerBottomDock: View {
         .accessibilityLabel("评论区")
     }
 
-    /// 选择音质芯片（显示当前音质：实际返回档位，没有时默认「标准」；
-    /// 点开 9 档选择器，选了真换音质，见 switchQuality）。
+    /// 选择音质芯片（显示当前音质：实际返回档位；r31 真实音质：取不到
+    /// 实际档位时显示中性「音质」，绝不默认「标准」——「标准」是 128k
+    /// 的断言，没取到链/档位未知时挂它就是假徽章；点开 9 档选择器，
+    /// 选了真换音质，见 switchQuality）。
     private var qualityCell: some View {
         Button(action: { showQualityPicker = true }) {
-            Text(store.actualQuality?.displayName ?? "标准")
+            Text(store.actualQuality?.displayName ?? "音质")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(PlayerTokens.playerForeground)
                 .padding(.horizontal, 12)
@@ -236,7 +238,7 @@ struct PlayerBottomDock: View {
                         .stroke(Color.white.opacity(0.6), lineWidth: 1)
                 )
         }
-        .accessibilityLabel("选择音质，当前\(store.actualQuality?.displayName ?? "标准")")
+        .accessibilityLabel("选择音质，当前\(store.actualQuality?.displayName ?? "音质")")
     }
 
     // MARK: - 第 2 排：进度条（复用）+ 两端时间

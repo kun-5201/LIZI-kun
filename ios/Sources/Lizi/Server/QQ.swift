@@ -2666,25 +2666,98 @@ extension QQService {
         }
     }
 
+    /// r31 登录态同尺子修：`status()` 只认 musickey 有效（GetLoginUserInfo 通
+    /// 就判已登录），这里原来还硬要 `encryptUin` 才肯调 CgiGetDiss——网页登录
+    /// 导入的凭证（loginType 6）从来没有 encryptUin，只有扫码登录才有；于是
+    /// 设置页说已登录、喜欢栏永远 401「先在卡片上扫码登录 QQ 音乐」（用户
+    /// 2026-11-21 05:59 报的原 bug）。现在：有 encryptUin 走原来那路，没有
+    /// 就传空串调同一接口（`authenticatedPlaylistDetail` 同款，空
+    /// enc_host_uin 由服务端按登录会话认账号）；回空时再试网页 CGI
+    /// fcg_ucc_getcdinfo_byids_cp（disstid 0 / dirid 201 就是「我喜欢」，
+    /// `playlistDetail` 同款端点）带整罐 webCookie 兜底。两路都空才算空，
+    /// 凭证被拒才报「登录态已失效」，绝不凭空判未登录。
     private func userLikedSongs(req: HttpRequest) async -> HttpResponse {
         let limit = min(100, max(1, req.int("limit", 100)))
-        guard let cred = await ensureCredential(), !scStr(cred, "encryptUin").isEmpty else {
+        guard let cred = await ensureCredential() else {
             return .json(200, ["code": 401, "source": "qq", "tracks": [], "error": "先在卡片上扫码登录 QQ 音乐"])
         }
+        let encryptUin = scStr(cred, "encryptUin")
         do {
             let d = try await musicuAuth(module: "music.srfDissInfo.DissInfo", method: "CgiGetDiss",
                                          param: ["disstid": 0, "dirid": 201, "tag": true, "song_begin": 0,
                                                  "song_num": limit, "userinfo": true, "orderlist": true,
-                                                 "enc_host_uin": scStr(cred, "encryptUin")])
+                                                 "enc_host_uin": encryptUin])
             let songs = d["songlist"] as? [[String: Any]] ?? []
-            return .json(200, ["code": 200, "source": "qq", "tracks": songs.compactMap { qqTrack($0) },
-                                "total": scInt(d, "total_song_num")])
+            let tracks = songs.compactMap { qqTrack($0) }
+            if !tracks.isEmpty || !encryptUin.isEmpty {
+                return .json(200, ["code": 200, "source": "qq", "tracks": Array(tracks.prefix(limit)),
+                                    "total": scInt(d, "total_song_num")])
+            }
+            // 没 encryptUin 且 musicu 回空：不急着判空，先试网页 CGI。
+            return await userLikedSongsWeb(cred: cred, limit: limit)
         } catch {
             if isCredentialRejection(error) {
-                return .json(200, ["code": 401, "source": "qq", "tracks": [], "error": "先在卡片上扫码登录 QQ 音乐"])
+                return .json(200, ["code": 401, "source": "qq", "tracks": [], "error": "登录态已失效，重新扫码登录 QQ 音乐"])
+            }
+            if encryptUin.isEmpty {
+                return await userLikedSongsWeb(cred: cred, limit: limit)
             }
             return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502, "source": "qq",
                                 "tracks": [], "error": (error as? QQUpstreamError)?.message ?? "QQ 音乐失败"])
+        }
+    }
+
+    /// 「我喜欢」的网页 CGI 兜底（r31，见 `userLikedSongs`）：disstid 0 /
+    /// dirid 201 + 整罐 cookie；拿不到歌只回 502 诚实错误，不谎称未登录
+    /// （CGI 的失败码与 musicu 的凭证拒码不是同一套，不硬映射）。
+    private func userLikedSongsWeb(cred: [String: Any], limit: Int) async -> HttpResponse {
+        let uin = credentialMusicId(cred)
+        guard !uin.isEmpty else {
+            return .json(200, ["code": 401, "source": "qq", "tracks": [], "error": "QQ 账号 id 拿不到，请退出后重新登录 QQ 音乐"])
+        }
+        do {
+            let obj = try await cgi(path: "/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg",
+                                    params: ["disstid": "0", "dirid": "201", "type": "1", "json": "1",
+                                             "utf8": "1", "onlysong": "0", "new_format": "1",
+                                             "loginUin": uin, "hostUin": uin],
+                                    headers: ["Cookie": credentialCookieHeader(cred)])
+            let cdlist = obj["cdlist"] as? [[String: Any]] ?? []
+            let first = cdlist.first ?? [:]
+            let songs = (first["songlist"] as? [[String: Any]]) ?? []
+            let tracks = songs.compactMap { qqTrack($0) }
+            return .json(200, ["code": 200, "source": "qq", "tracks": Array(tracks.prefix(limit)),
+                                "total": scInt(first, "total_song_num")])
+        } catch {
+            return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502, "source": "qq",
+                                "tracks": [], "error": (error as? QQUpstreamError)?.message ?? "QQ「我喜欢」拉取失败"])
+        }
+    }
+
+    /// 专辑曲目（r31：QQ 专辑进首页面板用）：网页 CGI
+    /// /v8/fcg-bin/fcg_v8_album_info_cp.fcg?albummid=…（qq-music-api
+    /// getAlbumInfo 同款端点）；公开专辑匿名可读，登录时带整罐 cookie。
+    /// 回包 data.songlist（无 data 时回落顶层 songlist），名/封面取 data。
+    private func albumTracks(req: HttpRequest) async -> HttpResponse {
+        let id = req.string("id")
+        guard !id.isEmpty else { return .json(400, ["code": 400, "error": "id required"]) }
+        var headers: [String: String] = [:]
+        if let cred = await ensureCredential() { headers["Cookie"] = credentialCookieHeader(cred) }
+        do {
+            let obj = try await cgi(path: "/v8/fcg-bin/fcg_v8_album_info_cp.fcg",
+                                    params: ["albummid": id],
+                                    headers: headers)
+            let data = obj["data"] as? [String: Any] ?? [:]
+            let songs = (data["songlist"] as? [[String: Any]]) ?? (obj["songlist"] as? [[String: Any]]) ?? []
+            let tracks = songs.compactMap { qqTrack($0) }
+            let name = qqFirstStr(data, ["albumname", "albumName", "name"])
+            var cover = qqFirstStr(data, ["albumcover", "pic", "cover"])
+            if cover.isEmpty, !id.allSatisfy({ $0.isNumber }) { cover = qqCover(id) }
+            return .json(200, ["code": 200, "source": "qq", "id": id,
+                                "name": name, "cover": cover,
+                                "tracks": tracks, "trackCount": tracks.count])
+        } catch {
+            return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502, "source": "qq",
+                                "tracks": [], "error": (error as? QQUpstreamError)?.message ?? "QQ 专辑取不到"])
         }
     }
 
@@ -2692,20 +2765,33 @@ extension QQService {
         guard let cred = await ensureCredential() else {
             return .json(200, ["code": 401, "source": "qq", "playlists": [], "error": "先在卡片上扫码登录 QQ 音乐"])
         }
+        // r31：微信登录凭证的 musicid 可能是占位 "0"（credentialMusicId 会
+        // 把它滤成空串），这时 GetPlaylistByUin 拿 uin="" 必被上游拒——以前
+        // 这种失败混在 502 里，设置页却照常显示已登录。账号 id 拿不到就明说，
+        // 不拿空 uin 去撞上游。
+        let uin = credentialMusicId(cred)
+        guard !uin.isEmpty else {
+            return .json(200, ["code": 401, "source": "qq", "playlists": [], "error": "QQ 账号 id 拿不到，请退出后重新登录 QQ 音乐"])
+        }
         do {
             var playlists: [[String: Any]] = []
             var seen = Set<String>()
-            func add(_ items: [[String: Any]]) {
+            // r31：自建 / 收藏打标记再混列——以前两路混在一起不分，前端
+            // 「用户收藏」删掉后，「我的歌单」要只留自建、收藏的进「我喜欢」，
+            // 没标记分不出来。qq-music-api 的 getPlaylists 同款分法：
+            // GetPlaylistByUin 回自建，CgiGetPlaylistFavInfo 回收藏。
+            func add(_ items: [[String: Any]], subscribed: Bool) {
                 for it in items {
-                    if let p = qqPlaylist(it), let pid = p["id"] as? String, !seen.contains(pid) {
+                    if var p = qqPlaylist(it), let pid = p["id"] as? String, !seen.contains(pid) {
                         seen.insert(pid)
+                        p["subscribed"] = subscribed
                         playlists.append(p)
                     }
                 }
             }
             let own = try await musicuAuth(module: "music.musicasset.PlaylistBaseRead", method: "GetPlaylistByUin",
-                                           param: ["uin": credentialMusicId(cred)])
-            add(own["v_playlist"] as? [[String: Any]] ?? [])
+                                           param: ["uin": uin])
+            add(own["v_playlist"] as? [[String: Any]] ?? [], subscribed: false)
             var offset = 0
             var hasmore = true
             var rounds = 0
@@ -2717,7 +2803,7 @@ extension QQService {
                                                    param: ["uin": encryptUin, "offset": offset, "size": 100])
                     let items = fav["v_list"] as? [[String: Any]] ?? []
                     if items.isEmpty { break }
-                    add(items)
+                    add(items, subscribed: true)
                     hasmore = (fav["hasmore"] as? NSNumber)?.boolValue ?? false
                     let total = scInt(fav, "total")
                     let next = offset + items.count
@@ -3051,6 +3137,8 @@ extension QQService {
                 return await userPlaylists()
             case "user/albums":
                 return await userAlbums(req: req)
+            case "album/tracks":
+                return await albumTracks(req: req)
             case "user/daily-songs":
                 return await userDailySongs()
             case "recommend/radar":

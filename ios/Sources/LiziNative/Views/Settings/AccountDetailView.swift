@@ -24,6 +24,13 @@ struct AccountDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showLogoutConfirm = false
     @State private var loginTarget: LoginSheetTarget?
+    /// r31：头像加载超时标记——旧写法是两闭包 `AsyncImage`（成功才有图，
+    /// 失败也一直显示 `ProgressView`），头像 URL 死链/挂起时转圈永不停
+    /// （用户 2026-11-21 05:59 报的 QQ 头像一直转圈）。现在按 phase 分流：
+    /// 成功显示图、失败显示占位人像、加载中才转圈；10 秒还没回来也切占位，
+    /// 不无限等（已加载成功的不受超时影响，见 `avatarLoaded`）。
+    @State private var avatarTimedOut = false
+    @State private var avatarLoaded = false
 
     private var platformName: String {
         SettingsStore.platformNames[platform] ?? LiziPlatforms.all.first(where: { $0.id == platform })?.name ?? platform
@@ -114,14 +121,30 @@ struct AccountDetailView: View {
                     .font(.liziBody(size: LiziTokens.size14, weight: .medium))
                     .foregroundColor(LiziTokens.ink)
                 Spacer()
-                if let url = loginStore.avatarURL(platform: platform) {
-                    AsyncImage(url: url) { image in
-                        image.resizable().scaledToFill()
-                    } placeholder: {
-                        ProgressView()
+                if let url = loginStore.avatarURL(platform: platform), !avatarTimedOut {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image.resizable().scaledToFill()
+                                .onAppear { avatarLoaded = true }
+                        case .failure:
+                            Image(systemName: "person.circle.fill")
+                                .font(.system(size: 48))
+                                .foregroundColor(LiziTokens.ink3)
+                        case .empty:
+                            ProgressView()
+                        @unknown default:
+                            Image(systemName: "person.circle.fill")
+                                .font(.system(size: 48))
+                                .foregroundColor(LiziTokens.ink3)
+                        }
                     }
                     .frame(width: 48, height: 48)
                     .clipShape(Circle())
+                    .task {
+                        try? await Task.sleep(nanoseconds: 10_000_000_000)
+                        if !avatarLoaded { avatarTimedOut = true }
+                    }
                 } else {
                     Image(systemName: "person.circle.fill")
                         .font(.system(size: 48))

@@ -261,7 +261,8 @@ import UIKit
 ///   本来也滚不动页面、拖不了分界手柄，面板动只剩旋转与布局变化。
 /// - 不动：转动机制（跟手 perPixel、110ms 采样 ±1400°/s、τ=1.08s 投影 +
 ///   弹簧 118 吸附、只露正面、收回时机）、展开手势（跑马带左右拖动，
-///   不要上滑）、变暗三档、一次 3 张、面板裁切。驱动见
+///   不要上滑）、变暗三档、一次 3 张、面板裁切（本段写于 r31 前半段；
+///   面板裁切后在 r31 真圆柱一段作废，见文件头 r31 真圆柱节）。驱动见
 ///   verification/r31-ring.cjs。
 ///
 /// r31（2026-11-21，跑马带平滑 + 其余 5 个来源也走卡片跑马带，见 HomeView.swift）：
@@ -275,9 +276,12 @@ import UIKit
 ///   （播放进度 0.25s 也在推同一批观察者），主线程一挤就卡。
 ///   改成 display link 后每帧一步（60Hz 约 0.4px、120Hz 约 0.2px），
 ///   步长按真实帧间隔 dt（link.timestamp 差，上限夹 0.1s）算，
-///   丢帧后下一步自动补上，位移严格按速度×时间走；回调经弱引用
-///   代理跳主线程（display link 强持 target，不用代理模型永远不释放，
-///   见 `FlatDisplayLinkProxy`）。初画停 2.5s、松手 1.2s 恢复、
+///   丢帧后下一步自动补上，位移严格按速度×时间走；回调直接在主线程
+///   跑（display link 挂在 RunLoop.main 上，代理里 `MainActor.assumeIsolated`
+///   直调 tick，不再经 Task 跳主线程——r31 第一推这里写的是直调、
+///   代码里其实还留着 Task 跳线程，r31-marquee 才真去掉，
+///   见 `FlatDisplayLinkProxy`）；弱引用代理仍保留（display link 强持
+///   target，不用代理模型永远不释放）。初画停 2.5s、松手 1.2s 恢复、
 ///   10s 看门狗、环开着停带、速度 24px/s 一律不动。
 ///   取色已核过：AlbumToneExtractor 是 32×32 采样 + k=4 最多 10 轮，
 ///   毫秒级，且只在切歌时跑一次，不是卡顿来源，不动它；
@@ -286,6 +290,69 @@ import UIKit
 /// - DefaultCoverArt 去掉 private：其余 5 个来源的跑马带卡片共用同一份
 ///   默认封面（见 HomeView.swift `RailMarqueeCardView`）。环的几何、
 ///   开环触发（只剩平面带横向拖动）、收回、变暗一律不动。
+///
+/// r31-marquee（用户 2026-11-21 06:25「跑马带里的卡片现在是卡着的，
+/// 不会一直向左滑」）：本文件只动 `FlatDisplayLinkProxy` 一处——
+/// 回调不再经 `Task { @MainActor in }` 跳主线程（display link 已挂在
+/// RunLoop.main 上，回调本身就在主线程；每帧一个 Task 让步长在任务
+/// 队列里扎堆，就是「一卡一卡」，dt 还是在 Task 里读的 link.timestamp）。
+/// 改成代理直接调 tick（`MainActor.assumeIsolated`，link 只加在 .main 上）。
+/// 每日带卡住的嫌疑逐项核过，都不是：flatDragging 出口齐全（ended /
+/// cancelled / failed / willMove / touchesCancelled）+ 10s 看门狗，
+/// 收回竞态封死（收回进行中没有任何调用能再推 closeGeneration、
+/// closeRing 的完成任务 void 不掉），flatDwellUntil 只在曲目 id 集合变
+/// 了时重停（切歌不重停），flatSetWidth 由偏好重报恢复——每日带没有能
+/// 永久卡住的旗子；真正能永久卡住的是 rail 驱动的 isDragging（只
+/// 有 onEnded 一个出口，见 HomeView.swift），硬停修在那边。
+/// 速度 24px/s、dt 夹 0.1s、回卷归一化、初画 2.5s、松手 1.2s、10s
+/// 看门狗一律不动。驱动见 verification/r31-marquee.cjs。
+///
+/// r31（2026-11-21，真圆柱，用户 06:23 追问「前面是折叠效果对吗」——
+/// 对，前面那个看着就是折叠，不是转圈圈）：
+/// - 根因（三处，全在 ringLayer + 几何函数里）：
+///   ① 平的：卡片只用 x = centerX + r·sin(world) 定横向位置，所有卡都在
+///      z=0 一个平面上，没有 z 方向深度——不是推出到圆柱面上的槽位。
+///   ② 转反了：卡片 `.rotation3DEffect(-world°, Y 轴)` 是从播放页 CoverFlow
+///      抄来的朝内转法（右卡 -40°，右缘朝前、左缘朝后，像翻书一样折向
+///      中心）；套壳圆柱槽位是 rotateY(+base) translateZ(R)，卡面切于圆柱面
+///      朝外（右卡左缘近、右缘远，绕着圆柱往后收）。r20 文件头就写过
+///      「照抄播放页 CoverFlow」是环几何错的根源之一，旋转符号是同一处
+///      抄错留下来的尾巴。
+///   ③ 透视错了：卡片旋转与容器都用 SwiftUI perspective 0.5 强透视，
+///      压扁程度远超套壳的 P=3.2R（标准档约 697pt），近缘放大、远缘缩小，
+///      折叠感就是这么来的。
+/// - 改法（只动本文件）：卡片按真圆柱投影——z = R·(cos(world)−1)
+///   （`cylinderZ`，正前方 0、侧卡为负，推出到圆柱面上）；透视距离
+///   P = max(3.2R, 520)（`ringPerspective`，壳版 openRing 原式）；横向
+///   x = R·sin(world)·P/(P−z)（`projectedX`，透视除法把侧卡往中心收，
+///   r30 的 x = R·sin(world) 没除透视，侧卡摆得太开）；缩放与横向共用
+///   同一个透视因子 P/(P−z)（`perspectiveFactor`，`depthScale` 改成
+///   按 world 角委托给它，旧的 3.2/(4.2−cos) 就是同一式子展开后的样子，
+///   数值不变）；卡片旋转改成 +world（切于圆柱面朝外），透视参数改成 0
+///   ——卡内透视不由 SwiftUI 的 0.5 再算一次，全程只走显式 3.2R 投影
+///   （SwiftUI perspective 与 CSS perspective:px 没有精确等价换算，
+///   见 CoverFlowView 文件头诚实注；卡内梯形透视是已知残留：正交旋转下
+///   侧卡 apparent 宽约 106pt，真投影约 90pt，远缘多出约 11pt，见驱动）；
+///   容器整体 rotateX(-5°) 删掉——相机 -5° 已由每卡 `tiltDrop` 表达
+///   （r26-3D 视频实测公式），容器旋转是双算，还把 0.5 强透视带进来。
+/// - R（实拍量取，见驱动 §11）：f_050 中心卡 227–505px ≈ 149pt，左卡亮区
+///   0–222px、右缘 222px 与中心卡左缘 227px 几乎相贴（间隙约 3px），故
+///   pitch 取卡宽（×1.0），R = 149/(2·sin20°) ≈ 218pt（标准档；旧
+///   ×1.14 → 248pt 是配 94pt 小卡的套壳 pitch 搬到 149pt 卡上的旧值，
+///   比实拍大 14%）；176pt 是套壳 ring.js 配 94pt 小卡的 R
+///   （cardW = clamp(vw×0.24, 84, 112) → Rview ≈ 176），配 149pt 卡时
+///   弦长 2R·sin(step/2) 只有约 120pt < pitch 170pt，相邻卡重叠约 50pt，
+///   且 step 公式会给出约 58°（与实测侧卡倾角 ±40° 不符），不能用。
+///   step 的壳版公式 min(360/n, 2·asin(pitch/(2R))) 代入新 R/pitch 仍得
+///   40°（n≤9 时 360/n ≥ 40°），step 保持 40° 不动。
+/// - 面板裁切作废（r30 v5 图口径）：f_050/f_060/f_070 里侧卡都溢出面板
+///   到屏边（左卡亮区从 x=0 起、右卡切到 720px 屏边），环层改全屏宽、
+///   不 clip，命中测试同步删面板外拦截、改用 projectedX + panel.centerX
+///   （旧 hitTest 还拿 screenWidth/2 当中心，与渲染的 panel.centerX
+///   不是同一个锚点，顺手改掉）。
+/// - 不动：跟手 perPixel、110ms 采样 ±1400°/s、τ=1.08s 投影 + 弹簧 118
+///   吸附、只露正面、收回时机、一次 3 张、展开手势（跑马带左右拖动）、
+///   环锚点 = 跑马带中心（r31 前半段）。驱动见 verification/r31-ring.cjs §8–§11。
 
 // MARK: - 状态机
 
@@ -466,16 +533,31 @@ final class HomeCoverRingModel: ObservableObject {
         }
     }
 
-    /// 相邻槽位夹角 40°（视频实测侧卡倾角）。
+    /// 相邻槽位夹角 40°（视频实测侧卡倾角；壳版公式
+    /// step = min(360/n, 2·asin(pitch/(2R))) 代入本轮 pitch=卡宽、R≈218pt
+    /// 也得 40°：n = min(曲数, cap)，cap = round(2πR/pitch) = 9，
+    /// n≤9 时 360/n ≥ 40°，第二项 2·asin(149/436) = 40.0°，见驱动 §11）。
     var ringStep: CGFloat { 40 }
 
-    /// 槽距 = 卡宽×1.14（壳版 ring.js；39.6s 视频侧卡 ±40° 倾角下此槽距
-    /// 不重叠；旧视频的 pitch=卡宽已作废）。
-    var ringPitch: CGFloat { ringCard * 1.14 }
+    /// 槽距 = 卡宽（r31 真圆柱，实拍量取：f_050 左卡右缘 222px 与中心卡
+    /// 左缘 227px 几乎相贴，间隙约 3px，相邻卡没有 1.14 倍的空隙；
+    /// 旧 ×1.14 是套壳 ring.js 配 94pt 小卡的值，搬到 149pt 卡上
+    /// R 会算到 248pt，比实拍大 14%。pitch=卡宽时 step 的壳版公式
+    /// min(360/n, 2·asin(pitch/(2R))) 仍得 40°，见 ringStep 注释）。
+    var ringPitch: CGFloat { ringCard }
 
-    /// 圆柱半径（弦长公式 pitch = 2R·sin(step/2)）。
+    /// 圆柱半径（弦长公式 pitch = 2R·sin(step/2)；标准档 149/(2·sin20°)
+    /// ≈ 218pt，compact ≈ 206pt，large ≈ 240pt）。
     var ringRadius: CGFloat {
         ringPitch / (2 * sin(ringStep * .pi / 360))
+    }
+
+    /// 透视距离 P = max(3.2R, 520)（壳版 ring.js openRing 原式：
+    /// `P = Math.max(R * 3.2, 520)`；标准档 3.2×218 ≈ 697pt > 520，
+    /// 三档都取 3.2R）。卡片旋转不再用 SwiftUI perspective 0.5，
+    /// 透视全程只走这个显式 P（见 cylinderZ / perspectiveFactor）。
+    var ringPerspective: CGFloat {
+        max(3.2 * ringRadius, 520)
     }
 
     /// 每像素转角度数（壳版：180/(πR)×1.45）。
@@ -496,13 +578,15 @@ final class HomeCoverRingModel: ObservableObject {
     /// 计时器可能永远等不到触发）；30Hz Timer 同样不能用（用户 2026-11-21
     /// 「一卡一卡」：0.8px/步的离散跳变 + Task 跳主线程的调度抖动）。
     /// display link 跟屏幕刷新同步、`.common` 模式（页面滚动时也走，
-    /// 与旧 Timer 的 `.common` 同款）；回调经弱引用代理进主线程
-    /// （`FlatDisplayLinkProxy`，display link 强持 target，不代理就漏），
+    /// 与旧 Timer 的 `.common` 同款）；回调经弱引用代理直接在主线程跑
+    /// （`FlatDisplayLinkProxy`：display link 强持 target，不代理就漏；
+    /// r31-marquee 起不再经 Task 跳主线程，见代理处注释），
     /// 步长在 tickFlat 里按真实帧间隔 dt 算。
     func startFlatTimer() {
         guard flatDisplayLink == nil else { return }
         let proxy = FlatDisplayLinkProxy(model: self)
         let link = CADisplayLink(target: proxy, selector: #selector(FlatDisplayLinkProxy.fired(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
         flatLinkProxy = proxy
         flatDisplayLink = link
@@ -856,11 +940,12 @@ final class HomeCoverRingModel: ObservableObject {
         let trackIndex: Int
     }
 
-    /// 可见槽位：一次只见 3 张（r30 v5 图口径）——中心槽前后各一格
+    /// 可见槽位：一次只见 3 张（实拍 f_050 也是 3 张：左一张切半、中间完整、
+    /// 右一张切半；r30 v5 图口径同值）——中心槽前后各一格
     /// （world ±40°）；|world| ≤ 86.5°（facing > 0.06）仍作第二道防线，
     /// 同一首歌只出现一次（曲目 < 3 首时不复制，壳版 n = min(曲数, 环容量) 同款）。
-    /// 旧的中心±2 会在转环半途多露一格（world ±60° 在屏边各剩约 12pt 边角，
-    /// 未裁切时看得见；面板裁切后虽出不来，仍按 v5 收成 3 张）。
+    /// 旧的中心±2 会在转环半途多露一格（world ±60° 在屏边各剩约 12pt 边角；
+    /// r31 起环层全屏宽不裁切，±60° 的卡真会露出来，所以仍收成 3 张）。
     func visibleSlots() -> [RingSlot] {
         guard !tracks.isEmpty else { return [] }
         let q = -angle / ringStep
@@ -908,9 +993,40 @@ final class HomeCoverRingModel: ObservableObject {
         0.55 * pow(Double((1 - facing) / 2), 1.25)
     }
 
-    /// 透视缩放 P=3.2R：scale = 3.2 / (3.2 + (1-facing))。
-    func depthScale(facing: CGFloat) -> CGFloat {
-        3.2 / (3.2 + (1 - facing))
+    /// 透视缩放（r31 真圆柱）：scale = P/(P−z)，与 projectedX 共用同一个
+    /// 透视因子 `perspectiveFactor`（旧式 3.2/(3.2+(1−facing)) 就是它
+    /// 在 P=3.2R、z=R·(facing−1) 下展开后的样子，数值不变；现在改成
+    /// 按 world 角委托，展开/收回中跟有效半径走，与 projectedX 严格同源，
+    /// 不再各算各的）。
+    func depthScale(forWorld world: CGFloat) -> CGFloat {
+        perspectiveFactor(forWorld: world)
+    }
+
+    /// 某槽位在圆柱面上的 z 深度（r31 真圆柱，相对正前方卡面，≤0）：
+    /// z = R·(cos(world)−1)；正前方 0，world=±40° 时约 −0.234R（标准档
+    /// 约 −51pt），world=±80° 时约 −0.826R。r30 没有这个量——所有卡
+    /// 都在 z=0 平面上，只剩原地旋转 + perspective 0.5 压扁，看着是折过去。
+    /// 展开/收回中跟有效半径走（R 收缩时深度同缩，与 projectedX 同款）。
+    func cylinderZ(forWorld world: CGFloat) -> CGFloat {
+        effectiveRadius() * (facing(forWorld: world) - 1)
+    }
+
+    /// 透视因子 P/(P−z)（r31 真圆柱）：正前方 1，越靠两侧越小——卡片离
+    /// 相机越远显得越小、也往中心收。P = ringPerspective（3.2R），
+    /// z = cylinderZ（有效半径下，壳版 renderRing 的 CSS 透视等价物；
+    /// 展开时 entry<1、z 绝对值小，因子接近 1，环从平面里长出来）。
+    func perspectiveFactor(forWorld world: CGFloat) -> CGFloat {
+        let p = ringPerspective
+        return p / (p - cylinderZ(forWorld: world))
+    }
+
+    /// 透视投影后的横向偏移（r31 真圆柱）：x = R·sin(world)·P/(P−z)。
+    /// r30 的 x = R·sin(world) 没除透视：侧卡摆得太开（标准档 40° 时
+    /// 140pt，真投影约 131pt），又没有 z 深度，只剩原地旋转，看着是折叠；
+    /// 现在侧卡既被推到圆柱面后面去（cylinderZ），横向又按透视收进，
+    /// 绕着圆柱转过去才是转圈圈。
+    func projectedX(forWorld world: CGFloat) -> CGFloat {
+        effectiveRadius() * sin(world * .pi / 180) * perspectiveFactor(forWorld: world)
     }
 
     /// 相机 -5° 下坠（r26-3D，壳版 camera `translateZ(-R) rotateX(-5°)`）：
@@ -940,7 +1056,9 @@ final class HomeCoverRingModel: ObservableObject {
         return stripCenter.y > 0 ? stripCenter.y : screenHeight * 0.62
     }
 
-    /// 面板横向范围（r30 v5：侧卡由面板圆角 mask 裁切，不溢出面板外）：
+    /// 面板横向范围（r31 真圆柱：halfWidth 不再用于裁切——r30 v5 图的
+    /// 面板圆角裁切作废，实拍 f_050/f_060/f_070 里侧卡都溢出面板到屏边，
+    /// 环层改全屏宽；halfWidth 只保留作参考，不再拦点按、不再框环层）：
     /// 面板外缘 = 带子外缘各扩 20pt（dailyPanel padding 10 + 本文件
     /// body 的 VStack padding 10，见 HomeView.dailyPanel）；面板与带子
     /// 同中心（stripCenter.x）。带子还没量到（stripSize = 0）时回落
@@ -960,18 +1078,17 @@ final class HomeCoverRingModel: ObservableObject {
     /// r26-3D：纵坐标与 ringLayer 用同一个 `ringCenterY`（r31 起不夹取，
     /// 跟带子走），再按槽位加各自的 `tiltDrop`（-5° 下坠，越靠两侧越小），命中盒与
     /// 眼睛看到的卡片位置一致；不加下坠时前排卡的命中盒会比实物高 20pt。
+    /// r31 真圆柱：横向锚点与 ringLayer 同款——panel.centerX（环跟着面板走；
+    /// 旧的 screenWidth/2 与渲染锚点不是同一个，面板偏移时点按盒会错位），
+    /// 横向位置与渲染同款 projectedX（透视投影后的位置，不是 R·sin），
+    /// 面板外拦截删掉（侧卡溢出面板到屏边，溢出部分看得见、点得到）。
     func hitTestRingCard(at point: CGPoint, screenWidth: CGFloat, screenHeight: CGFloat? = nil, topEdge: CGFloat = 95) -> Int? {
-        // r30：面板外的点按不算点卡（侧卡被面板裁掉的部分看不见，点那里
-        // 应是点空白快收，不是点中被裁掉的卡）。
         let panel = panelRect(screenWidth: screenWidth)
-        guard point.x >= panel.centerX - panel.halfWidth,
-              point.x <= panel.centerX + panel.halfWidth else { return nil }
-        let cx = screenWidth / 2
+        let cx = panel.centerX
         let cy = ringCenterY(screenHeight: screenHeight ?? 0, topEdge: topEdge)
-        let r = effectiveRadius()
         var best: (index: Int, world: CGFloat)?
         for slot in visibleSlots() {
-            let x = cx + r * sin(slot.world * .pi / 180)
+            let x = cx + projectedX(forWorld: slot.world)
             let slotCy = cy + tiltDrop(facing: facing(forWorld: slot.world))
             let halfW = ringCard * 0.55
             let halfH = ringCardHeight / 2
@@ -1251,9 +1368,18 @@ private struct FlatSetWidthKey: PreferenceKey {
 /// r31：display link 回调代理。CADisplayLink 强持 target，模型直接当
 /// target 会循环引用、deinit 永远不走（r26 Timer 漏表同款泄漏）；代理
 /// 只弱持模型，模型释放时 deinit 停表，link 随模型一起释放。
-/// 回调在主线程 RunLoop 上触发，跳主线程用 `Task { @MainActor in }`
-/// （与 r26 Timer 版同款写法）；dt 从 link.timestamp 算，不受这
-/// 几毫秒延迟影响。
+/// r31-marquee：回调不再经 `Task { @MainActor in }` 跳主线程——
+/// display link 已挂在 RunLoop.main 上，回调本身就在主线程；每帧一个
+/// Task 会让步长在任务队列里扎堆（几帧的量一次走完、再空几帧），就是
+/// 「一卡一卡」，dt 也要在回调当下读 link.timestamp，Task 里读到的
+/// 是更新后的戳。r31 第一推文件头写的是「去掉 Task 跳线程」，代码里
+/// 其实还留着，本轮才真去掉：代理直接调 tick（`MainActor.assumeIsolated`，
+/// link 只加在 .main 上，回调只可能在主线程）。
+/// 本文件只动这一处代理：flatDragging 的看门狗与全部出口（ended /
+/// cancelled / failed / willMove / touchesCancelled）r26 已补齐，
+/// ringPhase 收回竞态也被 `ringPhase == .open` 守卫封死（收回进行中
+/// 没有任何调用能再推 closeGeneration），每日带没有能永久卡住的旗子，
+/// 不动 tickFlat。
 private final class FlatDisplayLinkProxy: NSObject {
     weak var model: HomeCoverRingModel?
 
@@ -1262,7 +1388,9 @@ private final class FlatDisplayLinkProxy: NSObject {
     }
 
     @objc func fired(_ link: CADisplayLink) {
-        Task { @MainActor in self.model?.flatDisplayLinkFired(link) }
+        MainActor.assumeIsolated {
+            self.model?.flatDisplayLinkFired(link)
+        }
     }
 }
 
@@ -1359,54 +1487,54 @@ struct HomeRingOverlayView: View {
         )
     }
 
-    /// 圆柱环：容器框在环中心（平面带中心），卡按世界角排布；
-    /// 容器整体 rotateX(-5°)（壳版 camera 同款），转轴就是环中心。
+    /// 真圆柱环（r31）：容器框在环中心（平面带中心），卡按世界角排布；
+    /// 每张卡先推到圆柱面上（`cylinderZ`：z = R·(cos(world)−1)，正前方 0、
+    /// 侧卡为负），横向按透视投影摆（`projectedX`：x = R·sin(world)·P/(P−z)，
+    /// P = 3.2R），再绕 Y 轴转 +world（切于圆柱面朝外，与壳版槽位
+    /// rotateY(+base) translateZ(R) 同款；r30 的 -world 是播放页 CoverFlow
+    /// 的朝内转法抄过来的，右卡右缘朝前、看着就是折过去），卡内旋转透视
+    /// 参数为 0——透视只走显式 3.2R 投影，不由 SwiftUI 的 0.5 再算一次
+    /// （SwiftUI perspective 与 CSS perspective:px 没有精确等价换算，
+    /// 见 CoverFlowView 文件头诚实注；卡内梯形透视是已知残留，见文件头）。
     /// r26-3D：纵向锚点走 `ringCenterY`（r31 起不夹取，环中心 = 带子中心）；每张卡再
     /// 下坠各自的 `tiltDrop`（相机 -5°，正前方约 20pt、两侧渐小）——
-    /// 原生之前 z=0 平面排布、容器旋转不产生下坠，环整体比视频高约 20pt。
-    /// r30 v5：环层按面板宽框住 + 圆角 22 裁切（dailyPanel 同值），侧卡
-    /// 被面板左右边切半、不溢出面板外；层内坐标 = 面板坐标（子卡 x/y
-    /// 各减面板左缘/上缘），卡中心纵向仍是 cy + tiltDrop，与旧版一致；
-    /// 层高 = 卡高 + 上下各 40pt 阴影余量（封面阴影 radius 26 / y 12，
-    /// 约 38pt，旧层高会把阴影下沿裁掉）。命中测试同步拦面板外点按
-    /// （见 hitTestRingCard）。
+    /// 相机 -5° 全由 tiltDrop 表达，容器整体 rotateX(-5°) 已删（r30 的
+    /// 容器旋转是双算，还把 perspective 0.5 强透视带进来）。
+    /// r31：环层改全屏宽、不裁切——r30 v5 图的面板圆角裁切作废，实拍
+    /// f_050/f_060/f_070 里侧卡都溢出面板到屏边；层内坐标 = 屏坐标
+    /// （子卡 x = 屏宽/2 + projectedX，层框在 panel.centerX 上），卡中心
+    /// 纵向仍是 cy + tiltDrop，与旧版一致；层高 = 卡高 + 上下各 40pt
+    /// 阴影余量（封面阴影 radius 26 / y 12，约 38pt）。
+    /// 命中测试与渲染同款锚点 + 同款 projectedX（见 hitTestRingCard），
+    /// 溢出面板的部分也点得到。
     private func ringLayer(screenWidth: CGFloat, screenHeight: CGFloat) -> some View {
         let topEdge: CGFloat = screenWidth > screenHeight ? 64 : 95
         let cy = model.ringCenterY(screenHeight: screenHeight, topEdge: topEdge)
         let panel = model.panelRect(screenWidth: screenWidth)
-        let panelMinX = panel.centerX - panel.halfWidth
-        let r = model.effectiveRadius()
         let cam = model.cameraScale()
         let layerHeight = model.ringCardHeight + 80
         return ZStack {
             ForEach(model.visibleSlots()) { slot in
                 let track = model.tracks[slot.trackIndex]
                 let facing = model.facing(forWorld: slot.world)
-                let x = panel.centerX + r * sin(slot.world * .pi / 180)
                 RingCardView(
                     track: track,
                     width: model.ringCard,
                     shadeOpacity: model.shadeOpacity(facing: facing)
                 )
-                .scaleEffect(model.depthScale(facing: facing) * cam)
+                .scaleEffect(model.depthScale(forWorld: slot.world) * cam)
                 .rotation3DEffect(
-                    .degrees(-Double(slot.world)),
+                    .degrees(Double(slot.world)),
                     axis: (x: 0, y: 1, z: 0),
-                    perspective: 0.5
+                    perspective: 0
                 )
                 .opacity(model.facingOpacity(facing: facing))
-                .position(x: x - panelMinX, y: layerHeight / 2 + model.tiltDrop(facing: facing))
+                .position(x: screenWidth / 2 + model.projectedX(forWorld: slot.world), y: layerHeight / 2 + model.tiltDrop(facing: facing))
                 .zIndex(Double(100 - abs(slot.world)))
                 .accessibilityLabel("播放：\(track.title)")
             }
         }
-        .frame(width: panel.halfWidth * 2, height: layerHeight)
-        .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius22))
-        .rotation3DEffect(
-            .degrees(-5),
-            axis: (x: 1, y: 0, z: 0),
-            perspective: 0.5
-        )
+        .frame(width: screenWidth, height: layerHeight)
         .position(x: panel.centerX, y: cy)
     }
 }

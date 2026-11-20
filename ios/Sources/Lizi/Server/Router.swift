@@ -251,7 +251,7 @@ final class LiziRouter {
         case "qq":
             songId = req.string("mid").isEmpty ? req.string("id") : req.string("mid")
         case "kuwo":
-            // 酷我：新音源（聆澜）后端只要裸 rid（数字），传歌名回 parameter error；
+            // 酷我：有的源后端只要裸 rid（数字），传歌名回 parameter error；
             // 旧脚本要 musicInfo.name（歌名）。两边都要：songId 走 rid，
             // 歌名另传 songName，引擎里分别填 songmid / name（见 LXScriptEngine）。
             var kwId = req.string("id")

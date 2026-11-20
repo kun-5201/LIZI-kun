@@ -1010,6 +1010,16 @@ actor FoliaKugouService {
             let res = try await gateway(path: "/v3/get_my_info", method: "POST",
                                         params: ["plat": "1"], body: body,
                                         xRouter: "usercenter.kugou.com")
+            // r31 登录态同尺子修：以前这里只认 token 在不在，user_detail 失败
+            // 直接吞掉——token 过期/被顶掉时设置页照常显示「已登录」，歌单那路
+            // 却拿不到数据（用户 2026-11-21 05:59 报的酷狗同款）。现在上游
+            // 明确拒了（status 0 / errcode 非 0）就判未登录、带 stale（设置页
+            // 显示未登录，不再两边各说各话）；transport 抛错（弱网）走外层
+            // catch 仍认登录（断网 ≠ 登出），与本函数原有注释一致。
+            guard Self.upstreamStatus(res.json) == 1 else {
+                return .json(200, ["code": 200, "loggedIn": false, "stale": true,
+                                   "nickname": "", "avatar": "", "uid": login.userid, "vip": false])
+            }
             let data = Self.dataDict(res.json)
             // Folia normalizeUser：user_info / userinfo / profile / data 本体。
             let profile = (data["user_info"] as? [String: Any])
@@ -1319,7 +1329,9 @@ actor FoliaKugouService {
         if req.bool("cloud") {
             if let url = try? await fetchCloudURL(hash: hash, albumAudioId: albumAudioId,
                                                   audioId: req.int("audioId", 0), name: req.string("name")) {
-                return .json(200, ["code": 0, "url": url, "quality": "flac", "via": "kugou-cloud"])
+                // r31 真实音质：云盘文件的实际档位未知，绝不硬编 "flac"——
+                // 空串进桥后 canon 回 nil，UI 不挂徽章。
+                return .json(200, ["code": 0, "url": url, "quality": "", "via": "kugou-cloud"])
             }
             return .json(200, ["code": 2, "reason": "unavailable", "error": "云盘取链失败"])
         }
@@ -1676,6 +1688,18 @@ actor FoliaKugouService {
         let res = try await gateway(path: "/v7/get_all_list", method: "POST",
                                     params: ["plat": "1", "userid": login.userid, "token": login.token],
                                     body: body, xRouter: "cloudlist.service.kugou.com")
+        // r31 登录态同尺子修：token 死了时上游回 errcode 非 0；以前这里不验，
+        // 直接按空列表回，面板只剩「酷狗没有返回歌单」，和设置页「已登录」
+        // 对不上。HTTP 200 + 上游拒 = 登录失效（401，面板显示重登提示）；
+        // HTTP 非 200 = 上游故障（502，不谎称登录失效）。
+        guard Self.upstreamStatus(res.json) == 1 else {
+            if res.httpStatus == 200 {
+                return .json(200, ["code": 401, "source": "kugou", "playlists": [],
+                                   "error": "酷狗登录已失效，请重新扫码登录"])
+            }
+            return .json(200, ["code": 502, "source": "kugou", "playlists": [],
+                               "error": "酷狗歌单拉取失败"])
+        }
         let items = Self.firstListArray(res.json, keys: ["info", "list", "lists"])
         var playlists: [[String: Any]] = []
         var albums: [[String: Any]] = []
@@ -2046,7 +2070,9 @@ actor FoliaKugouService {
         }
         if let url = try? await fetchCloudURL(hash: hash, albumAudioId: req.int("albumAudioId", 0),
                                               audioId: req.int("audioId", 0), name: req.string("name")) {
-            return .json(200, ["code": 0, "url": url, "quality": "flac", "via": "kugou-cloud"])
+            // r31 真实音质：云盘文件的实际档位未知，绝不硬编 "flac"——
+            // 空串进桥后 canon 回 nil，UI 不挂徽章。
+            return .json(200, ["code": 0, "url": url, "quality": "", "via": "kugou-cloud"])
         }
         return .json(200, ["code": 2, "reason": "unavailable", "error": "云盘取链失败"])
     }

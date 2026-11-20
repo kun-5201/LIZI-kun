@@ -91,7 +91,9 @@ final class SphereGalleryViewModel: ObservableObject {
     private func startInertia() {
         stopInertia()
         guard abs(velYaw) > 0.00002 || abs(velPitch) > 0.00002 else { return }
-        inertiaTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+        // r31-120hz：惯性 Timer 旧 1/60（60Hz 步进），改 1/120；下面 inertiaStep
+        // 的 dt 同步改 1000/120，衰减 pow(0.9, dt/16.7) 按 dt 算、每秒衰减不变。
+        inertiaTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { [weak self] _ in
             self?.inertiaStep()
         }
     }
@@ -99,7 +101,10 @@ final class SphereGalleryViewModel: ObservableObject {
     private func inertiaStep() {
         guard !isDragging else { stopInertia(); return }
         // 壳版 pickStep：每帧衰减 0.9^(dt/16.7)，速度归零即停。
-        let dt = 1000.0 / 60
+        // r31-120hz：dt 与上面 inertiaTimer 的 1/120 同步（1000/120 ≈ 8.33ms），
+        // 步长减半、步数翻倍，每秒位移与衰减都不变；拖动时的速度估算仍用 16.7ms
+        // 固定帧长（见 dragMoved），那是速度估算不是帧 pacing，不动。
+        let dt = 1000.0 / 120
         yaw = SphereMath.normalizedYaw(yaw + velYaw * dt)
         pitch = SphereMath.clampedPitch(pitch + velPitch * dt)
         let decay = pow(0.9, dt / 16.7)

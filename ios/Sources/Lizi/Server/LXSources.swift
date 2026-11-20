@@ -14,7 +14,7 @@ import CryptoKit
 /// 预装的 20 个 pdone 源也已删（用户 2026-11-18 04:01「把内置音源都删掉，
 /// 只保留自定义音源接口」）：包里不再带 public/lx-sources 脚本，没有
 /// 种子导入、没有内置源仓库；升级后手机上已导入的那批由 list() 里的
-/// purgeBuiltinSources() 在启动时清掉。用户以后自己从 URL 或本地 .js
+/// purgeRemovedSources() 在启动时清掉。用户以后自己从 URL 或本地 .js
 /// 导入源，管理界面（开关/删除/自动切换）照常好用。
 ///
 /// 导入校验（import-url / import-file / 刷新 / 补绑 URL 共用）：
@@ -32,9 +32,9 @@ struct LXSourceMeta: Codable {
     /// inited 上报的、带 musicUrl 的平台（去掉 'local' 伪源），如 ["tx", "wy"]。
     var platforms: [String]
     /// "url" = URL 导入（有 sourceUrl，可刷新）/ "local" = 本地文件导入。
-    /// "sponsored" = 赞助版内置源（构建机 secret 拉进包的 linglan.js，
-    /// 默认启用、可关不可删）。旧版预装的内置源 origin 是 "builtin"，
-    /// list() 里启动时清掉（见 purgeBuiltinSources）。
+    /// 旧版预装的内置源 origin 是 "builtin"，list() 里启动时清掉
+    ///（见 purgeRemovedSources）。r31 删赞助版内置源：origin "sponsored"
+    /// 的旧记录同样在 list() 里清掉（脚本文件 + 清单记录 + 运行实例）。
     var origin: String
     /// URL 导入的源地址（已转 raw）；本地源为 nil，旧记录补绑后才有。
     var sourceUrl: String?
@@ -192,101 +192,36 @@ final class LXSourceRegistry {
     // MARK: - 列表
 
     /// 导入顺序（manifest 顺序），前端按这个顺序画、服务端按这个顺序试。
-    /// 每次先清掉旧版预装的内置源（origin == "builtin"，用户 2026-11-18
-    /// 要求删掉全部 20 个预装源）：升级后用户手机上已经导入的那批也在
-    /// 这里清掉——manifest 记录 + 脚本文件 + 运行实例一起删；没有内置
-    /// 源时这步什么都不做。只留用户自己加的自定义源。
-    /// 读列表前先看包里有没有赞助版内置脚本（有就注册，没有就静默跳过）：
-    /// 壳版包里没有 LXSponsored 目录，调用是空操作，壳版行为不变。
+    /// 每次先清掉已删的内置源：旧版预装的（origin == "builtin"，用户
+    /// 2026-11-18 要求删掉全部 20 个预装源）与 r31 删掉的赞助版内置源
+    ///（origin == "sponsored"，用户 2026-11-21 要求整个删掉）：升级后用户
+    /// 手机上已经导入的那批也在 list() 里清掉——manifest 记录 + 脚本文件
+    /// + 运行实例一起删；没有这类记录时这步什么都不做。只留用户自己加的
+    /// 自定义源。
+    /// r31：赞助版内置源已删，不再注册任何内置源；包里也不再带它的脚本。
     func list() -> [LXSourceMeta] {
-        registerBundledSponsoredSourceIfPresent()
         return ioQueue.sync {
-            purgeBuiltinSources()
+            purgeRemovedSources()
             return LXSourceStore.loadManifest()
         }
     }
 
-    /// 清掉旧版预装的内置源（只在 ioQueue 上调）。幂等：没有就直接返回。
-    private func purgeBuiltinSources() {
+    /// 清掉已删的内置源（只在 ioQueue 上调）。幂等：没有就直接返回。
+    /// r31：除旧版预装（origin "builtin"）外，赞助版（origin "sponsored"）
+    /// 的旧记录也在这里清掉——升级上来的手机清单里还留着它时，列表里不
+    /// 再出现它，脚本文件（lx-sources/ 下该记录的 .js）与运行实例一起删。
+    private func purgeRemovedSources() {
         var manifest = LXSourceStore.loadManifest()
-        let doomed = manifest.filter { $0.origin == "builtin" }
+        let doomed = manifest.filter { $0.origin == "builtin" || $0.origin == "sponsored" }
         guard !doomed.isEmpty else { return }
         for m in doomed {
             try? FileManager.default.removeItem(at: LXSourceStore.scriptURL(id: m.id))
             removeInstance(id: m.id)
         }
-        manifest.removeAll(where: { $0.origin == "builtin" })
+        manifest.removeAll(where: { $0.origin == "builtin" || $0.origin == "sponsored" })
         LXSourceStore.saveManifest(manifest)
         // 旧种子标记也清掉，别留着占位。
         UserDefaults.standard.removeObject(forKey: "lxSourcesSeededV1")
-    }
-
-    // MARK: - 赞助版内置源（构建机 secret 拉取进包）
-
-    /// 赞助版内置源的固定清单 id：包内脚本更新时复用同一条记录，不重复建。
-    static let sponsoredSourceId = "sponsored-linglan"
-    /// 赞助版内置源的展示名（脚本 @name 自带 "[过期: …]" 后缀，validate()
-    /// 里已洗掉；这里再统一成全角括号的规范名）。
-    static let sponsoredDisplayName = "聆澜音源（赞助版）"
-
-    /// 包内存在 Resources/LXSponsored/linglan.js 时注册为内置源，默认启用、
-    /// 可关不可删（origin "sponsored"，delete() 拒绝删它）；包内没有该文件
-    ///（本地开发构建、secret 未配）时静默不出现，不报错、不留占位。
-    /// 脚本内容不硬编码进 Swift：只读包内文件，校验（validate()：跑起来 +
-    /// inited 上报 musicUrl 平台）通过才落盘进 lx-sources 目录；校验失败
-    /// 同样静默跳过。幂等：已注册且脚本未变时直接返回；脚本更新时刷新文件
-    /// 与元数据（版本/作者/平台/sha），保留用户的启用开关。
-    /// 壳版包里没有 LXSponsored 目录，Bundle 查找返回 nil，整段是空操作。
-    /// 调用点：LiziNativeApp init + list() 开头（自愈：init 时机万一错过，
-    /// 第一次读列表时补注册）。validate() 内部走 jsQueue，与 ioQueue 不
-    /// 嵌套；这里先校验（ioQueue 之外），再进 ioQueue 写清单，不死锁。
-    func registerBundledSponsoredSourceIfPresent() {
-        guard let url = Bundle.main.url(forResource: "linglan", withExtension: "js", subdirectory: "LXSponsored") else { return }
-        guard let script = try? String(contentsOf: url, encoding: .utf8),
-              !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let validated: (name: String, version: String, author: String, platforms: [String], instance: LXScriptInstance)
-        do {
-            validated = try validate(script: script, displayName: Self.sponsoredDisplayName)
-        } catch {
-            return
-        }
-        let sha = LXSourceStore.sha256Hex(script)
-        ioQueue.sync {
-            var manifest = LXSourceStore.loadManifest()
-            if let i = manifest.firstIndex(where: { $0.id == Self.sponsoredSourceId }) {
-                guard manifest[i].sha256 != sha else { return }
-                var updated = manifest[i]
-                updated.name = Self.sponsoredDisplayName
-                updated.version = validated.version
-                updated.author = validated.author
-                updated.platforms = validated.platforms
-                updated.sha256 = sha
-                try? Data(script.utf8).write(to: LXSourceStore.scriptURL(id: Self.sponsoredSourceId), options: .atomic)
-                manifest[i] = updated
-                LXSourceStore.saveManifest(manifest)
-                replaceInstance(id: Self.sponsoredSourceId, instance: validated.instance)
-                return
-            }
-            let meta = LXSourceMeta(
-                id: Self.sponsoredSourceId,
-                name: Self.sponsoredDisplayName,
-                version: validated.version,
-                author: validated.author,
-                platforms: validated.platforms,
-                origin: "sponsored",
-                sourceUrl: nil,
-                enabled: true,
-                importedAt: Date().timeIntervalSince1970,
-                sha256: sha
-            )
-            do {
-                try FileManager.default.createDirectory(at: LXSourceStore.directory, withIntermediateDirectories: true)
-                try Data(script.utf8).write(to: LXSourceStore.scriptURL(id: Self.sponsoredSourceId), options: .atomic)
-            } catch { return }
-            manifest.append(meta)
-            LXSourceStore.saveManifest(manifest)
-            replaceInstance(id: Self.sponsoredSourceId, instance: validated.instance)
-        }
     }
 
     // MARK: - 导入
@@ -389,14 +324,15 @@ final class LXSourceRegistry {
     /// 删除源：脚本文件 + manifest 记录 + 运行实例一起清掉。
     /// 内置源（origin == "builtin"）不可删、只能关——list() 启动时已清掉
     /// 旧版预装的那批，这里是防御：万一哪天又有内置源进清单，删除也删
-    /// 不掉它，只能在设置页关掉（setEnabled）。赞助版内置源
-    ///（origin == "sponsored"）同样可关不可删。
+    /// 不掉它，只能在设置页关掉（setEnabled）。r31 起不再有任何内置源
+    ///（赞助版已删；旧 "sponsored" 记录由 list() 的 purgeRemovedSources
+    /// 清掉，不再进删除分支）。
     @discardableResult
     func delete(id: String) -> Bool {
         ioQueue.sync {
             var manifest = LXSourceStore.loadManifest()
             guard let i = manifest.firstIndex(where: { $0.id == id }) else { return false }
-            guard manifest[i].origin != "builtin" && manifest[i].origin != "sponsored" else { return false }
+            guard manifest[i].origin != "builtin" else { return false }
             manifest.remove(at: i)
             LXSourceStore.saveManifest(manifest)
             try? FileManager.default.removeItem(at: LXSourceStore.scriptURL(id: id))

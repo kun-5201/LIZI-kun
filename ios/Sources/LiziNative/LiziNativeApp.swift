@@ -18,10 +18,7 @@ struct LiziNativeApp: App {
         // 第 21 轮第 1 件：先上报上次死在哪一步（读干净退出旗标 + 快照面包屑
         // 最后一步），再干别的——DiagLog.shared 的 init 只读盘，不报死亡。
         DiagLog.shared.markLaunched()
-        // 赞助版内置源：包内有 Resources/LXSponsored/linglan.js 时注册为
-        //「聆澜音源（赞助版）」（默认启用、可关不可删）；包内没有时静默
-        // 不出现。壳版包里没有该文件，调用是空操作。
-        LXSourceRegistry.shared.registerBundledSponsoredSourceIfPresent()
+        // r31：赞助版内置源已删，不再注册任何内置源；LX 兜底只走用户自加的自定义源。
         // 第 22 轮第 5 件（照 Moumusic 三件套 @MainActor）：PlaybackStore /
         // NowPlayingCoordinator 都是 @MainActor，
         // 在非隔离的 App.init 里只能用 MainActor.assumeIsolated 创建

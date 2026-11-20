@@ -808,7 +808,7 @@ final class LXScriptInstance {
         return try await withThrowingTaskGroup(of: (String, String).self) { group in
             group.addTask {
                 var lastError: Error?
-                // r26：只试源声明过的档位（effectiveTiers）：聆澜赞助源对
+                // r26：只试源声明过的档位（effectiveTiers）：有的源对
                 // kw 不声明 master/atmos、对 qs 只声明 32k/64k/128k/256k/
                 // 320k/flac——旧代码全档硬试，服务端每次都回「当前卡密不
                 // 支持该平台或音质」（kw 白烧 2 次、qs 白烧 4 次），白白

@@ -1181,7 +1181,10 @@ final class QishuiService {
                     let preview = (r["preview"] as? NSNumber)?.boolValue == true
                     return .json(200, ["code": 200, "id": req.string("id"), "url": scStr(r, "url"),
                                        "preview": preview, "clipStartMs": scInt(r, "clipStartMs"),
-                                       "quality": scStr(r, "quality").isEmpty ? q : scStr(r, "quality"),
+                                       // r31 真实音质：上游没给档位时绝不拿请求档位 q 顶——
+                                       // 空串进桥后 canon 回 nil，UI 不挂徽章（原来
+                                       // `?? q` 会把要的档位当成实际档位显示）。
+                                       "quality": scStr(r, "quality"),
                                        "reason": preview ? "preview" : NSNull(), "error": NSNull()])
                 } catch let e as QishuiError {
                     // 边车 /audio 失败回 HTTP 200 的空地址体，主服务同理。

@@ -350,11 +350,6 @@ struct SettingsView: View {
                             Text("内置源 · 只能关")
                                 .font(.liziBody(size: LiziTokens.size13))
                                 .foregroundColor(LiziTokens.ink3)
-                        } else if source.origin == "sponsored" {
-                            // 赞助版内置源同样可关不可删（registry.delete 也会拒绝）。
-                            Text("赞助源 · 只能关")
-                                .font(.liziBody(size: LiziTokens.size13))
-                                .foregroundColor(LiziTokens.ink3)
                         } else {
                             Button("删除") {
                                 settings.deleteLXSource(id: source.id)
@@ -697,9 +692,10 @@ struct SettingsView: View {
             HStack {
                 rowLabel("关于 LIZI")
                 Spacer()
-                Text("LIZI kun")
-                    .font(.liziBody(size: LiziTokens.size13))
-                    .foregroundColor(LiziTokens.ink2)
+                // r31：关于行也用代码打上去的品牌三件套（BrandLockupView，
+                // LI 标记 + LIZI + kun，与顶栏同一份），不再是纯文字
+                // 「LIZI kun」——原来这里根本没有 LI 标记。
+                BrandLockupView()
             }
             HStack {
                 rowLabel("版本")

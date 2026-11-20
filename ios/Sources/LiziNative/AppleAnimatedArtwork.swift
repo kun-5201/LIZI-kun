@@ -97,7 +97,12 @@ import UIKit
 ///   7 平台 ISRC 能不能拿到（2026-11-21 VM 对真上游实测，非凭记忆）：
 ///   - Apple Music：能。catalog attributes.isrc（实测 TWK972201202 /
 ///     HKG732264813）；iTunes Search/Lookup API 全键列表里根本没有 isrc，
-///     所以 Apple Music 的 ISRC 只走 catalog（有开发者 token 时）。
+///     所以 Apple Music 的 ISRC 只走 catalog。r31 起 catalog 用三路 token
+///     （已贴 > 缓存网页 > 现抠，见 AppleMusic.swift catalogToken），
+///     无粘贴 token 也能走 catalog、拿到 ISRC（r31 断点 1 的根因修；
+///     catalogSearch 还补了 Origin 头——网页 token 在官方 host 上无
+///     Origin 会 401，VM 实测；专辑 id 从 attributes.url 解析，search
+///     端点不回 relationships，VM 实测）。
 ///   - 网易：不能。搜索行与 weapi /v3/song/detail 全键列表均无 isrc。
 ///   - QQ：不能。DoSearchForQQMusicLite 搜索行与 get_song_detail_yqq 的
 ///     track_info 全键列表均无 isrc。
@@ -355,6 +360,17 @@ final class AppleAnimatedArtworkProvider {
                 message: "route B \(short) (cached negative) track=\(track.title) artist=\(track.artist) album=\(track.album)",
                 fields: ["lane": neg.lane, "platform": track.platform])
             return false
+        }
+        // r31：ISRC 为空时记一笔（route-b-no-isrc）——以前 ISRC 门直接跳过、
+        // 日志里永远看不到“这首歌根本没走 ISRC 路”，断点 1 就是这么藏住的
+        // （搜索走 iTunes 时 Track.isrc 恒为空）。这只是“本次没走 ISRC”
+        // 的记录，不是结论：不进 lastConclusion、不记否定；是否命中 ISRC
+        // 仍由下面的 isrc-hit / isrc-miss 记。放在否定缓存判断之后——
+        // 已记否定的歌直接认栽，不重复刷这条。
+        if track.isrc.isEmpty {
+            DiagLog.shared.recordLog(category: "apple-animated-artwork",
+                message: "route B no ISRC on track, ISRC lookup skipped track=\(track.title) artist=\(track.artist) album=\(track.album)",
+                fields: ["lane": "route-b-no-isrc", "platform": track.platform])
         }
         // 1. 拿专辑 id + 所在店面（hint 路径顺带把 editorialVideo 也拿了，免得再查一次）。
         var album: (id: String, storefront: String)?

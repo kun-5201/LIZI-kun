@@ -18,6 +18,15 @@ enum NativeBridge {
 
     /// LX 取链硬超时（第 15 轮：LX 脚本 Promise 可能永不 settle；25 秒不回就当失败）。
     static let lxTimeout: TimeInterval = 25
+    /// 每日推荐整链硬超时（r28：单腿都有超时，但网易匿名要连调两条
+    /// （recommend/songs + personalized，各 15s × 2 次重试）、QQ 登录态
+    /// 刷新 + 两条各 25s，最坏单次拉取 60–75s 才落空态；且每次回首页
+    /// 都从头拉。整链 25s 不回就当空、UI 走诚实空态，不让 spinner
+    /// 无限转。健康链路实测 0.3–5.2s（r28 真机前用 r27 Node 服务对
+    /// 真上游测过），25s 是约 5 倍余量。超时只掐断 UI 的等待——
+    /// 底下的 URLSession 取数不停（链路里没有取消检查点），它自己
+    /// 到腿超时就停，不泄漏。
+    static let dailyTimeout: TimeInterval = 25
     /// 会员态查询超时（player.js MEMBER_TIMEOUT_MS = 2000；超时按「没会员」走 LX，
     /// LX 失败还会回落官方，不会把歌播死）。
     static let membershipTimeout: TimeInterval = 2
@@ -558,7 +567,16 @@ return false
     /// - kuwo: /api/kuwo/daily；kugou: /api/kugou/everyday/recommend
     ///   （Folia everyday_recommend）；applemusic: /api/applemusic/daily
     ///   （公开排行榜 RSS）。三家形状都是 { tracks }，已核对，不动。
+    /// - r28：整链包一层 dailyTimeout（25s）硬超时，见 dailyTimeout 注释；
+    ///   超时按空处理，loadDaily 走诚实空态，不留 spinner。
     static func dailyRecommend(platform: String) async -> [DailyTrack] {
+        (try? await withTimeout(seconds: Self.dailyTimeout) {
+            await dailyRecommendUntimed(platform: platform)
+        }) ?? []
+    }
+
+    /// 每日推荐整链（无超时；dailyRecommend 的超时壳调这里）。
+    private static func dailyRecommendUntimed(platform: String) async -> [DailyTrack] {
         switch platform {
         case "netease":
             if let tracks = await dailyTracks(path: "/api/recommend/songs", platform: platform),

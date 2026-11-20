@@ -15,6 +15,11 @@
        display:grid;place-items:center;font:600 12px/1 ui-monospace,monospace;color:rgba(200,210,255,.6);
        transition:background .15s,color .15s}
   #dot:hover{background:rgba(255,255,255,.16);color:#fff}
+  /* r28：形态自带调参面板入口藏掉（#dot 齿轮 + #panel）——设置统一走原生
+     齿轮浮层（StageFloatPanel + __stagePanel + 'setting' 消息；本形态已接
+     setting，见 140/691 行，参数与原生面板同一套）。只藏面板入口，
+     不动粒子画面（#c / #hint / 歌词层原样）。 */
+  #dot,#panel{display:none!important}
   #panel{position:fixed;right:12px;bottom:48px;width:308px;z-index:21;
          background:rgba(10,12,20,.90);border:1px solid rgba(255,255,255,.13);border-radius:12px;
          backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);

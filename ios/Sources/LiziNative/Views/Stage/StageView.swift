@@ -4,9 +4,12 @@ import SwiftUI
 ///
 /// 分层：
 /// - 底层：`StageWebView`（WKWebView，file:// 加载 `Resources/stages/*.html`）。
-/// - 上层：原生 HUD——顶行（返回 + 播放胶囊 + 设置 / 形态）+ 左下角
-///   （当前歌词小行 + 歌手名）。旧的底部迷你播放条（bottomHUD 整条）已撤，
-///   播放控制全进顶部胶囊；形态名胶囊已撤（形态名只在形态选择器里显示）。
+/// - 上层：原生 HUD——竖屏顶行（返回 + 设置 / 形态三个按钮）+ 竖直中央
+///   叠加的播放胶囊（r28：胶囊移出顶行，浮在舞台画面/歌词上面，歌词仍在
+///   后面正常显示）；横屏整条控制行（返回 + 胶囊 + 设置 + 形态）都叠在
+///   竖直中央，返回贴左墙、设置/形态贴右墙、胶囊正中间。左下角（当前歌词
+///   小行 + 歌手名）。旧的底部迷你播放条（bottomHUD 整条）已撤，播放控制
+///   全进胶囊；形态名胶囊已撤（形态名只在形态选择器里显示）。
 ///
 /// 中央大歌词是哪一层（r20 已查，不猜）：
 /// - 截图里的形态是 519 棱镜阈限（prism-euphoria）：它自己画中央大歌词——
@@ -28,15 +31,17 @@ import SwiftUI
 /// - 返回一律回首页；设置齿轮开本形态设置浮层（只有形态声明了
 ///   `__stagePanel` 才显示）；九宫格开形态下拉浮层（r26：两个都是盖在
 ///   当前舞台画面上的就地浮层，不跳页、不停歌，点外面收起，互斥）。
-/// - HUD 闲置 2.6 秒自动藏起（桥里 `startHudTimer`），藏起后剩「显示控制」
-///   小按钮唤醒；相机形态不盖全屏点按唤醒层，拖动镜头不受影响。
+/// - HUD 闲置 2.6 秒自动藏起（桥里 `startHudTimer`），藏起后非相机形态
+///   点一下屏幕就唤醒（全屏透明唤醒层，壳版 `#stage-tap` 同款）；相机形态
+///   不盖点屏层（拖动镜头不受影响），所以只在相机形态下保留「显示控制」
+///   小按钮作唤回入口（见 `wakeButton`），其余形态藏起后底部什么也不剩。
 /// - 相机形态（552 烟雨江南）：播放胶囊默认收起成封面 + 播放键，点封面展开
-///   （旧 bottomHUD 的收起态语义，原样搬进顶部胶囊）。
+///   （旧 bottomHUD 的收起态语义，原样搬进中央胶囊）。
 /// - 播放 / 暂停 / 切歌 / 进度 seek 接原来的 store 调用，一个不少；
 ///   无曲目时控制禁用，歌名「未播放」、副标题「—」，不编假数据。
-/// - 歌词行变化同步岛 / 锁屏：本页不另起链路——`PlaybackStore.currentLyricIndex`
-///   的变化本来就由 `NativeIslandCoordinator` 订阅推送（P1 已接好），舞台页
-///   只读同一份 store。
+/// - 歌词行变化只读同一份 store（`PlaybackStore.currentLyricIndex`），
+///   本页不另起链路；锁屏由 NowPlayingCoordinator 经 MPNowPlayingInfoCenter
+///   供图/信息，r28 已移除灵动岛。
 /// - 禁缩放：本页无任何 MagnificationGesture；WKWebView 内形态页自带
 ///   `user-scalable=no`（见各形态 HTML 的 viewport），与壳版一致。
 struct StageView: View {
@@ -80,12 +85,14 @@ struct StageView: View {
 
     /// 就地浮层本体（r26）：形态下拉 / 齿轮面板二选一，右上锚定、
     /// 顶行下方 10pt（壳版 `.smenu` / `.spnl` 的 `top: calc(100% + 10px)`）。
+    /// r28：横屏触发按钮已移到竖直中央，浮层仍锚右上不跟按钮走——放中央行
+    /// 下方会超屏底（行底约 223pt + 面板高 228pt > 393pt），右上锚定照常可用。
     /// 宽：下拉 min(560, 可用宽)，设置 min(340, 可用宽)（壳版 402 / 320，
     /// 设计图下拉更宽）；高：下拉 min(58% 屏高, 520)，设置 min(62% 屏高, 560)，
     /// 超出可滚。歌不停：浮层只盖画面，不动播放状态。
     @ViewBuilder
     private func floatingPanel(tokens: StageTokens, geo: GeometryProxy) -> some View {
-        let topRowHeight: CGFloat = tokens.isLandscape ? 40 : tokens.roundButtonDiameter
+        let topRowHeight: CGFloat = tokens.topCapsuleHeight
         let panelTop = geo.safeAreaInsets.top + tokens.topGap + topRowHeight + 10
         let horizontalSpace = geo.size.width
             - geo.safeAreaInsets.leading - geo.safeAreaInsets.trailing
@@ -126,7 +133,8 @@ struct StageView: View {
                     .ignoresSafeArea()
 
                 // HUD 藏起时：全屏透明唤醒层（壳版 `#stage-tap` 同款——点一下只唤醒
-                // 浮层，不往形态里传；相机形态不盖这层，拖动镜头不受影响）。
+                // 浮层，不往形态里传；相机形态不盖这层，拖动镜头不受影响，
+                // 相机形态改走底部「显示控制」药丸唤回，见 wakeButton）。
                 if !bridge.hudVisible, !bridge.isCamera {
                     Color.clear
                         .contentShape(Rectangle())
@@ -152,11 +160,30 @@ struct StageView: View {
                         // 左下角字块下方预留屏高约 18%：字块顶落在约 75% 高处，
                         // 与截图一致，且不压到 519 自带的屏底 #meta。
                         Spacer().frame(height: geo.size.height * tokens.captionBottomReserve)
-                    } else {
+                    } else if bridge.isCamera {
+                        // r28：非相机形态 HUD 藏起后点屏唤醒，底部不再留
+                        // 「显示控制」药丸；相机形态没有点屏唤醒层（拖镜头
+                        // 不受影响），只在相机形态下保留药丸作唤回入口，
+                        // 否则相机形态 HUD 藏起后回不来（见 wakeButton）。
                         wakeButton(safeArea: geo.safeAreaInsets)
                     }
                 }
                 .ignoresSafeArea()
+            }
+            // 控制行（r28）：竖屏只有播放胶囊叠在页面竖直中央；横屏整条
+            // 控制行（返回 + 胶囊 + 设置 + 形态）都叠在页面竖直中央，返回
+            // 贴左墙、设置/形态贴右墙、胶囊正中间（见 landscapeCenterRow）。
+            // ZStack 默认居中对齐 + 本 overlay(alignment: .center) 双保险；
+            // 只在 HUD 可见时出现，随 HUD 一起藏起。胶囊本体与尺寸一字不动，
+            // 浮在舞台画面 / 中央歌词上面，歌词仍在后面正常显示、不改布局。
+            .overlay(alignment: .center) {
+                if bridge.hudVisible {
+                    if tokens.isLandscape {
+                        landscapeCenterRow(tokens: tokens, geo: geo)
+                    } else {
+                        centeredPlayerCapsule(tokens: tokens, geo: geo)
+                    }
+                }
             }
             // 两个就地浮层（r26，用户 22:35 设计图 + 22:36 齿轮同款）：
             // 挂在 ZStack 上才能拿到 geo；本体见 floatingPanel。
@@ -192,19 +219,21 @@ struct StageView: View {
         }
     }
 
-    // MARK: - 顶行（返回 + 播放胶囊 + 设置 / 形态）
+    // MARK: - 顶行（仅竖屏：返回 + 设置 / 形态三个按钮；横屏整条控制行
+    //   已移到页面竖直中央贴墙，见 landscapeCenterRow；播放胶囊竖屏叠在
+    //   中央，见 centeredPlayerCapsule）
 
     @ViewBuilder
     private func topRow(tokens: StageTokens, geo: GeometryProxy) -> some View {
-        if tokens.isLandscape {
-            landscapeTopRow(tokens: tokens, geo: geo)
-        } else {
+        if !tokens.isLandscape {
             portraitTopRow(tokens: tokens, geo: geo)
         }
     }
 
-    /// 竖屏顶行：左返回圆按钮（只有 < 箭头）+ 中间窄磨砂胶囊（自适应宽）+
-    /// 右设置齿轮 + 九宫格两个圆按钮（只有图标）。
+    /// 竖屏顶行（r28）：左返回圆按钮（只有 < 箭头）+ 右设置齿轮 + 九宫格
+    /// 两个圆按钮（只有图标），中间 Spacer 撑开；播放胶囊不在顶行了。
+    /// 圆钮直径见 tokens.roundButtonDiameter（36/40/42），图标 15pt
+    /// （直径等比缩：17 × 40/44 ≈ 15.5 → 15）。
     private func portraitTopRow(tokens: StageTokens, geo: GeometryProxy) -> some View {
         HStack(spacing: tokens.topRowGap) {
             Button(action: {
@@ -212,7 +241,7 @@ struct StageView: View {
                 navigation.show(.home)
             }) {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: tokens.roundButtonDiameter, height: tokens.roundButtonDiameter)
                     .background(.ultraThinMaterial, in: Circle())
@@ -220,15 +249,14 @@ struct StageView: View {
             }
             .accessibilityLabel("返回首页")
 
-            playerCapsule(tokens: tokens, width: nil)
-                .frame(maxWidth: .infinity)
+            Spacer(minLength: 0)
 
             // 设置按钮：只有形态声明了 __stagePanel 才显示（壳版同款显隐规则；
             // 85 个已收录形态全有声明，所以实际常驻）。
             if bridge.panelSpec != nil {
                 Button(action: { toggleSettings() }) {
                     Image(systemName: "gearshape")
-                        .font(.system(size: 17, weight: .medium))
+                        .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.white)
                         .frame(width: tokens.roundButtonDiameter, height: tokens.roundButtonDiameter)
                         .background(.ultraThinMaterial, in: Circle())
@@ -239,7 +267,7 @@ struct StageView: View {
 
             Button(action: { togglePicker() }) {
                 Image(systemName: "square.grid.2x2")
-                    .font(.system(size: 17, weight: .medium))
+                    .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(.white)
                     .frame(width: tokens.roundButtonDiameter, height: tokens.roundButtonDiameter)
                     .background(.ultraThinMaterial, in: Circle())
@@ -257,90 +285,98 @@ struct StageView: View {
         .padding(.top, geo.safeAreaInsets.top + tokens.topGap)
     }
 
-    /// 横屏顶行：左「返回」胶囊 + 中间宽磨砂胶囊（居中，理想宽取
-    /// min(档位理想宽, 可用宽)，居中放不下时按右端固定件收窄）+
-    /// 右「设置」「形态」两个胶囊按钮。
-    /// 左右边距按竖屏同款走 safeArea leading/trailing（r20 集成修：
-    /// 之前只扣 sideMargin，灵动岛机横屏一侧 safeArea 约 59pt，
-    /// 顶行会顶到传感器区；两种横屏方向都要真机验）。
-    private func landscapeTopRow(tokens: StageTokens, geo: GeometryProxy) -> some View {
+    /// 横屏控制行（r28）：整条移到页面竖直中央（挂在 body 的
+    /// `.overlay(alignment: .center)` 里，ZStack 居中对齐），不再占顶行。
+    /// 贴墙：返回贴左墙、设置/形态贴右墙——左右边距只留 safeArea，不再加
+    /// sideMargin（横屏灵动岛机一侧 safeArea 约 59pt，传感器区仍避开）；
+    /// 播放胶囊放 ZStack 中央，正中间。胶囊高 36、图标与文字 14pt
+    /// （高 40 → 36 等比缩：15 × 36/40 = 13.5 → 14）。
+    /// 左右两端宽度不等（左 76–84、右 164–190 含间距），胶囊不用 Spacer
+    /// 顶——ZStack 居中放胶囊、HStack 贴墙放三按钮，两层叠加，胶囊严格居中。
+    private func landscapeCenterRow(tokens: StageTokens, geo: GeometryProxy) -> some View {
         let insets = geo.safeAreaInsets
-        let contentW = geo.size.width - insets.leading - insets.trailing - tokens.sideMargin * 2
-        let collapsed = bridge.isCamera && !pillExpanded
-        // 右端固定件：设置（有 panelSpec 时）+ 形态 + 两者之间的间距。
-        let rightFixed = (bridge.panelSpec != nil ? tokens.settingsCapsuleWidth + tokens.topRowGap : 0)
-            + tokens.pickerCapsuleWidth
-        let collapsedWidth = tokens.coverSize + 10 + tokens.playButtonFrame + tokens.capsuleHPadding * 2
-        // 胶囊宽：收起态按内容宽；展开态取理想宽，但要同时满足
-        // (a) 右端固定件放得下（居中时右侧余量 ≥ topRowGap）；
-        // (b) 左侧余量 ≥ 0（居中时左侧余量 ≥ 0）。
-        let capsuleW: CGFloat = collapsed
-            ? collapsedWidth
-            : min(tokens.idealCapsuleWidthLandscape,
-                  contentW - 2 * rightFixed - 2 * tokens.topRowGap,
-                  contentW - 2 * tokens.backCapsuleWidth - 2 * tokens.topRowGap)
-        // 为居中，返回按钮与胶囊之间的留白；钳在 ≥0（capsuleW 的取法已保证
-        // 居中可行：左侧余量 = contentW/2 - capsuleW/2 - backW - topRowGap ≥ 0）。
-        let leftGap = max(0, contentW / 2 - capsuleW / 2 - tokens.backCapsuleWidth - tokens.topRowGap)
-        return HStack(spacing: 0) {
-            Button(action: {
-                bridge.wakeHUD()
-                navigation.show(.home)
-            }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 15, weight: .semibold))
-                    Text("返回")
-                        .font(.system(size: 15))
-                }
-                .foregroundStyle(.white)
-                .frame(width: tokens.backCapsuleWidth, height: 40)
-                .background(.ultraThinMaterial, in: Capsule())
-                .overlay(Capsule().stroke(.white.opacity(0.25), lineWidth: 1))
-            }
-            .accessibilityLabel("返回首页")
+        return ZStack {
+            centeredPlayerCapsule(tokens: tokens, geo: geo)
 
-            Color.clear.frame(width: tokens.topRowGap + leftGap, height: 1)
-
-            playerCapsule(tokens: tokens, width: capsuleW)
-
-            Spacer(minLength: 0)
-
-            if bridge.panelSpec != nil {
-                Button(action: { toggleSettings() }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "gearshape")
-                            .font(.system(size: 15, weight: .medium))
-                        Text("设置")
-                            .font(.system(size: 15))
+            HStack(spacing: 0) {
+                Button(action: {
+                    bridge.wakeHUD()
+                    navigation.show(.home)
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("返回")
+                            .font(.system(size: 14))
                     }
                     .foregroundStyle(.white)
-                    .frame(width: tokens.settingsCapsuleWidth, height: 40)
+                    .frame(width: tokens.backCapsuleWidth, height: tokens.topCapsuleHeight)
                     .background(.ultraThinMaterial, in: Capsule())
                     .overlay(Capsule().stroke(.white.opacity(0.25), lineWidth: 1))
                 }
-                .accessibilityLabel("本形态设置")
+                .accessibilityLabel("返回首页")
 
-                Color.clear.frame(width: tokens.topRowGap, height: 1)
-            }
+                Spacer(minLength: 0)
 
-            Button(action: { togglePicker() }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "square.grid.2x2")
-                        .font(.system(size: 15, weight: .medium))
-                    Text("形态")
-                        .font(.system(size: 15))
+                if bridge.panelSpec != nil {
+                    Button(action: { toggleSettings() }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 14, weight: .medium))
+                            Text("设置")
+                                .font(.system(size: 14))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(width: tokens.settingsCapsuleWidth, height: tokens.topCapsuleHeight)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay(Capsule().stroke(.white.opacity(0.25), lineWidth: 1))
+                    }
+                    .accessibilityLabel("本形态设置")
+
+                    Color.clear.frame(width: tokens.topRowGap, height: 1)
                 }
-                .foregroundStyle(.white)
-                .frame(width: tokens.pickerCapsuleWidth, height: 40)
-                .background(.ultraThinMaterial, in: Capsule())
-                .overlay(Capsule().stroke(.white.opacity(0.25), lineWidth: 1))
+
+                Button(action: { togglePicker() }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "square.grid.2x2")
+                            .font(.system(size: 14, weight: .medium))
+                        Text("形态")
+                            .font(.system(size: 14))
+                    }
+                    .foregroundStyle(.white)
+                    .frame(width: tokens.pickerCapsuleWidth, height: tokens.topCapsuleHeight)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .overlay(Capsule().stroke(.white.opacity(0.25), lineWidth: 1))
+                }
+                .accessibilityLabel("选择形态")
             }
-            .accessibilityLabel("选择形态")
+            .frame(maxWidth: .infinity)
+            // 贴墙：只留 safeArea，不加 sideMargin。
+            .padding(.leading, insets.leading)
+            .padding(.trailing, insets.trailing)
         }
-        .padding(.leading, insets.leading + tokens.sideMargin)
-        .padding(.trailing, insets.trailing + tokens.sideMargin)
-        .padding(.top, insets.top + tokens.topGap)
+    }
+
+    /// 居中叠加的播放胶囊（r28）：竖屏自适应宽（顶行同款边距），横屏取
+    /// min(档位理想宽, 内容宽)，相机收起态按内容宽；本体
+    /// `playerCapsule` 一字不动，只换了挂载位置（顶行 → 页面竖直中央）。
+    @ViewBuilder
+    private func centeredPlayerCapsule(tokens: StageTokens, geo: GeometryProxy) -> some View {
+        if tokens.isLandscape {
+            let insets = geo.safeAreaInsets
+            let contentW = geo.size.width - insets.leading - insets.trailing - tokens.sideMargin * 2
+            let collapsed = bridge.isCamera && !pillExpanded
+            let collapsedWidth = tokens.coverSize + 10 + tokens.playButtonFrame + tokens.capsuleHPadding * 2
+            let capsuleW: CGFloat = collapsed
+                ? collapsedWidth
+                : min(tokens.idealCapsuleWidthLandscape, contentW)
+            playerCapsule(tokens: tokens, width: capsuleW)
+        } else {
+            playerCapsule(tokens: tokens, width: nil)
+                .frame(maxWidth: .infinity)
+                .padding(.leading, geo.safeAreaInsets.leading + tokens.sideMargin)
+                .padding(.trailing, geo.safeAreaInsets.trailing + tokens.sideMargin)
+        }
     }
 
     // MARK: - 播放胶囊（封面 + 歌名/歌手 + 上一首/播放/下一首 + 进度条）
@@ -528,7 +564,12 @@ struct StageView: View {
         .padding(.trailing, tokens.sideMargin)
     }
 
-    /// HUD 藏起后屏幕底部剩的小按钮（点一下唤醒 HUD，不往形态里传）。
+    /// 「显示控制」药丸（r28：只在相机形态下保留）。非相机形态 HUD 藏起后
+    /// 点一下屏幕就唤醒（全屏透明唤醒层），不再需要它；相机形态不盖点屏层
+    /// （拖动镜头不受影响），且桥的 `activity` 回调在相机形态下不唤醒 HUD、
+    /// `startHudTimer` 照常 2.6 秒藏 HUD，所以药丸是相机形态下唤回控制栏
+    /// 的唯一入口——删了它，相机形态 HUD 藏起后就回不来了。点一下唤醒 HUD，
+    /// 不往形态里传。
     private func wakeButton(safeArea: EdgeInsets) -> some View {
         Button(action: { bridge.wakeHUD() }) {
             HStack(spacing: 6) {

@@ -2,27 +2,19 @@ import SwiftUI
 
 /// 播放页底部两件（r20，照 01:14 截图拆分；旧 `PlayerDockView` 已删）。
 ///
-/// - `PlayerControlRow`：控制行，一行居中，正好 6 个（r22 定稿，无 AirPlay；
-///   岛的 AirPlay 在扩展里另一套，见 LiziNativeLiveActivity，不动这里）。
-///   两端是模式按钮：左端随机（shuffle，点按开关），右端循环（repeat / repeat.1，
-///   点按在顺序 → 全部循环 → 单曲循环之间切；两个开关重启后保留，见 PlaybackStore）。
+/// - `PlayerControlRow`：控制行，一行居中，正好 6 个（r22 定稿，无 AirPlay）。
+///   右端是循环（repeat / repeat.1，点按在顺序 → 全部循环 → 单曲循环之间切；
+///   开关重启后保留，见 PlaybackStore）。左端竖屏是随机（shuffle，点按开关），
+///   横屏是爱心（r28：横屏这行原来 shuffle + repeat 两个模式键，多出一个，
+///   shuffle 删掉换成爱心；随机播放入口仍在队列面板头部，见 QueuePanelView）。
 ///   竖屏第 2 项是爱心（heart / heart.fill，已喜欢红色实心，点按调
-///   `store.toggleLike()` 进「我的喜欢」）；横屏第 2 项是三条杠队列入口
-///   （`list.bullet`，点按调调用方传的 `onOpenQueue`，只横屏传）。
+///   `store.toggleLike()` 进「我的喜欢」）；横屏第 1 项也是同一颗爱心，
+///   第 2 项是三条杠队列入口（`list.bullet`，点按调调用方传的 `onOpenQueue`，
+///   只横屏传）。
 ///   其余三项两屏一样：上一首 | 播放（大，白圆底）| 下一首。
 ///   模式按钮（循环/随机）不在这一行——工人 A 把它放队列面板头部了。
 /// - `PlayerProgressBar`：最底部满宽细条，无时间数字，拖动 seek；播放头是
 ///   圆点（r22k：审计图里进度条上有圆点，旧代码只有 2pt 白线）。
-/// - `PlayerVolumeRow`（r25-B2 #4）：音量条 + 静音按钮。接
-///   `PlaybackStore.volume / isMuted`（`setVolume` / `toggleMute`）：
-///   只改本 App 的 AVPlayer 音量，不动系统音量、不动灵动岛/锁屏的音量；
-///   音量当次会话有效不持久化，静音状态用 PlaybackStore 自己的
-///   UserDefaults 键持久化（不走 SettingsStore）。
-///   本文件只提供组件；放进播放页布局要改 PlayerView.swift（不在本轮 B2
-///   文件内）：竖屏分支在 `PlayerControlRow(tier:)` 与 `PlayerProgressBar`
-///   之间加一行 `PlayerVolumeRow(tier: tier).frame(width: contentWidth)`，
-///   行高 28 + 上间隙 8，从弹性歌词区扣（compact 最短屏余量见 PlayerView
-///   总账注释）；横屏总高 402 已占满，不放这一行（横屏仍可用系统音量键）。
 
 // MARK: - 控制行
 ///
@@ -34,13 +26,14 @@ import SwiftUI
 
 // MARK: - 控制行
 
-/// 控制行：一行居中，正好 6 个（r22 定稿）。
+/// 控制行：一行居中，正好 6 个（r22 定稿；r28 横屏第 1 项随机换爱心）。
 /// 竖屏：随机 | 爱心 | 上一首 | 播放（大，白圆底）| 下一首 | 循环；
-/// 横屏：随机 | 三条杠 | 上一首 | 播放 | 下一首 | 循环（第 2 项是队列入口）。
-/// 播放页控制行没有 AirPlay（r22 定稿删掉；岛展开态的 AirPlay 在扩展里
-/// 另一套，见 LiziNativeLiveActivity，不动）。
+/// 横屏：爱心 | 三条杠 | 上一首 | 播放 | 下一首 | 循环（第 1 项是喜欢，
+/// 第 2 项是队列入口）。
+/// 播放页控制行没有 AirPlay（r22 定稿删掉）。
 ///
-/// - 随机点按调 `store.setShuffled(!store.isShuffled)`（开时图标 accent 色）。
+/// - 随机只在竖屏第 1 项，点按调 `store.setShuffled(!store.isShuffled)`
+///   （开时图标 accent 色）；横屏没有独立随机键，随机开关在队列面板头部。
 /// - 循环点按调 `store.cycleRepeatMode()`（顺序 → 全部循环 → 单曲循环；
 ///   图标与队列面板头部同一套映射：顺序/全部循环 repeat，单曲循环 repeat.1；
 ///   开时图标 accent 色）。两个开关都持久化，重启保留（见 PlaybackStore）。
@@ -50,10 +43,15 @@ import SwiftUI
 /// - 上一首 / 下一首 / 播放直接调 `store.previous()` / `next()` / `togglePlay()`。
 /// - 无曲目时整行 disabled。
 /// - 尺寸走分档：大播放键直径 `PlayerTokens.playSize(tier)`（行高 = 此值），
-///   小图标字号 `PlayerTokens.controlIconSize(tier)`。
-/// - 行内间距分档：compact 16，其余档 32。6 个按钮实算：compact
-///   4×22 + 60 + 5×16 = 228 ≤ 815（横屏满宽）；standard 4×24 + 68 + 5×32
-///   = 324 ≤ 370（竖屏）；large 4×26 + 76 + 5×32 = 340 ≤ 398（竖屏）。
+///   小图标字号 `PlayerTokens.classicControlIconSize(tier)`（模式键随机/循环
+///   用 `classicModeIconSize(tier)`，壳版 `#ntr-mode .ico` 20px）。
+/// - 行内间距三档同一值 10（壳版 `.now__transport` gap 10px；旧值 compact
+///   16、其余 32）。6 个按钮实算（字形宽按字号计，2 个模式键取模式字号）：
+///   compact 2×18 + 3×21 + 58 + 5×10 = 207 ≤ 343（375 竖屏内容宽）；
+///   standard 2×20 + 3×24 + 66 + 5×10 = 228 ≤ 358（390 竖屏内容宽；
+///   402 屏内容宽 370，同样放得下）；
+///   large 2×22 + 3×27 + 74 + 5×10 = 249 ≤ 398。
+/// - 播放字形 = 直径 × 0.485（壳版 `.ntr--play .ico` 32 / 66 = 0.485）。
 struct PlayerControlRow: View {
     @EnvironmentObject private var store: PlaybackStore
 
@@ -66,8 +64,9 @@ struct PlayerControlRow: View {
     /// 横屏三条杠的回调（调用方一般传 `{ showQueue.toggle() }`）；竖屏不用，默认 nil。
     var onOpenQueue: (() -> Void)? = nil
 
-    /// 行内间距：compact 16，其余档 32。
-    private var rowSpacing: CGFloat { tier == .compact ? 16 : 32 }
+    /// 行内间距：r28 壳版 1:1，三档同一值 10（壳版 gap 10px）。
+    /// 不用旧的分档值（compact 16、其余 32）。
+    private var rowSpacing: CGFloat { PlayerTokens.classicControlSpacing(tier) }
 
     /// 循环模式图标（与队列面板头部同一套映射：顺序/全部循环都用 repeat，
     /// 单曲循环用 repeat.1；见 QueuePanelView.repeatIconName）。
@@ -90,24 +89,38 @@ struct PlayerControlRow: View {
 
     var body: some View {
         HStack(spacing: rowSpacing) {
-            Button(action: { store.setShuffled(!store.isShuffled) }) {
-                Image(systemName: "shuffle")
-                    .font(.system(size: PlayerTokens.controlIconSize(tier), weight: .medium))
-                    .foregroundStyle(store.isShuffled ? PlayerTokens.accent : PlayerTokens.playerForeground)
+            if showsQueueButton {
+                // r28：横屏第 1 项是爱心（喜欢），不是随机——竖屏 v4 dock
+                // 已是统一的一个模式键，横屏这行还留着 shuffle + repeat
+                // 两个模式键，多出一个；删横屏 shuffle，换成爱心。
+                // 接法照竖屏第 2 项那颗爱心原样抄（toggleLike，heart /
+                // heart.fill，未喜欢白、喜欢变红）。
+                Button(action: { store.toggleLike() }) {
+                    Image(systemName: store.isLiked ? "heart.fill" : "heart")
+                        .font(.system(size: PlayerTokens.classicControlIconSize(tier), weight: .medium))
+                        .foregroundStyle(store.isLiked ? Color.red : PlayerTokens.playerForeground)
+                }
+                .accessibilityLabel(store.isLiked ? "取消喜欢" : "喜欢")
+            } else {
+                Button(action: { store.setShuffled(!store.isShuffled) }) {
+                    Image(systemName: "shuffle")
+                        .font(.system(size: PlayerTokens.classicModeIconSize(tier), weight: .medium))
+                        .foregroundStyle(store.isShuffled ? PlayerTokens.accent : PlayerTokens.playerForeground)
+                }
+                .accessibilityLabel(store.isShuffled ? "随机播放已开，点按关闭" : "随机播放已关，点按开启")
             }
-            .accessibilityLabel(store.isShuffled ? "随机播放已开，点按关闭" : "随机播放已关，点按开启")
 
             if showsQueueButton {
                 Button(action: { onOpenQueue?() }) {
                     Image(systemName: "list.bullet")
-                        .font(.system(size: PlayerTokens.controlIconSize(tier), weight: .medium))
+                        .font(.system(size: PlayerTokens.classicControlIconSize(tier), weight: .medium))
                         .foregroundStyle(PlayerTokens.playerForeground)
                 }
                 .accessibilityLabel("打开播放队列")
             } else {
                 Button(action: { store.toggleLike() }) {
                     Image(systemName: store.isLiked ? "heart.fill" : "heart")
-                        .font(.system(size: PlayerTokens.controlIconSize(tier), weight: .medium))
+                        .font(.system(size: PlayerTokens.classicControlIconSize(tier), weight: .medium))
                         .foregroundStyle(store.isLiked ? Color.red : PlayerTokens.playerForeground)
                 }
                 .accessibilityLabel(store.isLiked ? "取消喜欢" : "喜欢")
@@ -115,7 +128,7 @@ struct PlayerControlRow: View {
 
             Button(action: { store.previous() }) {
                 Image(systemName: "backward.fill")
-                    .font(.system(size: PlayerTokens.controlIconSize(tier)))
+                    .font(.system(size: PlayerTokens.classicControlIconSize(tier)))
                     .foregroundStyle(PlayerTokens.playerForeground)
             }
             .accessibilityLabel("上一首")
@@ -124,14 +137,14 @@ struct PlayerControlRow: View {
 
             Button(action: { store.next() }) {
                 Image(systemName: "forward.fill")
-                    .font(.system(size: PlayerTokens.controlIconSize(tier)))
+                    .font(.system(size: PlayerTokens.classicControlIconSize(tier)))
                     .foregroundStyle(PlayerTokens.playerForeground)
             }
             .accessibilityLabel("下一首")
 
             Button(action: { store.cycleRepeatMode() }) {
                 Image(systemName: repeatIconName)
-                    .font(.system(size: PlayerTokens.controlIconSize(tier), weight: .medium))
+                    .font(.system(size: PlayerTokens.classicModeIconSize(tier), weight: .medium))
                     .foregroundStyle(store.repeatMode != .off ? PlayerTokens.accent : PlayerTokens.playerForeground)
             }
             .accessibilityLabel("循环模式：\(repeatTitle)，点按切换")
@@ -154,7 +167,8 @@ struct PlayerControlRow: View {
                         .tint(.black)
                 } else {
                     Image(systemName: store.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: PlayerTokens.playSize(tier) * 0.44, weight: .semibold))
+                        // r28：字形 = 直径 × 0.485（壳版 .ntr--play .ico 32 / 66 = 0.485；旧 0.44）。
+                        .font(.system(size: PlayerTokens.playSize(tier) * 0.485, weight: .semibold))
                         .foregroundStyle(.black)
                         .offset(x: store.isPlaying ? 0 : 2)
                 }
@@ -265,49 +279,5 @@ struct PlayerProgressBar: View {
 
     private func clamp(_ value: CGFloat) -> CGFloat {
         min(max(value, 0), 1)
-    }
-}
-
-// MARK: - 应用内音量行（r25-B2 #4）
-
-/// 音量条 + 静音按钮（行高 28；无曲目时整行 disabled）。
-///
-/// - 静音按钮：静音时 `speaker.slash.fill`，否则 `speaker.wave.2.fill`；
-///   点按调 `store.toggleMute()`（静音状态持久化，见 PlaybackStore）。
-/// - 音量条：`Slider`，0…1；拖动调 `store.setVolume(_:)`（只改本 App
-///   AVPlayer 音量，不动系统音量；当次会话有效，重启回 1.0；拖到 >0
-///   时自动取消静音）。滑条本身不显示百分比数字（与进度条一致：不显示
-///   时间/数字，只给控制）。
-/// - 尺寸档只用来对齐控制行（图标字号走 `controlIconSize(tier)`），
-///   行高固定 28，不随档变。
-struct PlayerVolumeRow: View {
-    @EnvironmentObject private var store: PlaybackStore
-
-    var tier: PlayerTokens.PlayerSizeTier = .standard
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Button(action: { store.toggleMute() }) {
-                Image(systemName: store.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                    .font(.system(size: PlayerTokens.controlIconSize(tier), weight: .medium))
-                    .foregroundStyle(store.isMuted ? Color.red : PlayerTokens.playerForeground)
-                    .frame(width: 28, height: 28)
-            }
-            .accessibilityLabel(store.isMuted ? "取消静音" : "静音")
-
-            Slider(
-                value: Binding(
-                    get: { store.volume },
-                    set: { store.setVolume($0) }
-                ),
-                in: 0...1
-            )
-            .tint(PlayerTokens.playerForeground)
-            .accessibilityLabel("音量")
-            .accessibilityValue("\(Int(store.volume * 100))%")
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: 28)
-        .disabled(store.currentTrack == nil)
     }
 }

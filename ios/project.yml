@@ -110,8 +110,9 @@ targets:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
 
   # ============ Lizi 原生版（P0 脚手架，NATIVE-REWRITE-PLAN.md §3）============
-  # 壳版 Lizi / LiziLiveActivity 一行不改；新代码全部进 Sources/LiziNative/，
-  # 新扩展视图进 Sources/LiziNativeLiveActivity/。两版 bundle ID / URL scheme
+  # 壳版 Lizi / LiziLiveActivity 一行不改；新代码全部进 Sources/LiziNative/。
+  # r28：原生灵动岛已移除，扩展 target 与原生岛扩展源码目录已删。
+  # 两版 bundle ID / URL scheme
   # 不同，可同装一台手机对照。
   #
   # sources 只列 Sources/LiziNative + 逐个列出的共享文件，绝不包含整个
@@ -157,16 +158,10 @@ targets:
       # r27 构建修（run 44773480205）：Router 调 CommentsService.handle，
       # 本文件漏列导致 cannot find 'CommentsService' in scope。
       - Sources/Lizi/Server/CommentsService.swift
-      # 动画插图（Ken Burns 本地生成）与灵动岛管理器。
+      # 动画插图（Ken Burns 本地生成，路线 A，走 MPNowPlayingInfoCenter 供锁屏图）。
       - Sources/Lizi/AnimatedArtwork.swift
-      - Sources/Lizi/LiveActivityManager.swift
-      # 清单外补 5：LiveActivityManager 用 LiziLyricsAttributes（与扩展共用同一份定义）。
-      - Sources/Lizi/LiziLyricsAttributes.swift
-      # 岛上控制 Intent 同时编进 App target（照抄壳版做法）：perform() 在
-      # App 进程内跑，系统要从 App 包里发现它；扩展 target 本来就编这份文件。
-      - Sources/LiziNativeLiveActivity/LiziIslandIntents.swift
-    dependencies:
-      - target: LiziNativeLiveActivity
+      # r28：灵动岛已移除，不再编岛管理器 / 岛属性定义 /
+      # 岛上控制 Intent，LiziNative 不再依赖任何扩展 target。
     # P3-D 打磨：Fraunces 三档静态 TTF 随包（见 Sources/LiziNative/Fonts/
     # README.md）。显式列进 resources（进包根目录，UIAppFonts 按文件名找）；
     # Assets.xcassets（平台 logo）在 Sources/LiziNative 源码 glob 里，
@@ -179,16 +174,17 @@ targets:
       # 原样保留，`../vendor/` 相对路径才能解析；GalleryWebView 以 bundle
       # 资源根目录为 readAccess 根，见 GalleryHTMLBundle）。
       - Sources/LiziNative/Resources/GalleryHTML
-      # P3-A 舞台 + P3 r19 集成去重：形态文件只此一份完整拷贝进包
-      # （stages/*.html 69 个 + stages/assets/ 全部 83 个文件，形态相对
-      # 引用 assets/... 才能全解析）。`stages/` 全小写，与壳版 public/
-      # 下的相对引用 `stages/...` 同名；旧的第二份拷贝
-      # GalleryHTML/stages/（69 html + 15 个不全的 assets，约 27MB）
+      # P3-A 舞台 + P3 r19 集成去重：r28 起形态文件只剩 post-build 脚本拷
+      # 的 stages/ 结构拷贝一份（stages/*.html 85 个 + stages/assets/ 全部
+      # 82 个文件，形态相对引用 assets/... 才能全解析）；resources 列表里
+      # 的 stages 条目已删——XcodeGen 2.46 会把 resources 里的目录逐文件平
+      # 拷进包根，那份平拷（85 个 html）是 r27 包里多出来的第二份。`stages/`
+      # 全小写，与壳版 public/ 下的相对引用 `stages/...` 同名；旧的第二份
+      # 拷贝 GalleryHTML/stages/（69 html + 15 个不全的 assets，约 27MB）
       # 已删，长廊页的 stage-layer 改走 `../../stages/...`（见
       # forms-labs/js/app.js stageSrc）。304-kidcore 的
       # ../assets/fonts/ 字体放 Resources/assets/fonts/，与 stages/
       # 平级，相对路径原样解析。
-      - Sources/LiziNative/Resources/stages
       - Sources/LiziNative/Resources/assets
       - Sources/LiziNative/Resources/LXSponsored
       # 赞助版 LX 源：构建机上由 secret LX_SPONSORED_URL 拉取的 linglan.js
@@ -219,10 +215,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lty5201.lizi-native
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        # plist key 双保险（照抄第 16 轮壳版做法）：INFOPLIST_KEY_* 构建设置
-        # + 下面 info.properties 再写一遍，值一致。
-        INFOPLIST_KEY_NSSupportsLiveActivities: "YES"
-        INFOPLIST_KEY_NSSupportsLiveActivitiesFrequentUpdates: "YES"
+        # r28：灵动岛已移除，NSSupportsLiveActivities 相关 key 全删（构建设置与
+        # 下面 info.properties 两处都删）。
     info:
       # info.path 是 XcodeGen 必填项（缺了整个 spec 解码失败，run 44537599094
       # 证实）——它不是「读磁盘上已有的 plist」，而是 XcodeGen 生成工程时
@@ -239,8 +233,6 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UIBackgroundModes:
           - audio
-        NSSupportsLiveActivities: true
-        NSSupportsLiveActivitiesFrequentUpdates: true
         # P3-D 打磨：Fraunces 随包字体注册（族名 Fraunces；文件见
         # Sources/LiziNative/Fonts/，resources 负责拷进包）。
         # 字体进包后 DesignTokens.liziDisplay 用 Font.custom("Fraunces")。
@@ -257,26 +249,5 @@ targets:
             CFBundleURLSchemes:
               - lizinative
 
-  # 原生版灵动岛扩展：只编 Sources/LiziNativeLiveActivity/ 下的文件
-  #（壳版三份的副本 + @main 入口 LiziLiveActivityBundle.swift——没有它
-  # appex 没有 WidgetBundle 入口，扩展加载不起来；与壳版同名但不同 target，
-  # 不冲突）。不写 NSExtensionPrincipalClass（壳版教训）。
-  LiziNativeLiveActivity:
-    type: app-extension
-    platform: iOS
-    sources:
-      - Sources/LiziNativeLiveActivity
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.lty5201.lizi-native.LiziLiveActivity
-        PRODUCT_NAME: LiziNativeLiveActivity
-    info:
-      # info.path 是 XcodeGen 必填项（见 LiziNative 的注释）：构建机上生成，
-      # 不进提交。
-      path: Sources/LiziNativeLiveActivity/Info.plist
-      properties:
-        CFBundleDisplayName: LIZI 原生灵动岛
-        CFBundleShortVersionString: $(MARKETING_VERSION)
-        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        NSExtension:
-          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+  # r28：原生版灵动岛扩展已整个移除（target、原生岛扩展源码目录下 4 个文件、
+  # LiziNative 对它的 dependencies 引用全删）；锁屏只剩系统卡。

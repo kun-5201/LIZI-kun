@@ -9,12 +9,11 @@ import SwiftUI
 /// - `.player` → PlayerView（P1-D 播放页，P1 集成已接线）。
 /// - AppNavigation 由这里以 @StateObject 持有，经 environmentObject 下发。
 ///
-/// 深链（`lizinative://`，扩展岛/锁屏点过来，见 LiziLiveActivityViews）：
+/// 深链（`lizinative://`，r28 已移除灵动岛，扩展不再发深链；锁屏只剩系统卡）：
 /// - `lizinative://now` → 打开播放页。
 /// - `lizinative://airplay` → 打开 App 后弹系统音频路由选择页
 ///  （AVRoutePickerView sheet，照抄壳版 ContentView.AirPlayPickerSheet；
-///   扩展里放不了这个视图，也没有 API 能在岛上原地弹面板，所以多一次点击，
-///   平台限制）。
+///   r28 已移除灵动岛，深链只剩 App 内调用）。
 struct RootView: View {
     @StateObject private var nav = AppNavigation()
     @StateObject private var stageForms = StageFormStore()

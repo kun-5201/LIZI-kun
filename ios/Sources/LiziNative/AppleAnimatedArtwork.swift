@@ -72,11 +72,8 @@ import UIKit
 /// - 上限 8 张专辑、TTL 30 天，超限删最旧；否定结果（无素材/匹配不上）只记内存
 ///   7 天，不写盘。任何一步失败 → prepare 回调 false，调用方走路线 A，绝不崩、
 ///   绝不返回半截文件（先下 tmp 再换名；下载后验 ftyp + 大小 > 100KB 才认）。
-/// - 岛上（Live Activity 扩展）暂时用不上本文件：扩展 target 只编
-///   Sources/LiziNativeLiveActivity/，且项目里没有 App Groups，扩展读不到主 App
-///   的 Caches；岛上真视频要么配 App Group（需付费开发者账号，与 kun 签名同款
-///    blocker），要么扩展内自拉（见文件尾）。本文件先只供锁屏（主 App 进程内
-///   MPNowPlayingInfoCenter），不碰扩展。
+/// - r28：灵动岛已整个移除，本文件只供锁屏（主 App 进程内
+///   MPNowPlayingInfoCenter），不碰任何扩展。
 final class AppleAnimatedArtworkProvider {
     static let shared = AppleAnimatedArtworkProvider()
 
@@ -890,15 +887,8 @@ private extension URL {
 //    prepare 内部已做去重与否定缓存，切歌快时不会重复拉；封面还没到货的歌（无 coverURL
 //    分支）也可以调 prepare——匹配只用歌手+专辑名，不依赖封面。
 //
-// 3. 岛上（Live Activity）暂不接：扩展读不到主 App 的 Caches（无 App Groups），
-//    岛扩展的 ContentState 目前只传封面 Data。要接岛上真视频，二选一：
-//    (a) 配 App Group（需付费开发者账号 + 带 group 权限的 profile，与 kun 签名同款
-//        blocker），把本文件的 cacheDir 改到共享容器，扩展端直接读文件；
-//    (b) 扩展端自拉：把本文件也编进 LiziNativeLiveActivity target（project.yml 的
-//        该 target sources 里加 Sources/LiziNative/AppleAnimatedArtwork.swift，
-//        本文件只依赖 Foundation/MediaPlayer/UIKit + Track——Track 在 Models.swift，
-//        扩展端需另传专辑 id/歌手/专辑名进 ContentState，prepare 在扩展进程内跑）。
-//    在 (a)/(b) 落地前，岛上继续用静态封面 + 路线 A 的兜底逻辑，不动扩展现有行为。
+// 3. r28：灵动岛已整个移除，岛上真视频的 (a)/(b) 两条路随岛作废，不再接。
+//    本文件只供锁屏（主 App 进程内 MPNowPlayingInfoCenter）。
 //
 // 4. 设置里不用加开关：路线 B 复用现有的「动画插图」开关（lizi.animatedArtwork，
 //    默认开）；关 = 锁屏回静态图，路线 A 与 B 一起跳过。用户自己的开发者 token

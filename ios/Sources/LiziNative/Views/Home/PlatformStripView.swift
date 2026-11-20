@@ -9,11 +9,11 @@ import UIKit
 ///   模板把面板标题放大了，按已确认的模板做；要改回 13pt 改一行。
 ///   r26（用户 2026-11-20 22:39–22:40）：首页 5 个来源 chips 全删、
 ///   只留每日推荐，标题不再跟来源切换走，固定就是「每日推荐」）
-///   → 7 个平台图标（22pt、间距 5，
-///   模板量：每块 22×22、间距 5；壳版 `.pstrip__i` 是 32px，
+///   → 7 个平台图标（28pt、间距 5，
+///   模板量：每块 28×28、间距 5；壳版 `.pstrip__i` 是 32px，
 ///   模板把图标收小了才放得下大标题 + 搜索）→ 搜索
 ///   （壳版 `.pstrip__search` 在长条右列；模板右端也有放大镜）。
-/// - 图标 22pt、圆角 28%（≈6pt），选中描 2pt 墨色圈（壳版
+/// - 图标 28pt、圆角 28%（≈8pt），选中描 2pt 墨色圈（壳版
 ///   `0 0 0 2px currentColor`；原生浅色面板上 currentColor 就是墨色）。
 ///   图标下不再挂名字（名字只在左列出现一次——现在是「每日推荐」标题）。
 /// - 不横向滚动：图标太宽时只收图标（壳版 `fitPlatBar`，缩放下限 0.55，
@@ -32,7 +32,7 @@ import UIKit
 ///   不由平台条图标表达。
 /// - 图标渲染：真 logo（`Assets.xcassets` 里的 `Platform<Name>` imageset，
 ///   由 `public/assets/platforms/*.svg` 渲染成 48/96/144 PNG）。图标本身自带圆角
-///   底色与字形，这里只按 22pt 框定、描选中圈；不联网拉图。品牌色 +
+///   底色与字形，这里只按 28pt 框定、描选中圈；不联网拉图。品牌色 +
 ///   首字 monogram 瓷砖是资源缺失时的兜底（字段在 `LiziPlatforms.Info`）。
 /// - 封面只用真数据：图标是平台 logo 资源，跑马带封面是各平台每日推荐
 ///   的真封面；模板图里的示例封面不进包、不当数据。
@@ -57,11 +57,11 @@ struct PlatformStripView: View {
         LiziPlatforms.all.filter { viewModel.visiblePlatforms.contains($0.id) }
     }
 
-    /// 图标自然宽 = 可见数 × 22 + (可见数 − 1) × 5（模板 v2：每块 22×22、
-    /// 间距 5；全部勾选时 7×22 + 6×5 = 184；取消勾选后随可见数变小）。
+    /// 图标自然宽 = 可见数 × 28 + (可见数 − 1) × 5（模板 v2：每块 28×28、
+    /// 间距 5；全部勾选时 7×28 + 6×5 = 226；取消勾选后随可见数变小）。
     private var iconsNaturalWidth: CGFloat {
         let n = CGFloat(max(visiblePlatforms.count, 1))
-        return n * 22 + (n - 1) * 5
+        return n * 28 + (n - 1) * 5
     }
 
     /// 图标缩放（壳版 fitPlatBar：只收图标，下限 0.55；标题、搜索不动）。
@@ -91,13 +91,13 @@ struct PlatformStripView: View {
                 HStack(spacing: 5) {
                     ForEach(visiblePlatforms, id: \.id) { platform in
                         Button(action: { viewModel.selectPlatform(platform.id, playbackStore: playback) }) {
-                            PlatformIconView(platform: platform, selected: platform.id == viewModel.selectedPlatform, size: 22)
+                            PlatformIconView(platform: platform, selected: platform.id == viewModel.selectedPlatform, size: 28)
                         }
                         .accessibilityLabel("切换到\(platform.name)")
                     }
                 }
                 .scaleEffect(scale, anchor: .leading)
-                .frame(width: iconsNaturalWidth * scale, height: 22, alignment: .leading)
+                .frame(width: iconsNaturalWidth * scale, height: 28, alignment: .leading)
                 Spacer()
                 // 模板 v2 + 壳版 `.pstrip__search`：长条右端放大镜，点进搜索页。
                 Button(action: { nav.show(.search) }) {
@@ -108,9 +108,9 @@ struct PlatformStripView: View {
                 }
                 .accessibilityLabel("搜索")
             }
-            .frame(height: 42) // 壳版 `.hall-plat__bar` 高 42px；图标 22 垂直居中。
+            .frame(height: 48) // 壳版 `.hall-plat__bar` 原高 42px；原生图标放大到 28 后条高 48，图标垂直居中，上下各留 10pt。
         }
-        .frame(height: 42)
+        .frame(height: 48)
         .onPreferenceChange(PlatBarNameWidthKey.self) { nameWidth = $0 }
     }
 }
@@ -129,7 +129,7 @@ private struct PlatBarNameWidthKey: PreferenceKey {
 struct PlatformIconView: View {
     let platform: LiziPlatforms.Info
     let selected: Bool
-    /// 图标边长（默认 32；平台条传 22，设置行传 26）。
+    /// 图标边长（默认 32；平台条传 28，设置行传 26）。
     var size: CGFloat = 32
 
     var body: some View {

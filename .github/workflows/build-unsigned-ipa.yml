@@ -269,13 +269,8 @@ jobs:
           lipo -archs "$APP_PATH/LiziNative"
           echo "--- URL scheme must be lizinative (shell uses lizi) ---"
           test "$(/usr/libexec/PlistBuddy -c "Print CFBundleURLTypes:0:CFBundleURLSchemes:0" "$APP_PATH/Info.plist")" = "lizinative" || { echo "::error::native URL scheme is not lizinative"; exit 1; }
-          echo "--- Live Activity extension must be embedded ---"
-          test -d "$APP_PATH/PlugIns/LiziNativeLiveActivity.appex" || { echo "::error::LiziNativeLiveActivity.appex missing in app bundle"; exit 1; }
-          test "$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$APP_PATH/PlugIns/LiziNativeLiveActivity.appex/Info.plist")" = "com.lty5201.lizi-native.LiziLiveActivity" || { echo "::error::native extension bundle id mismatch"; exit 1; }
-          /usr/libexec/PlistBuddy -c "Print NSExtension:NSExtensionPointIdentifier" "$APP_PATH/PlugIns/LiziNativeLiveActivity.appex/Info.plist"
-          echo "--- Live Activities must be declared on the main app (r16 lesson) ---"
-          test "$(/usr/libexec/PlistBuddy -c "Print NSSupportsLiveActivities" "$APP_PATH/Info.plist")" = "true" || { echo "::error::NSSupportsLiveActivities missing/false in native app Info.plist"; exit 1; }
-          test "$(/usr/libexec/PlistBuddy -c "Print NSSupportsLiveActivitiesFrequentUpdates" "$APP_PATH/Info.plist")" = "true" || { echo "::error::NSSupportsLiveActivitiesFrequentUpdates missing/false in native app Info.plist"; exit 1; }
+          echo "--- r28: native must not embed any app extension (island removed) ---"
+          test -z "$(ls "$APP_PATH"/PlugIns/*.appex 2>/dev/null)" || { echo "::error::native app must not embed any .appex (r28 removed the island)"; exit 1; }
           echo "--- structured resources must be present (r19 lesson: XcodeGen flattens resources dirs) ---"
           test -f "$APP_PATH/stages/001-particle-lyrics.html" || { echo "::error::stages/ missing in native app bundle"; exit 1; }
           test -f "$APP_PATH/GalleryHTML/forms-labs/index.html" || { echo "::error::GalleryHTML/forms-labs/index.html missing"; exit 1; }

@@ -7,7 +7,7 @@ import SwiftUI
 /// 为准）：r22a 的「九宫格进舞台 + 齿轮开调节面板」做法作废，九宫格只在
 /// 舞台页，播放页顶栏不再弹舞台调节面板；齿轮是控制舞台按钮，进舞台页。
 /// r22k：按两张审计图核对——控制行竖屏是随机/爱心/上一首/播放/下一首/循环、
-/// 横屏是随机/三条杠/上一首/播放/下一首/循环，无 AirPlay（PlayerDockView.swift）；
+/// 横屏是爱心/三条杠/上一首/播放/下一首/循环（r28：横屏第 1 项随机换爱心），无 AirPlay（PlayerDockView.swift）；
 /// 队列入口竖屏点歌名块、横屏点三条杠，副标题只留歌手；
 /// 顶栏位置（顶边 59）、横屏铺满、YRC 解析一字未动；顶栏图标与接线
 /// 按本次纠正改（返回 + 搜索 + 齿轮进舞台）。
@@ -41,7 +41,7 @@ import SwiftUI
 ///
 /// 纵向结构（从上到下，截图顺序）：
 /// 顶栏（圆形毛玻璃按钮）→ 3D 封面流（上半部）→ 歌词区（`LyricsZoneView`）
-/// → 歌名 / 歌手 → 第二行（`PlayerSecondRow`，音量入口）→ 底部三排
+/// → 歌名 / 歌手 → 底部三排
 /// （`PlayerBottomDock`，r27 v4；02/04/06 变体与横屏仍是控制行 +
 /// 最底部细进度条，见 portraitLayout 注释）。
 ///
@@ -50,8 +50,8 @@ import SwiftUI
 ///   仍未落地，本文件先按任务书给的名字引用，集成时等工人 B。
 /// - `PlayerControlRow(tier:)` / `PlayerProgressBar(tier:)`：
 ///   工人 C 已在 `PlayerDockView.swift` 里落地（r22 定稿：控制行竖屏是
-///   随机 / 爱心 / 上一首 / 播放 / 下一首 / 循环，横屏是随机 / 三条杠 /
-///   上一首 / 播放 / 下一首 / 循环，无 AirPlay；队列入口竖屏点歌名块
+///   随机 / 爱心 / 上一首 / 播放 / 下一首 / 循环，横屏是爱心 / 三条杠 /
+///   上一首 / 播放 / 下一首 / 循环（r28：横屏第 1 项随机换爱心），无 AirPlay；队列入口竖屏点歌名块
 ///   （见 titleBlock）、横屏点三条杠；细条无时间数字，拖动 seek，播放头是圆点）。
 ///   r27 v4：默认版式不再用它俩（改走 `PlayerBottomDock`，进度条在 dock
 ///   里复用 `PlayerProgressBar` + 两端时间）；02/04/06 变体与横屏仍用。
@@ -93,7 +93,7 @@ import SwiftUI
 ///   歌词），原生竖屏 04/06 未按这条收成与 02 同一套，而是按桌面结构分开做——
 ///   这是有意的（手机上三套仍有区分），与壳版 ≤900px 行为不完全相同。
 /// - 壳版窄屏兜底把控制行并进顶行（按钮缩到 30/38pt）；原生
-///   `PlayerControlRow` 最小一档也要 228pt 宽（compact：4×22 + 60 + 5×16），
+///   `PlayerControlRow` 最小一档也要 207pt 宽（compact：2×18 + 3×21 + 58 + 5×10，r28 壳版数），
 ///   塞不进 68pt 高的顶行，控制行只能单摆一行（02 在歌名行之下，
 ///   04 在歌词区之上、06 在歌词区之下），位置与壳版窄屏兜底差一行。
 /// - 歌词对齐（壳版窄屏兜底歌词左对齐、06 居中）与字号/行距（壳版 04/06 改
@@ -250,7 +250,7 @@ struct PlayerView: View {
     // MARK: - 竖屏：壳版窄屏几何（封面 → 弹性歌词区 → 歌名 → 控制行 → 进度条）
 
     /// 竖屏布局：段顺序与 r20 / 壳版窄屏一致（顶栏 → 封面流 → 歌词区 →
-    /// 歌名块 → 第二行 → 底部三排），只改锚定方式：
+    /// 歌名块 → 底部三排），只改锚定方式：
     /// - 每一行都给死宽度（内容宽 = 屏宽 − 2×16）：行的布局宽
     ///   由 frame 定，不由内容理想宽定——再长的单行歌名/副标题/歌词也只能在
     ///   行宽里截断，撑不大 VStack。
@@ -272,22 +272,6 @@ struct PlayerView: View {
                 lyricsZone(tier: tier, width: contentWidth)
                 titleBlock(tier: tier)
                     .frame(width: contentWidth)
-                // r26 第二行（22:45 用户纠正）：原来底部音量条的位置改放
-                // 4 个小图标（随机 / 爱心 / 循环 / 音量，见 PlayerSecondRow；
-                // 主控行只留上一首/播放/下一首后，随机/爱心/循环改放这里，
-                // 音量点开小滑杆就地调）。行高 28 + 上间隙 8 = 36pt，与
-                // 被替掉的音量行同一槽位，总账一字不动（见文件底 r26 总账）。
-                // r27 v4：第二行原样保留在底部三排之上（音量入口只在这里，
-                // 三排里没有音量键；随机/爱心/循环与三排的模式键/喜欢键有
-                // 重叠，是用户定的保留做法，见交回）。
-                // compact 档不渲染（r25-B5 同款守卫：该档 375×667 接上 36pt
-                // 后歌词区只剩 126 < 最小高 150，进度条会被顶出屏底；该档
-                // 音量走系统音量键，见 verification/r26-player-volume-check.md）。
-                if tier != .compact {
-                    PlayerSecondRow(tier: tier)
-                        .frame(width: contentWidth)
-                        .padding(.top, 8)
-                }
                 // r27 v4 底部三排（见 PlayerBottomDock）：第 3 排下载/喜欢/
                 // 评论/音质 → 第 2 排进度条+两端时间 → 最下面一排模式/
                 // 上一首/播放/下一首/队列。进度条在 dock 里，不再单挂
@@ -330,7 +314,7 @@ struct PlayerView: View {
     /// 02 竖屏（左右对半）：390pt 宽做不了 50/50 两列，按壳版 ≤900px
     /// 窄屏兜底做——顶部一行 68pt 小封面 + 歌名，控制行在歌名行之下、
     /// 歌词区之上，下方整幅歌词（歌词区是唯一弹性段）。控制行没并进顶行
-    /// （缺口见文件头：PlayerControlRow 最小 228pt 宽，塞不进 68pt 高的顶行）。
+    /// （缺口见文件头：PlayerControlRow 最小 207pt 宽，塞不进 68pt 高的顶行）。
     private func portraitLayout02(geo: GeometryProxy, tier: PlayerTokens.PlayerSizeTier) -> some View {
         let contentWidth = geo.size.width - PlayerTokens.sp4 * 2
         return VStack(spacing: 0) {
@@ -340,13 +324,6 @@ struct PlayerView: View {
                 smallCoverHeader(size: 68, tier: tier, width: contentWidth)
                     .padding(.top, 6)
                 PlayerControlRow(tier: tier, showsQueueButton: true, onOpenQueue: { showQueue.toggle() })
-                    .frame(width: contentWidth)
-                    .padding(.top, 8)
-                // r26 第二行（22:45 用户纠正）：原来底部音量条的位置改放
-                // 4 个小图标（随机 / 爱心 / 循环 / 音量，见 PlayerSecondRow）。
-                // 02 里控制行在歌词区之上，第二行也随之在歌词区之上；
-                // 行高 28 + 上间隙 8 = 36pt，与音量行同一槽位，总账不动。
-                PlayerSecondRow(tier: tier)
                     .frame(width: contentWidth)
                     .padding(.top, 8)
                 lyricsZone(tier: tier, width: contentWidth)
@@ -377,16 +354,6 @@ struct PlayerView: View {
                     .frame(width: contentWidth)
                 PlayerControlRow(tier: tier)
                     .frame(width: contentWidth)
-                // r26 第二行（22:45 用户纠正）：原来底部音量条的位置改放
-                // 4 个小图标（随机 / 爱心 / 循环 / 音量，见 PlayerSecondRow）。
-                // 04 里控制行在歌词区之上，第二行也随之在歌词区之上；
-                // 行高 28 + 上间隙 8 = 36pt，与音量行同一槽位，总账不动。
-                // compact 档不渲染（r25-B5 同款守卫，见默认变体处注释）。
-                if tier != .compact {
-                    PlayerSecondRow(tier: tier)
-                        .frame(width: contentWidth)
-                        .padding(.top, 8)
-                }
                 lyricsZone(tier: tier, width: contentWidth)
             }
             .padding(.horizontal, PlayerTokens.sp4)
@@ -411,12 +378,6 @@ struct PlayerView: View {
                     .padding(.top, 6)
                 lyricsZone(tier: tier, width: contentWidth)
                 PlayerControlRow(tier: tier, showsQueueButton: true, onOpenQueue: { showQueue.toggle() })
-                    .frame(width: contentWidth)
-                    .padding(.top, 8)
-                // r26 第二行（22:45 用户纠正）：原来底部音量条的位置改放
-                // 4 个小图标（随机 / 爱心 / 循环 / 音量，见 PlayerSecondRow）。
-                // 行高 28 + 上间隙 8 = 36pt，与音量行同一槽位，总账不动。
-                PlayerSecondRow(tier: tier)
                     .frame(width: contentWidth)
                     .padding(.top, 8)
             }
@@ -482,7 +443,8 @@ struct PlayerView: View {
                     topBarCapsuleButton(
                         systemName: "chevron.left",
                         text: "返回",
-                        height: PlayerTokens.topBarButton(compactTier)
+                        height: PlayerTokens.topBarButton(compactTier),
+                        iconSize: 18
                     ) {
                         navigation.show(.home)
                     }
@@ -494,18 +456,27 @@ struct PlayerView: View {
                         .clipped()
                     CoverFlowView(tier: landscapeTier, isCompact: true)
                         .scaleEffect(coverScale, anchor: .top)
+                        // r28 J 顶裁修：中央封面 scale 1.04，内容高 200.4
+                        // （148 + 8 + 44.4 倒影）顶边高出轨道顶约 4.0pt，
+                        // 再 ×0.8 后约 3.2pt，旧 frame 高 = coverTrack 时
+                        // .clipped() 把中央封面顶边裁掉约 3.2pt（截图里封面
+                        // 贴着上边缘就是它）；顶部垫 5pt、框高 +5，顶边落在
+                        // 框内约 1.8pt，不再被裁。顶区行高 +5，歌词区（弹性段，
+                        // 最小 100、最紧实得 110.6 → 105.6）吸收。
+                        .padding(.top, 5)
                         // r22l 编译修：`.frame(maxWidth:height:)` 没有
                         // height 这个参数（maxWidth 重载只有 min/max
                         // ideal），报 extra argument 'height'；拆成
                         // 两段 frame，宽取满、高度定死 coverTrack，
                         // 与原来想表达的布局完全一致。
                         .frame(maxWidth: .infinity)
-                        .frame(height: coverTrack)
+                        .frame(height: coverTrack + 5)
                         .clipped()
                     topBarCapsuleButton(
                         systemName: "magnifyingglass",
                         text: "搜索",
-                        height: PlayerTokens.topBarButton(compactTier)
+                        height: PlayerTokens.topBarButton(compactTier),
+                        iconSize: 16
                     ) {
                         // 搜索页走 App 现有的搜索导航路由，不新造。
                         navigation.show(.search)
@@ -514,7 +485,8 @@ struct PlayerView: View {
                     topBarCapsuleButton(
                         systemName: "gearshape",
                         text: "控制",
-                        height: PlayerTokens.topBarButton(compactTier)
+                        height: PlayerTokens.topBarButton(compactTier),
+                        iconSize: 18
                     ) {
                         // 控制胶囊就是齿轮那个舞台控制按钮（点进舞台页），
                         // 只是横屏画成文字胶囊；不进设置页、不在播放页弹调节面板。
@@ -553,7 +525,8 @@ struct PlayerView: View {
             topBarCapsuleButton(
                 systemName: "chevron.left",
                 text: "返回",
-                height: PlayerTokens.topBarButton(compactTier)
+                height: PlayerTokens.topBarButton(compactTier),
+                iconSize: 18
             ) {
                 navigation.show(.home)
             }
@@ -562,7 +535,8 @@ struct PlayerView: View {
             topBarCapsuleButton(
                 systemName: "magnifyingglass",
                 text: "搜索",
-                height: PlayerTokens.topBarButton(compactTier)
+                height: PlayerTokens.topBarButton(compactTier),
+                iconSize: 16
             ) {
                 navigation.show(.search)
             }
@@ -570,7 +544,8 @@ struct PlayerView: View {
             topBarCapsuleButton(
                 systemName: "gearshape",
                 text: "控制",
-                height: PlayerTokens.topBarButton(compactTier)
+                height: PlayerTokens.topBarButton(compactTier),
+                iconSize: 18
             ) {
                 navigation.show(.stage())
             }
@@ -842,16 +817,23 @@ struct PlayerView: View {
     /// 图标 + 文字，高走调用方传的 `PlayerTokens.topBarButton(tier)`
     /// （compact 44，与竖屏圆按钮同高）。动作与竖屏圆按钮一一对应
     /// （返回 / 搜索 / 控制舞台），只是横屏画成文字胶囊。
+    /// r28：图标字号按壳版顶栏图标数 1:1，不再与文字同 17pt——
+    /// 设置/控制 18px（app.css `.tbtn--icon .ico` 18px）、搜索 16px
+    /// （app.css `.search .ico` 16px）、返回 18px（同 .tbtn--icon 通用
+    /// 顶栏图标按钮）；文字仍 17pt 不动。图标字号由调用方按按钮传
+    /// `iconSize`（三个胶囊共 6 处调用，见 landscapeLayout /
+    /// landscapeCapsuleRow）。
     private func topBarCapsuleButton(
         systemName: String,
         text: String,
         height: CGFloat,
+        iconSize: CGFloat,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: systemName)
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.system(size: iconSize, weight: .semibold))
                 Text(text)
                     .font(.system(size: 17, weight: .semibold))
             }
@@ -1086,11 +1068,12 @@ struct PlayerView: View {
 // 音量行，r25-B5 又只在 compact 默认/04 撤掉：该两档无角标歌词区实得 162、
 // 角标 140（B4 口径重算，见下段），其余档/变体以下面 r25-B4/B5 的数为准）。
 //
-// r25-B4/B5 音量行总账（B2 #4 遗留接线；r26：该行已由 PlayerSecondRow
-// 原槽位替掉，见下段 r26 第二行总账）：竖屏四变体都在控制行后加
-// PlayerVolumeRow（行高 28 + 上间隙 8 = 36pt，从弹性歌词区扣；横屏总高
-// 402 已满，不放）；r25-B5 只在 compact 档默认/04 不渲染（02/06 与其余档
-// 保持现状；compact 上音量走系统音量键，与 r25 之前一致，不另开入口）。
+// r25-B4/B5 音量行总账（历史记录；r28：音量行与第二行都已删，App 内
+// 无音量按钮，音量走机身键/控制中心；下面数字是删行前的槽位账，只留
+// 作对照，驱动重算以当前代码为准）：竖屏四变体曾在控制行后加音量行
+// （行高 28 + 上间隙 8 = 36pt，从弹性歌词区扣；横屏总高 402 已满，
+// 不放）；r25-B5 只在 compact 档默认/04 不渲染（02/06 与其余档保持
+// 现状；compact 上音量走系统音量键，与 r25 之前一致，不另开入口）。
 // 歌词区实得高 = 屏高 − 固定段（从屏顶算起，竖屏圆钮
 // 顶边 39pt，r23i 列扫描实测；不是 PlayerTokens 总账的 topInset 口径——
 // 那套把顶栏顶边算成 20/47/59，B2 的「约 27pt」就是按那套算的，方向一致，
@@ -1144,35 +1127,15 @@ struct PlayerView: View {
 //   2 = 6pt 幽灵高（旧代码即如此），固定段 511、歌词区 156 ≥ 150，不
 //   溢出；本轮不碰（瞬态，曲目质量一到即有角标）。
 //
-// r26 第二行小图标（22:45 用户纠正，顶栏齿轮留着不动）：竖屏四变体里
-//   原来底部音量条的位置改放 PlayerSecondRow（随机 / 爱心 / 循环 /
-//   音量；主控行只留上一首/播放/下一首后，随机/爱心/循环改放这里；
-//   音量点开小滑杆就地调，复用 PlayerVolumeRow；顶栏返回 + 搜索 +
-//   齿轮原样保留，齿轮照旧进舞台/调舞台；横屏不放第二行，总高 402
-//   已满，横屏音量仍走系统音量键，与 r25 一致）。
-//   槽位账：第二行行高 28 + 上间隙 8 = 36pt，与被替掉的音量行完全
-//   同一槽位——standard / large / 02 / 06 各档总账一字不动（这些档
-//   原来就渲染音量行）；compact 默认/04 原来就不渲染音量行（r25-B5
-//   守卫），第二行沿用同一守卫，仍不渲染。r27 注：这里「总账仍是 r26
-//   的数」只对 02/04/06 变体成立；默认版式换了 v4 dock，总账见下段
-//   r27 段落，不再是 512/155/162。
-//   守卫的代价（未遮掩，需定夺）：compact 默认/04（375×667）在主控行
-//   只留三键之后没有第二行，随机/爱心/循环/音量四键在该档无处可点
-//   （音量仍有系统音量键；其余三键无入口）。若在该档也加上第二行，
-//   固定段 512 + 36 = 548，歌词区实得 667 − 548 = 119 < 最小高 150，
-//   整列超高 31pt，进度条会被顶出屏底——r26 角标 fix 刚治好的问题
-//   会回来。定夺选项：(a) 接受该档无第二行（现状）；(b) 该档放宽
-//   歌词区最小高（动 PlayerTokens.lyricsZoneHeight，不在本轮）；
-//   (c) 该档另做 compact 方案。见 verification/r26-player-volume-check.md。
-//
 // r27 v4 底部三排（只改竖屏默认版式；02/04/06 变体与横屏仍用旧控制行 +
 // 细进度条，总账不动）：默认版式里 PlayerControlRow（68/60/76）+ 最底部
 // 细进度条（32）由 PlayerBottomDock 替掉（第 3 排 32 + 间隙 8 + 第 2 排
 // 进度条 50 + 间隙 8 + 最下面一排 61，标准档；compact：第 3 排 26 +
 // 间隙 2 + 第 2 排 46 + 间隙 2 + 最下面一排 42；large：第 3 排 32 +
 // 间隙 8 + 第 2 排 51 + 间隙 8 + 最下面一排 68；dock 上间隙 8，
-// compact 4；底部 Home Indicator 安全区 34/0）。第二行保留在三排之上
-// （音量入口）。compact 封面流 232 → 209（单张 168 → 154）。
+// compact 4；底部 Home Indicator 安全区 34/0）。r28：第二行已删，
+// App 内无音量按钮，音量走机身键/控制中心。compact 封面流 232 → 209
+// （单张 168 → 154）。
 // 实账（从屏顶 39pt 算起的 r25-B4 口径，固定段不含歌词区最小高；
 // r27 压缩轮纠正：上一版实账漏计了 titleBlock 下间距 10pt（代码
 // titleBlockBottomPadding，无角标 10、有角标 compact/large 4），

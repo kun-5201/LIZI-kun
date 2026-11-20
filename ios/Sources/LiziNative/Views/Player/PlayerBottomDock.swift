@@ -35,8 +35,7 @@ import SwiftUI
 /// - 评论区：CommentsPanelView（只读；网易云真实评论，其它平台老实写清没有）。
 /// - 选择音质：点开 9 档选择器，选了调 setPreferredQuality 并重播当前曲
 ///   （从原进度继续，见 switchQuality；显示的永远是实际返回档位）。
-/// - 音量不在三排里：仍走 r26 第二行小图标 + 弹出面板（PlayerSecondRow，
-///   本文件不动它，PlayerView 里原样保留在三排之上）。
+/// - 音量不在三排里：r28 已删第二行，App 内无音量按钮，音量走机身键/控制中心。
 /// - 无曲目时整排 disabled（与 PlayerControlRow 同款）。
 /// - 禁缩放：本文件没有任何 MagnificationGesture / 捏合手势。
 struct PlayerBottomDock: View {

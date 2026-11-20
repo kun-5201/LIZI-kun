@@ -6,6 +6,7 @@
 <title>504 · 已发送</title>
 <script src="assets/custom-bg.js"></script>
 <style>
+:root{--ac:150,165,255}
 *,*::before,*::after{box-sizing:border-box;-webkit-font-smoothing:antialiased}
 html,body{margin:0;height:100%;overflow:hidden;background:#000}
 body{font-family:"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
@@ -234,7 +235,7 @@ body{font-family:"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft
   .halo{display:none}
   .tilt{transform:none;transition:none}
   .float{animation:none}
-  .box{transform:scale(var(--k,1))}
+  .box{transform:scale(calc(var(--k,1)*0.5))}
   .layers{display:none}
   .phone{border-radius:44px;box-shadow:none}
   .screen{inset:5px;border-radius:40px}

@@ -23,10 +23,10 @@ import Foundation
 /// 之前刻意不用 @MainActor（App.init 同步创建、远程命令闭包非隔离），但旧任务
 /// 与新任务打架正是这么来的：非隔离的 store 任由旧 resolve / 旧歌词任务
 /// 在新一代点播后继续改状态。Moumusic 的三件套是 PlayerService、NowPlayingManager、
-/// AccountStore 全 @MainActor；这里同款：PlaybackStore、NowPlayingCoordinator、
-/// NativeIslandCoordinator 全 @MainActor。App.init 里用 MainActor.assumeIsolated
-/// 接线（启动本来就在主线程）；远程命令 / Intent 回调早已是 Task { @MainActor in }。
-/// LiveActivityManager 保持非隔离（壳版 WebHost 同样非隔离地持有它，见其文件头）。
+/// AccountStore 全 @MainActor；这里同款：PlaybackStore、NowPlayingCoordinator
+/// 全 @MainActor（r28：灵动岛已移除，岛协调器已删）。
+/// App.init 里用 MainActor.assumeIsolated
+/// 接线（启动本来就在主线程）；远程命令回调早已是 Task { @MainActor in }。
 @MainActor
 final class PlaybackStore: ObservableObject {
     // MARK: - 发布状态（UI 工人直接读这些）
@@ -104,7 +104,7 @@ final class PlaybackStore: ObservableObject {
     private var playTask: Task<Void, Never>?
     /// 在飞的歌词任务（第 22 轮第 5 件，照 Moumusic lyricsTask：新点播 /
     /// 切台时 advanceGeneration() 一并取消；回来时还要再查代际，旧词
-    /// 绝不盖到新歌头上。歌词只给播放页用，岛上不再推词，见 NativeIslandCoordinator）。
+    /// 绝不盖到新歌头上。歌词只给播放页用，r28 已移除灵动岛）。
     private var lyricsTask: Task<Void, Never>?
     /// playTask 引用的那一代（defer 里只清自己这一代，不清新任务）。
     private var playTaskGen = 0
@@ -421,7 +421,7 @@ final class PlaybackStore: ObservableObject {
         isPlaying = true
     }
 
-    /// 暂停（岛/锁屏保留暂停态，staleDate 到时自然消失；不主动 end 活动）。
+    /// 暂停（锁屏系统卡保留暂停态；r28 已移除灵动岛，无活动可 end）。
     func pause() {
         player.pause()
         isPlaying = false
@@ -570,7 +570,7 @@ final class PlaybackStore: ObservableObject {
         setMuted(!isMuted)
     }
 
-    /// 停止（播完 / 清空队列用；不 end 灵动岛，岛靠暂停态 + staleDate 自然消失）。
+    /// 停止（播完 / 清空队列用；r28 已移除灵动岛，无需 end 任何活动）。
     /// 第 22 轮第 5 件：停播先 advanceGeneration()——在飞的取链若不作废，
     /// 它 resolve 回来还会调 startItem 把歌重新起播，停播等于没停。
     func stop() {

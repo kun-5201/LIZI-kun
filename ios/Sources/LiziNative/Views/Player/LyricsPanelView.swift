@@ -21,7 +21,6 @@ import SwiftUI
 /// - 点一行跳到该句（`store.seek(to:)`，`startMs` → 秒）；点歌词区其他
 ///   位置什么都不做（r27：点空白处不再展开）。
 /// - 翻译行：12px 灰色，另起一行，跟在对应行下方，与正文共用同一透明度/模糊。
-/// - 左上角小字「逐字」标记：仅有逐字数据时出现（顶栏徽章已撤）。
 ///
 /// 无歌词：显示「这首歌没有歌词」，不编假数据，不用 ♪。
 ///
@@ -62,10 +61,6 @@ struct LyricsZoneView: View {
 
     private var currentSize: CGFloat { PlayerTokens.lyricsCurrentSize(tier) }
     private var otherSize: CGFloat { PlayerTokens.lyricsOtherSize(tier) }
-
-    private var hasWordLyrics: Bool {
-        store.lyrics.contains { !$0.words.isEmpty }
-    }
 
     /// 有效当前行：还没开唱（-1）时从第一行起；越界时夹到末行。
     private var effectiveCurrent: Int {
@@ -120,8 +115,6 @@ struct LyricsZoneView: View {
                     // 不用 LazyVStack：要 scrollTo 落点精确（行高含翻译行、
                     // 各行不等高），折叠态只渲染到当前行，行数有限，全量布局更稳。
                     VStack(spacing: 2) {
-                        // 顶部留白：给左上角「逐字」标记让位，不压住最上一行。
-                        Color.clear.frame(height: 20)
                         ForEach(visibleIndices, id: \.self) { index in
                             let line = store.lyrics[index]
                             LyricsZoneRowView(
@@ -158,7 +151,6 @@ struct LyricsZoneView: View {
                     scrollToCurrent(proxy: proxy, animated: false)
                 }
             }
-            headerBadgeRow
         }
         // r27：点歌词区空白处不再展开（展开功能已删），这里不挂任何点按手势；
         // 点行跳转走行上的高优先级手势。
@@ -175,27 +167,6 @@ struct LyricsZoneView: View {
             startPoint: .top,
             endPoint: .bottom
         )
-    }
-
-    /// 顶部徽章行（悬浮，不占布局高度）：只有左「逐字」小标记；
-    /// r27：右上角「展开」入口已随展开功能一起删掉。
-    private var headerBadgeRow: some View {
-        HStack(alignment: .top, spacing: 0) {
-            if hasWordLyrics {
-                Text("逐字")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.65))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .overlay(
-                        Capsule().stroke(Color.white.opacity(0.3), lineWidth: 0.5)
-                    )
-                    .accessibilityLabel("逐字歌词")
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 2)
-        .padding(.top, 2)
     }
 
     // MARK: - 滚动锚点 / 跳转

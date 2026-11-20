@@ -3,8 +3,7 @@ import UIKit
 
 /// 原生封面取图：进程内代理 → 直链 → 默认占位（三级兜底，P3-D）。
 ///
-/// 链路（照抄岛/锁屏已有的做法，见 `NativeIslandCoordinator.coverData` 与
-/// `NowPlayingCoordinator`：进程内合成 `HttpRequest` 直调
+/// 链路（照抄锁屏已有的做法，见 `NowPlayingCoordinator`：进程内合成 `HttpRequest` 直调
 /// `Proxies.proxyImage`，**不走 HTTP 回环、不复活 LocalHttpServer**；
 /// `Proxies.swift` 本身一行没改，只在这里包一层薄封装）：
 /// 1. 代理：`/api/img`（白名单 + 各家 Referer 绕防盗链，含 r15 的

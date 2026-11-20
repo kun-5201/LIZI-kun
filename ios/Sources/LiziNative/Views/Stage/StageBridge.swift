@@ -27,8 +27,8 @@ import WebKit
 ///   `../../stages/...`（见 forms-labs/js/app.js stageSrc）。
 ///
 /// 播放状态一律读 `PlaybackStore`（不另建状态机）：切歌 / 行变 / 播放切换
-/// 订阅 store 的发布值；岛 / 锁屏仍走 `NativeIslandCoordinator` 已有的订阅
-/// 链路，本桥不碰 LiveActivity。
+/// 订阅 store 的发布值；锁屏走 NowPlayingCoordinator（MPNowPlayingInfoCenter
+/// 系统卡），本桥不碰锁屏；r28 已移除灵动岛。
 ///
 /// 第 16 轮教训：本文件全程无强制解包（`as!` / `try!` / `!` 解包一律不用）；
 /// 取不到值就退化（默认重音色 / 空歌词 / 不发消息），绝不在播放启动路径上炸掉。
@@ -139,6 +139,12 @@ final class StageBridge: NSObject, ObservableObject {
                 .store(in: &self.cancellables)
             store.$isPlaying
                 .dropFirst()
+                .sink { [weak self] _ in
+                    guard let self else { return }
+                    Task { @MainActor in self.pushInit(force: false) }
+                }
+                .store(in: &self.cancellables)
+            store.$lyrics
                 .sink { [weak self] _ in
                     guard let self else { return }
                     Task { @MainActor in self.pushInit(force: false) }

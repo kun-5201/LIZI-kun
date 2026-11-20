@@ -8,6 +8,15 @@ import SwiftUI
 /// 每日推荐本身不动：数据链（`NativeBridge.dailyRecommend`）与面板里的
 /// 环/跑马带渲染（`HomeCoverRingView`）原样保留。
 ///
+/// r28（用户 2026-11-21 01:21–01:38 定稿）：删掉的 4 个来源加回，
+/// 不再是 chips——每日推荐面板改成上下翻页（一次一个栏目，共 6 栏，
+/// 见 `HomeRailPage`（HomeViewModel.swift）与本文件 `pagerHeader` /
+/// `pagerContent` / `pagerDragGesture`）：每日推荐 → 精选 → 用户收藏 →
+/// 喜欢的歌曲 → 用户创建的歌单 → 电台。平台条仍固定显示「每日推荐」
+/// （PlatformStripView.swift 不许动），栏目名以栏头为准；
+/// 内容区内的上下滑归切栏，横向拖动仍归环（开环/切歌），改尺寸仍归
+/// 分界手柄，面板外的滑动照旧滚整页。
+///
 /// r24 首页两卡拖动改尺寸：Hero 底边 / 面板顶边接缝处一条 28pt 高分界手柄
 /// （上下各压 14pt，中间一条 36×4 圆角胶囊），竖直拖动改两块高度分配，
 /// 松手停在哪就是哪（不回弹、不吸附、不贴靠档位）；Hero 与面板高度之和
@@ -40,7 +49,7 @@ import SwiftUI
 ///    （932×430 档：顶栏 64 + 间距 26 + Hero 180 + 间距 20 + 面板 140 = 430）。
 ///    Hero 高由模板公式算（竖屏 (屏高−110)/2，横屏 (屏高−110)×9/16），
 ///    面板取剩下那份（竖屏一半，横屏 (屏高−110)×7/16）。
-///    面板内容（条 42 + 环带 273/291）比面板高，面板是定高窗、
+///    面板内容（条 48 + 环带 273/291）比面板高，面板是定高窗、
 ///    只有环在里面竖滑（r23h：条钉在面板顶，不进 ScrollView，
 ///    放歌后 / 手指竖滑都顶不走它）。
 /// 3. 首屏之外（下滑才看到，本地音乐一个像素都不许露首屏）：本地音乐区
@@ -48,11 +57,12 @@ import SwiftUI
 ///    段间距 24；底部留白 50（16 净空 + 34 Home Indicator，底部安全区已忽略）。
 /// 4. 铺色面板（壳版 `#hall-plat`，圆角 22，内边距 10）：
 ///    平台条（模板 v2：左列「每日推荐」标题 24pt 粗体 + 7 图标 22pt 间距 5，
-///    高 42，右端搜索）
+///    高 48，右端搜索）
 ///    → 3D 封面环（HomeCoverRingView，平面跑马带常态；环的位置在面板里、
 ///    面板底色是当前平台品牌色 10% 淡 tint（壳版是平台色 Grainient 满铺；
 ///    原生浅色卡片 + 墨字要留着，只能淡 tint 近似，不做满铺深色）。
-///    壳版面板 min-height 298 = bar 42 + gap 8 + marq 228 + 内边距 20；
+///    壳版面板 min-height 按条 + gap 8 + marq 228 + 内边距 20 计
+///    （壳版原值见 PlatformStripView 注释；原生条已是 48，见下 minPanelH）；
 ///    原生面板内容是视频尺寸环卡（平面带高 card+49，标准档 251，
 ///    比壳版 marq 228 高 23，另加提示行 6+16），标准档内容约 351，
 ///    比横屏面板 140 高得多——差额由面板内竖滑消化，不硬凑。
@@ -102,6 +112,11 @@ struct HomeView: View {
     /// 本次拖动的起始 Hero 高（onChanged 第一次进来时记，松手清掉；
     /// translation 是从手势起点累计的，必须配一个固定的起点算 newHeroH）。
     @State private var dragStartHeroH: CGFloat?
+    /// r28 分页器拖动中的跟手偏移（竖滑切栏时内容跟着手指走一点；
+    /// 松手后归零，见 pagerDragGesture）。
+    @State private var pagerDragY: CGFloat = 0
+    /// r28 上一次切栏方向（下一栏从下往上进、上一栏反之；切页转场方向用）。
+    @State private var pagerWentNext = true
 
     var body: some View {
         GeometryReader { outer in
@@ -156,21 +171,21 @@ struct HomeView: View {
     /// （同理下面 minPanelH 的 if/else 也改成三元，免得修完一个又冒一个）。
     let flatCard: CGFloat = tier == .compact ? 188 : tier == .standard ? 202 : 220
             // - minPanelH：面板内边距上下 10+10（dailyPanel `.padding(10)`）
-            //   + 平台条 42（PlatformStripView `.frame(height: 42)`）
+            //   + 平台条 48（PlatformStripView `.frame(height: 48)`）
             //   + 面板 VStack 间距 8（条与下一行之间）
             //   + 至少一排环封面 flatCard（歌名/歌手行与「展开 3D 环」提示行
             //   都在面板内竖滑区里，面板是定高窗、裁断是模板原意，不计入下限；
-            //   标准档：20+42+8+202 = 272）。
+            //   标准档：20+48+8+202 = 278）。
             //   r26：chips 行已删，竖屏下限不再加 chips 32 + 间距 8。
             //   横屏面板默认只有约 140 高，只要求条之外再露约 1/4 张封面
             //   （flatCard/4，标准档 202/4 ≈ 50，封面露一角、能认出是封面带；
-            //   模板默认露 70，标准档下限 20+42+8+50.5 = 120.5→121 < 140，
+            //   模板默认露 70，标准档下限 20+48+8+50.5 = 126.5→127 < 140，
             //   默认值仍在合法区间里）。
             // r24 构建修：同上，if/else 赋值改三元表达式。
             let ringPeek: CGFloat = flatCard / 4
             let minPanelH: CGFloat = isLandscape
-                ? ceil(20 + 42 + 8 + ringPeek)
-                : 20 + 42 + 8 + flatCard
+                ? ceil(20 + 48 + 8 + ringPeek)
+                : 20 + 48 + 8 + flatCard
             // - maxHeroH = contentH − minPanelH。内容极矮时（横屏小屏，
             //   如 667×375 档 contentH 265 < minHeroH 153 + minPanelH 125，
             //   667 宽走 large 档 flatCard 220，下限和是 278）
@@ -363,8 +378,9 @@ struct HomeView: View {
     /// 每日推荐铺色面板（模板 v2 定高窗，壳版 `#hall-plat` 内容）：
     /// 圆角 22、内边距 10、底色 platTint；只有环在窗内竖滑（标准档内容
     /// 约 351，高于横屏面板 140；模板里面板封面本来
-    /// 就是齐底边裁断的）。顺序：条 → 环（r26：来源 chips 已删，
-    /// 面板里只剩平台条 + 每日推荐环/跑马带）。
+    /// 就是齐底边裁断的）。顺序：条 → 栏头 → 内容（r28 分页器：
+    /// 条之下是栏头（栏目名 + 位置点 + n/6 + 上/下一栏钮）与一次一栏的
+    /// 内容区；r26 之前这里是条 → 环，来源 chips 已删）。
     /// r23h：平台条钉在面板顶、不进竖滑 ScrollView——
     /// 面板是定高窗、内容比窗高，放歌后环内容一换（每日 → 队列）或手指
     /// 在面板里竖滑，ScrollView 的偏移会把条顶出窗外、再也滑
@@ -374,6 +390,12 @@ struct HomeView: View {
     /// pan recognizer（见 HomeCoverRingView，r21 教训后不再用 SwiftUI
     /// DragGesture），它与外层 ScrollView 竖滑共存；现在多了一层面板内
     /// ScrollView，展开手势是否仍优先，要真机验（见清单 D19）。
+    /// r28：环的上滑展开已删（r24 起竖向占优的手势由环的识别器自毁、
+    /// 交还 ScrollView；横向才是开环），面板内容区竖滑现归分页器
+    /// （见 pagerDragGesture）：竖滑切栏、横滑开环、点按播歌/进详情，
+    /// 三者按方向与位移分流；横屏面板只有约 140 高，栏头 + 条占掉
+    /// 大半后 rail 栏只剩约一行的位置，「查看全部」进整页看全量，
+    /// 见 HomeRailPageView 文件头。
     /// r22l 编译修：真类型名是 PlayerTokens.PlayerSizeTier
     ///（PlayerTokens.swift 里 `enum PlayerSizeTier`，r20 约定名），
     /// 之前写的 SizeTier 不存在。
@@ -386,41 +408,161 @@ struct HomeView: View {
         // r23h：条钉在面板顶，见本函数头注释。
         VStack(spacing: 8) {
             PlatformStripView(viewModel: viewModel)
-            if isLandscape {
-                // 横屏面板只有约 140 高，先让封面露出来（模板 v2 横屏面板里
-                // 一排封面卡在第一屏）。
-                ScrollView(.vertical, showsIndicators: false) {
-                    HomeCoverRingView(
-                        model: ringModel,
-                        dailyTracks: viewModel.daily.map { $0.track },
-                        isLoadingDaily: viewModel.isLoadingDaily,
-                        dailyEmptyReason: viewModel.dailyEmptyReason,
-                        marqueeSpeed: viewModel.marqSpeedPxPerSecond,
-                        tier: tier
-                    )
-                }
-            } else {
-                // r21：首页 3D 封面环（平面跑马带常态 + 上滑展开全屏圆环；
-                // 见 HomeCoverRingView 文件头视频逐帧规格）。
-                // 内容是播放队列（非空时）或每日推荐（队列为空时），
-                // 两份都空时不显示。环本身的实现是另一个工人的，
-                // 本轮只动它在面板里的位置，不动 HomeCoverRingView.swift。
-                ScrollView(.vertical, showsIndicators: false) {
-                    HomeCoverRingView(
-                        model: ringModel,
-                        dailyTracks: viewModel.daily.map { $0.track },
-                        isLoadingDaily: viewModel.isLoadingDaily,
-                        dailyEmptyReason: viewModel.dailyEmptyReason,
-                        marqueeSpeed: viewModel.marqSpeedPxPerSecond,
-                        tier: tier
-                    )
-                }
+            // r28 分页器：栏头 + 内容区（平台条本身不进手势区，
+            // 从条上起的竖滑仍归外层 ScrollView 滚整页）。
+            VStack(spacing: 8) {
+                pagerHeader
+                pagerContent(tier: tier)
+                    .id(viewModel.railPageIndex)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: pagerWentNext ? .bottom : .top)
+                            .combined(with: .opacity),
+                        removal: .move(edge: pagerWentNext ? .top : .bottom)
+                            .combined(with: .opacity)
+                    ))
+                    .offset(y: pagerDragY)
             }
+            .highPriorityGesture(pagerDragGesture)
         }
         .padding(10)
         .frame(width: width, height: height)
         .background(platTint)
         .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius22))
+    }
+
+    /// r28 分页器栏头：当前栏目名 + 位置点（6 点，当前为长胶囊）+「n/6」+
+    /// 上/下一栏按钮。点圆点直接跳栏；到头时对应方向的按钮置灰禁用。
+    /// 平台条（PlatformStripView）仍固定显示「每日推荐」标题（r26 决定，
+    /// 文件不许动），栏目名以这里为准。
+    private var pagerHeader: some View {
+        HStack(spacing: 8) {
+            Text(viewModel.railPageTitle)
+                .font(.liziBody(size: LiziTokens.size14, weight: .semibold))
+                .foregroundColor(LiziTokens.ink)
+                .lineLimit(1)
+            Spacer()
+            HStack(spacing: 5) {
+                ForEach(HomeRailPage.allCases, id: \.rawValue) { page in
+                    Button(action: {
+                        pagerWentNext = page.rawValue > viewModel.railPageIndex
+                        withAnimation(.easeOut(duration: 0.22)) { viewModel.showRailPage(page) }
+                    }) {
+                        Capsule()
+                            .fill(page == viewModel.railPage
+                                  ? LiziTokens.ink
+                                  : LiziTokens.ink3.opacity(0.35))
+                            .frame(width: page == viewModel.railPage ? 16 : 6, height: 6)
+                    }
+                    .accessibilityLabel("第 \(page.position) 栏，共 6 栏：\(page.title(platform: viewModel.selectedPlatform))")
+                }
+            }
+            Text("\(viewModel.railPage.position)/\(HomeRailPage.allCases.count)")
+                .font(.liziBody(size: LiziTokens.size12))
+                .foregroundColor(LiziTokens.ink3)
+                .monospacedDigit()
+            Button(action: {
+                pagerWentNext = false
+                withAnimation(.easeOut(duration: 0.22)) { _ = viewModel.moveRailPage(by: -1) }
+            }) {
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(LiziTokens.ink2)
+                    .frame(width: 28, height: 28)
+            }
+            .disabled(viewModel.railPageIndex == 0)
+            .opacity(viewModel.railPageIndex == 0 ? 0.3 : 1)
+            .accessibilityLabel("上一栏")
+            Button(action: {
+                pagerWentNext = true
+                withAnimation(.easeOut(duration: 0.22)) { _ = viewModel.moveRailPage(by: 1) }
+            }) {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(LiziTokens.ink2)
+                    .frame(width: 28, height: 28)
+            }
+            .disabled(viewModel.railPageIndex == HomeRailPage.allCases.count - 1)
+            .opacity(viewModel.railPageIndex == HomeRailPage.allCases.count - 1 ? 0.3 : 1)
+            .accessibilityLabel("下一栏")
+        }
+    }
+
+    /// r28 分页器内容区：一次只显示一个栏目（第 0 栏是每日推荐环，
+    /// 其余 5 栏是 `HomeRailPageView` 的 rail 列表预览）。
+    @ViewBuilder
+    private func pagerContent(
+        tier: PlayerTokens.PlayerSizeTier
+    ) -> some View {
+        switch viewModel.railPage {
+        case .daily:
+            dailyRingContent(tier: tier)
+        case .featured, .collections, .liked, .created, .radio:
+            HomeRailPageView(viewModel: viewModel)
+        }
+    }
+
+    /// r28 分页器手势：内容区内的上下滑切栏（上滑 = 下一栏，下滑 = 上一栏），
+    /// 不滑不切，到头停住、不循环。
+    /// - 只认竖向占优的拖动（|dy| > |dx| × 1.25，与环的判定同系数）：
+    ///   横向拖动留给环（横向 = 开环/切歌，见 HomeCoverRingView.stripTouchMoved），
+    ///   不抢；竖向占优才跟手（pagerDragY，松手归零）。
+    /// - 高优先级手势（`.highPriorityGesture`）：面板在外层 ScrollView 里，
+    ///   普通手势会被整页滚动抢走（r21 同款教训）；高优先级让内容区竖滑先归切栏，
+    ///   面板外的滑动照旧滚整页（本地音乐仍从 Hero / 面板外滑出来）。
+    /// - 切栏阈值 48pt（约一根手指的轻滑）；快甩（predictedEndTranslation
+    ///   超 100pt 且已滑 24pt）也切。没过阈值松手弹回原位。
+    /// - 到头时往死胡同方向只跟手 1/4（橡皮筋感），告诉用户到底了；
+    ///   `moveRailPage` 本身也夹在 0...5，不循环。
+    /// - 点按不受影响：DragGesture(minimumDistance: 12) 不到 12px 不认，
+    ///   行点按 /「查看全部」/ 栏头按钮照常走。
+    private var pagerDragGesture: some Gesture {
+        DragGesture(minimumDistance: 12)
+            .onChanged { value in
+                let dx = value.translation.width
+                let dy = value.translation.height
+                guard abs(dy) > abs(dx) * 1.25 else { return }
+                let atFirst = viewModel.railPageIndex == 0
+                let atLast = viewModel.railPageIndex == HomeRailPage.allCases.count - 1
+                var follow = dy
+                if (atFirst && dy > 0) || (atLast && dy < 0) { follow = dy * 0.25 }
+                pagerDragY = min(max(follow, -72), 72)
+            }
+            .onEnded { value in
+                let dy = value.translation.height
+                let predicted = value.predictedEndTranslation.height
+                defer { withAnimation(.easeOut(duration: 0.18)) { pagerDragY = 0 } }
+                guard abs(dy) > abs(value.translation.width) * 1.25 else { return }
+                if dy < -48 || (predicted < -100 && dy < -24) {
+                    pagerWentNext = true
+                    withAnimation(.easeOut(duration: 0.22)) { _ = viewModel.moveRailPage(by: 1) }
+                } else if dy > 48 || (predicted > 100 && dy > 24) {
+                    pagerWentNext = false
+                    withAnimation(.easeOut(duration: 0.22)) { _ = viewModel.moveRailPage(by: -1) }
+                }
+            }
+    }
+
+    /// 每日推荐环内容（原 dailyPanel 里的环，原样搬过来；
+    /// r28 分页器只换容器，不动环本身；横屏/竖屏两分支原来就是同一份，
+    /// 合并成一个——环本身不分横竖屏，横屏只是面板窗更矮、内容裁得更多）。
+    /// r21：首页 3D 封面环（平面跑马带常态 + 上滑展开全屏圆环；
+    /// 见 HomeCoverRingView 文件头视频逐帧规格）。
+    /// 内容是播放队列（非空时）或每日推荐（队列为空时），
+    /// 两份都空时不显示。环本身的实现是另一个工人的，
+    /// 本轮只动它在面板里的位置，不动 HomeCoverRingView.swift。
+    private func dailyRingContent(
+        tier: PlayerTokens.PlayerSizeTier
+    ) -> some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            HomeCoverRingView(
+                model: ringModel,
+                dailyTracks: viewModel.daily.map { $0.track },
+                isLoadingDaily: viewModel.isLoadingDaily,
+                dailyEmptyReason: viewModel.dailyEmptyReason,
+                marqueeSpeed: viewModel.marqSpeedPxPerSecond,
+                tier: tier
+            )
+        }
     }
 
     // MARK: - 顶栏
@@ -435,7 +577,11 @@ struct HomeView: View {
     /// 按壳版内联 SVG 坐标照抄画出来的矢量（`BrandMarkView` /
     /// `BrandWordView`，缩放不糊、深浅底都不怕）；kun 是真文字
     /// （Fraunces 斜体 500、11px，包里 r19 已接的字体，直接 Text 打）。
-    /// 三样 gap 9（壳版 `.brand` gap 9px）、整体居中。
+    /// r28：尺寸不再照壳版 CSS（17×17 / 34×15），按用户首页截图实测
+    /// 1:1 校准——LI 16.7×11.7、LIZI 33.3×10.7、kun 宽 18.3、
+    /// 间距 LI→LIZI 9.3、LIZI→kun 9.7（截图 1206×2622 @3x，÷3 为 pt）；
+    /// 整体仍居中，纵向位置不动。旧 gap 9（壳版 `.brand` gap 9px）
+    /// 已被 r28 的 9.3 / 9.7 取代，见 `topBar` 内 HStack 处。
     ///
     /// 居中做法：HStack（左列按钮 + Spacer）+ `.overlay(alignment:
     /// .center)` 放品牌——overlay 以整行全宽为基准居中，品牌不随左列
@@ -459,14 +605,21 @@ struct HomeView: View {
         HStack(spacing: 8) {
             Button(action: { nav.show(.settings) }) {
                 Image(systemName: "gearshape")
-                    .font(.system(size: 30, weight: .semibold))
+                    // r28：按壳版 1:1 缩小——`.tbtn--icon .ico` 18×18
+                    //（app.css:330–331），触摸框 38×38 不动；字重 medium
+                    //（壳版 `.ico` stroke-width 1.9，app.css:66，medium
+                    // 约 1.8pt，比 semibold 更接近，见 r28 交回）。
+                    .font(.system(size: 18, weight: .medium))
                     .foregroundColor(LiziTokens.ink2)
                     .frame(width: 38, height: 38)
             }
             .accessibilityLabel("设置")
             Button(action: { nav.show(.search) }) {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 28, weight: .semibold))
+                    // r28：按壳版 1:1 缩小——`.search .ico` 16×16
+                    //（app.css:216），触摸框 38×38 不动；字重 medium
+                    //（同上，壳版 stroke-width 1.9）。
+                    .font(.system(size: 16, weight: .medium))
                     .foregroundColor(LiziTokens.ink2)
                     .frame(width: 38, height: 38)
             }
@@ -477,14 +630,27 @@ struct HomeView: View {
         .padding(.trailing, 16)
         .frame(height: 64)
         .overlay(alignment: .center) {
-            HStack(alignment: .center, spacing: 9) {
+            // r28：间距按用户截图实测（1206×2622 @3x，÷3 为 pt）——
+            // LI→LIZI 28px = 9.3pt；LIZI→kun 29px = 9.7pt，
+            // 用 spacing 9.3 + kun 前 0.4pt 补齐（HStack 只有一个
+            // spacing，两段不等距只能这样分）。
+            HStack(alignment: .center, spacing: 9.3) {
                 BrandMarkView()
                 BrandWordView()
                 Text("kun")
                     .font(.custom("Fraunces", size: 11).italic().weight(.medium))
-                    .tracking(0.22) // 壳版 `.brand__air` letter-spacing .02em × 11px
+                    // r28：字号仍 11pt（k 高 8.1pt ≈ 图里 7.7pt，见下）；
+                    // tracking 0.22 → 1.1——图里 kun 宽 55px = 18.3pt，
+                    // 11pt Fraunces 斜体实测墨宽仅 ~16.3pt（见 r28 交回），
+                    // 字号加大到 12pt 会把 k 高顶到 8.7pt（超图 1.0pt），
+                    // 只能靠字距补宽：tracking 1.1 时墨宽 18.1～18.7pt。
+                    .tracking(1.1)
                     .foregroundColor(LiziTokens.ink2)
-                    .offset(y: 2) // 壳版 `.brand__air` translateY(2px)，往下移 2pt
+                    .padding(.leading, 0.4) // 补到 LIZI→kun 间距 9.7pt
+                    // r28：删 `.offset(y: 2)`——旧 2pt 是按 15pt 高的
+                    // LIZI 配的；LIZI 改 10.7pt 后，kun 不偏移时 k 顶
+                    // 正在 LIZI 顶下 1.2pt（图里 4px = 1.3pt），
+                    // 再 +2 就掉到 3.2pt，错 1.9pt。
             }
         }
         .padding(.top, topPad) // 品牌纵向中心 = topPad + 32（屏顶起算，见上）
@@ -508,8 +674,13 @@ private struct HomeResizeHandle: View {
 }
 
 /// 品牌 LI 标记：SwiftUI Path 按壳版 `public/index.html` 内联 SVG 照抄
-/// （`viewBox="328 329 368 366"`，17×17，4 个 polygon，坐标一个数都不改；
-/// 只是先平移 viewBox 原点、再缩放到 17pt——Path 里的数字就是壳版原数）。
+/// （`viewBox="328 329 368 366"`，4 个 polygon，坐标一个数都不改；
+/// 只是先平移 viewBox 原点、再缩放——Path 里的数字就是壳版原数）。
+/// r28：缩放不再是等比 17pt——用户截图实测标记 50×35px = 16.7×11.7pt
+/// （宽高比 1.43:1，不是壳版 SVG 的近正方形），按图横向缩 16.7/368、
+/// 纵向缩 11.7/366，框 16.7×11.7；几何底本仍是
+/// `public/forms-labs/assets/logo.svg`（已核对，4 个 polygon 与此处
+/// 逐点一致，就是同一枚标记）。
 /// 不是图片资源，不是抠图；填墨色（壳版 `.brand__mark` fill currentColor，
 /// 浅色顶栏上就是墨色）。
 private struct BrandMarkView: View {
@@ -550,22 +721,29 @@ private struct BrandMarkView: View {
         // `CGAffineTransform(translationX: -328, y: -329).scaledBy(...)`
         // 是 scaledBy 拼在平移之后，点先被缩放（~0.046×）再平移 -328，
         // 标记落在约 (-313,-314)，屏外看不见。现用 scale.concatenating(translate)：
-        // 点先平移 (-328,-329)、再缩放，落在 0.04…16.97 的 17×17 框内。
-        .transform(CGAffineTransform(scaleX: 17 / 368, y: 17 / 366)
+        // 点先平移 (-328,-329)、再缩放。r28 再核：缩放改非等比
+        // （16.7/368 × 11.7/366）后，墨迹落在 x 0.04…16.66、
+        // y 0.02…11.68 的框内，仍在 16.7×11.7 框里，不出屏。
+        .transform(CGAffineTransform(scaleX: 16.7 / 368, y: 11.7 / 366)
             .concatenating(CGAffineTransform(translationX: -328, y: -329)))
         .fill(LiziTokens.ink)
-        .frame(width: 17, height: 17)
+        .frame(width: 16.7, height: 11.7)
     }
 }
 
 /// 品牌 LIZI 四个字母：SwiftUI Path 按壳版 `public/index.html` 内联 SVG
-/// 照抄（`viewBox="0 0 224 100"`，34×15；L = polygon，I = rect，
-/// Z = rect + polygon + rect，I = rect；坐标一个数都不改）。
+/// 照抄（`viewBox="0 0 224 100"`；L = polygon，I = rect，
+/// Z = rect + polygon + rect，I = rect）。
+/// r28：按用户截图实测 100×32px = 33.3×10.7pt 校准（壳版是 34×15，
+/// 纵向压到约 0.71×）。只等比缩会让字母间距剩 2.7pt（图里 3.3pt），
+/// 所以字母 x 坐标各右移——I +3、Z 组 +6、末 I +9（总宽 224→233
+/// 单位，间距 18→21 单位），再非等比缩到 33.3×10.7；字形本身
+/// （L 斜切脚、Z 斜笔）一个点都没改，只是整体平移。
 /// 不是字体打出来的（壳版本来就不是字体，是多边形），不是图片资源。
 private struct BrandWordView: View {
     var body: some View {
         Path { path in
-            // L：polygon (0,0 19,0 19,81 47,81 66,100 0,100)
+            // L：polygon (0,0 19,0 19,81 47,81 66,100 0,100)——r28 未动
             path.move(to: CGPoint(x: 0, y: 0))
             path.addLine(to: CGPoint(x: 19, y: 0))
             path.addLine(to: CGPoint(x: 19, y: 81))
@@ -573,22 +751,25 @@ private struct BrandWordView: View {
             path.addLine(to: CGPoint(x: 66, y: 100))
             path.addLine(to: CGPoint(x: 0, y: 100))
             path.closeSubpath()
-            // I：rect x84 y0 w19 h100
-            path.addRect(CGRect(x: 84, y: 0, width: 19, height: 100))
-            // Z：rect(121,0,66,18) + polygon(169,18 187,18 139,82 121,82)
-            //    + rect(121,82,66,18)
-            path.addRect(CGRect(x: 121, y: 0, width: 66, height: 18))
-            path.move(to: CGPoint(x: 169, y: 18))
-            path.addLine(to: CGPoint(x: 187, y: 18))
-            path.addLine(to: CGPoint(x: 139, y: 82))
-            path.addLine(to: CGPoint(x: 121, y: 82))
+            // I：rect x87 y0 w19 h100（r28：壳版 x84，+3 拉开字母间距）
+            path.addRect(CGRect(x: 87, y: 0, width: 19, height: 100))
+            // Z：rect(127,0,66,18) + polygon(175,18 193,18 145,82 127,82)
+            //    + rect(127,82,66,18)（r28：壳版 x121，+6）
+            path.addRect(CGRect(x: 127, y: 0, width: 66, height: 18))
+            path.move(to: CGPoint(x: 175, y: 18))
+            path.addLine(to: CGPoint(x: 193, y: 18))
+            path.addLine(to: CGPoint(x: 145, y: 82))
+            path.addLine(to: CGPoint(x: 127, y: 82))
             path.closeSubpath()
-            path.addRect(CGRect(x: 121, y: 82, width: 66, height: 18))
-            // I：rect x205 y0 w19 h100
-            path.addRect(CGRect(x: 205, y: 0, width: 19, height: 100))
+            path.addRect(CGRect(x: 127, y: 82, width: 66, height: 18))
+            // I：rect x214 y0 w19 h100（r28：壳版 x205，+9）
+            path.addRect(CGRect(x: 214, y: 0, width: 19, height: 100))
         }
-        .transform(CGAffineTransform(scaleX: 34 / 224, y: 15 / 100))
+        // r28：非等比缩到截图实测 33.3×10.7（总宽 233 单位：33.3/233；
+        // 高 100 单位：10.7/100）。字母实测：L/Z 9.43、I 2.72、
+        // 间距 3.00，相对图里 9.7 / 2.7 / 3.3 误差 ≤0.30pt。
+        .transform(CGAffineTransform(scaleX: 33.3 / 233, y: 10.7 / 100))
         .fill(LiziTokens.ink)
-        .frame(width: 34, height: 15)
+        .frame(width: 33.3, height: 10.7)
     }
 }

@@ -31,9 +31,13 @@ import SwiftUI
 ///   （r26：竖屏 28/32/36 → 35/39/43，每档 +7；r27：竖屏 35/39/43 → 48/52/56，
 ///   顶边脱开岛底 48pt；横屏 16/20/24 一字不动。）
 /// | topRowGap          |   8 |  10 |  10 |  12 |  14 |  16 |
-/// | 圆按钮直径（竖屏） |  40 |  44 |  46 |   – |   – |   – |
-/// | 返回胶囊宽（横屏） |   – |   – |   – |  80 |  84 |  88 |
-/// | 设置/形态胶囊宽   |   – |   – |   – |  84 |  88 |  92 |
+/// | 圆按钮直径（竖屏） |  36 |  40 |  42 |   – |   – |   – |
+/// | 返回胶囊宽（横屏） |   – |   – |   – |  76 |  80 |  84 |
+/// | 设置/形态胶囊宽   |   – |   – |   – |  80 |  84 |  88 |
+/// | 胶囊高（横屏）     |   – |   – |   – |  36 |  36 |  36 |
+/// （r28：三按钮各缩一档——竖屏圆钮 40/44/46 → 36/40/42，横屏胶囊宽
+///   各 −4、胶囊高 40 → 36，图标/文字字号等比缩，见 StageView；
+///   topRowGap / sideMargin / topGap 一律不动。）
 /// | 播放胶囊理想宽     |   – |   – |   – | 320 | 340 | 380 |
 /// | 胶囊圆角           |  20 |  20 |  20 |  20 |  20 |  20 |
 /// | 胶囊横向内边距    |  10 |  12 |  12 |  12 |  12 |  14 |
@@ -50,14 +54,16 @@ import SwiftUI
 /// （高度，胶囊高度由内容撑出，不写死：竖屏约 70pt，横屏约 54pt；
 ///  左下角底部预留 = 屏高 × 该比例，截图实测字块顶约在 75% 高处。）
 ///
-/// 验算（胶囊不超宽、按钮不挤出、顶行不重叠，见 StageView 注释）：
-/// - 竖屏 standard（390 宽）：内容宽 358，圆按钮 44×3 + 间距 10×3 = 162，
-///   胶囊 196；胶囊内行一：封面 56 + 间距 10 + 文案 ≥22 + 间距 6 +
-///   三键 78 + 内边距 24 = 196，刚好；进度行：196-24-56-10=106，
-///   两时间 52 + 间距 12，Slider 剩 42pt。
-/// - 横屏 standard（852×393）：内容宽 788，固定件 84+88+88 + 间距 14×2
-///   （左段为居中留白）= 288，胶囊取理想 340；胶囊内行一：
-///   封面 48 + 间距 10 + 文案 172 + 间距 8 + 三键 78 + 内边距 24 = 340。
+/// 验算（r28：播放胶囊已移出顶行、叠在页面竖直中央，顶行只剩三个按钮；
+/// 胶囊不再挤顶行，竖屏胶囊宽 = 内容宽，横屏取 min(理想宽, 内容宽)）：
+/// - 竖屏 standard（390 宽）：内容宽 358，顶行三圆钮 40×3 + 间距 10×2
+///   = 140，富余；居中胶囊宽 358，内行：封面 56 + 间距 10 + 文案 +
+///   三键 78 + 内边距 24，绰绰有余。
+/// - 横屏 standard（852×393）：居中控制行——胶囊取理想 340 放屏正中间，
+///   左右缘 256/596；返回 80 贴左墙（右缘 ≤ 59 + 80 = 139，岛侧 safeArea
+///   最坏 59pt 计），设置 84 + 间距 14 + 形态 84 = 182 贴右墙（左缘 ≥
+///   852 − 59 − 182 = 611），两端都不碰胶囊；胶囊内行一：封面 48 +
+///   间距 10 + 文案 172 + 间距 8 + 三键 78 + 内边距 24 = 340。
 enum StageSizeTier: String {
     case compact
     case standard
@@ -79,6 +85,9 @@ struct StageTokens {
     let backCapsuleWidth: CGFloat
     let settingsCapsuleWidth: CGFloat
     let pickerCapsuleWidth: CGFloat
+    /// 三个顶栏按钮的高：竖屏 = 圆钮直径，横屏 = 胶囊高 36。
+    /// （浮层锚定 topRowHeight 与横屏胶囊 frame 都走它，别再写死 40。）
+    let topCapsuleHeight: CGFloat
 
     // MARK: - 播放胶囊
 
@@ -127,10 +136,11 @@ struct StageTokens {
         self.isLandscape = isLandscape
         if isLandscape {
             roundButtonDiameter = 0
+            topCapsuleHeight = 36
             switch tier {
             case .compact:
                 sideMargin = 28; topGap = 16; topRowGap = 12
-                backCapsuleWidth = 80; settingsCapsuleWidth = 84; pickerCapsuleWidth = 84
+                backCapsuleWidth = 76; settingsCapsuleWidth = 80; pickerCapsuleWidth = 80
                 capsuleHPadding = 12; capsuleVPadding = 5
                 coverSize = 44; titleFont = 15; artistFont = 11
                 skipButtonFrame = 20; playButtonFrame = 24
@@ -138,7 +148,7 @@ struct StageTokens {
                 idealCapsuleWidthLandscape = 320
             case .standard:
                 sideMargin = 32; topGap = 20; topRowGap = 14
-                backCapsuleWidth = 84; settingsCapsuleWidth = 88; pickerCapsuleWidth = 88
+                backCapsuleWidth = 80; settingsCapsuleWidth = 84; pickerCapsuleWidth = 84
                 capsuleHPadding = 12; capsuleVPadding = 6
                 coverSize = 48; titleFont = 15; artistFont = 11
                 skipButtonFrame = 22; playButtonFrame = 26
@@ -146,7 +156,7 @@ struct StageTokens {
                 idealCapsuleWidthLandscape = 340
             case .large:
                 sideMargin = 36; topGap = 24; topRowGap = 16
-                backCapsuleWidth = 88; settingsCapsuleWidth = 92; pickerCapsuleWidth = 92
+                backCapsuleWidth = 84; settingsCapsuleWidth = 88; pickerCapsuleWidth = 88
                 capsuleHPadding = 14; capsuleVPadding = 6
                 coverSize = 52; titleFont = 16; artistFont = 12
                 skipButtonFrame = 24; playButtonFrame = 28
@@ -160,21 +170,24 @@ struct StageTokens {
             switch tier {
             case .compact:
                 sideMargin = 12; topGap = 48; topRowGap = 8
-                roundButtonDiameter = 40
+                roundButtonDiameter = 36
+                topCapsuleHeight = 36
                 capsuleHPadding = 10; capsuleVPadding = 8
                 coverSize = 48; titleFont = 15; artistFont = 11
                 skipButtonFrame = 20; playButtonFrame = 24
                 skipIconSize = 16; playIconSize = 20; transportSpacing = 4
             case .standard:
                 sideMargin = 16; topGap = 52; topRowGap = 10
-                roundButtonDiameter = 44
+                roundButtonDiameter = 40
+                topCapsuleHeight = 40
                 capsuleHPadding = 12; capsuleVPadding = 8
                 coverSize = 56; titleFont = 16; artistFont = 12
                 skipButtonFrame = 22; playButtonFrame = 26
                 skipIconSize = 18; playIconSize = 22; transportSpacing = 4
             case .large:
                 sideMargin = 16; topGap = 56; topRowGap = 10
-                roundButtonDiameter = 46
+                roundButtonDiameter = 42
+                topCapsuleHeight = 42
                 capsuleHPadding = 12; capsuleVPadding = 8
                 coverSize = 60; titleFont = 17; artistFont = 12
                 skipButtonFrame = 24; playButtonFrame = 28

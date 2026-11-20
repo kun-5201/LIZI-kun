@@ -29,7 +29,7 @@ import UIKit
 /// Cookie / qrsig / musickey / uin 一律不打日志、不进诊断。
 ///
 /// 依赖 r23a 底座（本文件不自建）：静态 `LoginStore.refresh(platform:)`（与
-/// Kuwo/AppleMusic/Kugou/NetEase 同级文件同款写法）、
+/// Kuwo/AppleMusic/NetEase 同级文件同款写法）、
 /// `NativeBridge.call(path:query:method:)`（已存在）与带 body 的
 /// `NativeBridge.call(path:query:method:body:)`（r23a；body 是 [String: Any]，
 /// 本文件只在网页登录导入时用，见 `QQWebLoginSheet`）。频道固定 `qqmusic`（后端 ptlogin 路；

@@ -3,7 +3,7 @@ import Foundation
 /// 原生版数据模型（P1 填实）。
 ///
 /// 字段名约定（已定死，首页 / 搜索 / 播放页三个 UI 工人按这些名字写）：
-/// - 平台标识一律用 `platform`（netease / qq / kugou / qishui / bodian / kuwo / applemusic），
+/// - 平台标识一律用 `platform`（netease / qq / qishui / bodian / kuwo / applemusic），
 ///   与壳版 Server 层一致；`source` 是 `platform` 的同义只读别名（壳版字段名叫 source）。
 /// - 时长一律毫秒 `durationMs`（Int）；歌词时间一律毫秒（`startMs` / `endMs`，Int）。
 /// - 不编平台没有的字段，不编假数据：没有官方接口的平台对应方法返回空态。
@@ -78,7 +78,7 @@ enum AudioQuality: String, Codable, Hashable, CaseIterable {
             case .spatial: return "atmos20"
             case .master: return "master"
             }
-        case "kugou", "kuwo":
+        case "kuwo":
             switch self {
             case .standard, .higher: return "128"
             case .exhigh: return "320"
@@ -102,6 +102,15 @@ enum AudioQuality: String, Codable, Hashable, CaseIterable {
         case "applemusic":
             // Apple Music 公开 API 只有 30 秒试听（128k AAC），选什么档都只能拿到 standard。
             return "standard"
+        case "kugou":
+            // Folia qualityValue：standard→128，high/ultra→320，lossless→flac，hires→high。
+            switch self {
+            case .standard: return "128"
+            case .higher, .exhigh: return "320"
+            case .lossless: return "flac"
+            case .hires: return "high"
+            default: return "flac"
+            }
         case "lx":
             switch self {
             case .standard, .higher: return "128k"
@@ -130,10 +139,6 @@ enum AudioQuality: String, Codable, Hashable, CaseIterable {
                 "atmos20": .spatial, "hires": .hires, "flac": .lossless, "ape": .lossless,
                 "320": .exhigh, "128": .standard, "m4a": .standard]
             if let q = table[served] { return q }
-        case "kugou":
-            let table: [String: AudioQuality] = ["hires": .hires, "flac": .lossless,
-                "320": .exhigh, "128": .standard]
-            if let q = table[served] { return q }
         case "kuwo":
             let table: [String: AudioQuality] = ["4000": .hires, "2000": .lossless,
                 "320": .exhigh, "128": .standard, "web": .standard]
@@ -145,6 +150,11 @@ enum AudioQuality: String, Codable, Hashable, CaseIterable {
         case "bodian":
             let table: [String: AudioQuality] = ["lossless": .lossless, "high": .exhigh,
                 "standard": .standard]
+            if let q = table[served] { return q }
+        case "kugou":
+            // Folia 回的档位值就是请求时传的网关值（128 / 320 / flac / high）。
+            let table: [String: AudioQuality] = ["high": .hires, "flac": .lossless,
+                "320": .exhigh, "128": .standard]
             if let q = table[served] { return q }
         case "lx":
             let table: [String: AudioQuality] = ["master": .master, "atmos": .dolby,
@@ -166,7 +176,7 @@ enum AudioQuality: String, Codable, Hashable, CaseIterable {
 /// 一首曲目。
 struct Track: Identifiable, Codable, Hashable {
     var id: String
-    /// 来源平台标识（netease / qq / kugou / qishui / bodian / kuwo / applemusic / local）。
+    /// 来源平台标识（netease / qq / qishui / bodian / kuwo / kugou / applemusic / local）。
     var platform: String
     /// `platform` 的同义只读别名（壳版字段名叫 source；UI 两边都能用）。
     var source: String { platform }
@@ -184,11 +194,13 @@ struct Track: Identifiable, Codable, Hashable {
     var vip: Bool
     /// 是否试听片段（官方只给了 freeTrialInfo / preview）。
     var isTrial: Bool
-    /// 调各平台 song/url 时要传的键：网易 = id，QQ = mid，酷狗 = hash，
-    /// 酷我 = rid，汽水/波点/Apple Music = id。空时用 `id`。
+    /// 调各平台 song/url 时要传的键：网易 = id，QQ = mid，酷我 = rid，
+    /// 酷狗 = hash（track 的 id 即 hash），汽水/波点/Apple Music = id。空时用 `id`。
     var platformKey: String
     /// 专辑 id（平台有才填；没有时为空）。
     var albumId: String
+    /// 专辑内曲目 id（酷狗 song_url 的 album_audio_id；其它平台为 0）。
+    var albumAudioId: Int
     /// 歌手 id 列表（平台有才填）。
     var artistIds: [String]
 
@@ -199,6 +211,7 @@ struct Track: Identifiable, Codable, Hashable {
          artist: String = "", album: String = "", coverURL: URL? = nil,
          durationMs: Int = 0, quality: AudioQuality? = nil, vip: Bool = false,
          isTrial: Bool = false, platformKey: String = "", albumId: String = "",
+         albumAudioId: Int = 0,
          artistIds: [String] = []) {
         self.id = id
         self.platform = platform
@@ -212,6 +225,7 @@ struct Track: Identifiable, Codable, Hashable {
         self.isTrial = isTrial
         self.platformKey = platformKey.isEmpty ? id : platformKey
         self.albumId = albumId
+        self.albumAudioId = albumAudioId
         self.artistIds = artistIds
     }
 }

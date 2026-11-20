@@ -5,7 +5,7 @@ import Foundation
 /// - 只做本地收藏：`UserDefaults` 存 `[Album]`（Codable），键 `lizi.native.collectedAlbums`。
 /// - 本阶段未登录（登录迁移是 P4 的事），不接服务端歌单、不做同步、不编假数据。
 /// - 匹配键是 `(id, source)`：同一张专辑在不同平台算两条收藏；`source` 即平台标识
-///   （netease / qq / kugou / qishui / bodian / kuwo / applemusic），与 Models.swift 一致。
+///   （netease / qq / qishui / bodian / kuwo / applemusic），与 Models.swift 一致。
 /// - 读失败（无数据 / 解码失败）返回空数组；写失败静默忽略，只影响下次启动。
 /// - 无强制解包：全程 `try?` / `guard let`，解码失败不崩。
 enum AlbumShelfStore {

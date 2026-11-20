@@ -77,7 +77,7 @@ final class LiziRouter {
         // ---- 落雪（LX）：按 server.mjs 的顺序排在 QQ 之后、其他边车之前 ----
         if path == "/api/lx/song/url" { return await handleLxSongUrl(req) }
         if path == "/api/lx/health" {
-            return .json(200, ["code": 0, "sources": ["wy", "tx", "kg", "kw", "mg"],
+            return .json(200, ["code": 0, "sources": ["wy", "tx", "kw", "kg", "mg"],
                               "tiers": LXScriptInstance.scriptTiers,
                               "via": "custom"])
         }
@@ -161,7 +161,7 @@ final class LiziRouter {
             return .json(200, ["code": 0, "enabled": LXSourceRegistry.shared.autoSwitchEnabled])
         }
         // ---- 其它边车：音频代理 + handler ----
-        for name in ["kugou", "qishui", "bodian", "spotify", "kuwo", "applemusic"] {
+        for name in ["qishui", "bodian", "spotify", "kuwo", "applemusic", "kugou"] {
             if path == "/api/\(name)/audio" { return await Proxies.proxySourceAudio(req, source: name) }
             if path == "/api/\(name)" || path.hasPrefix("/api/\(name)/") {
                 return await sidecars.handle(req, source: name)
@@ -247,11 +247,6 @@ final class LiziRouter {
         switch source {
         case "qq":
             songId = req.string("mid").isEmpty ? req.string("id") : req.string("mid")
-        case "kugou":
-            songId = req.string("hash").isEmpty ? req.string("id") : req.string("hash")
-            if !(songId.count == 32 && songId.allSatisfy({ $0.isHexDigit })) {
-                songId = [req.string("name"), req.string("artists")].filter({ !$0.isEmpty }).joined(separator: " ")
-            }
         case "kuwo":
             // 酷我：新音源（聆澜）后端只要裸 rid（数字），传歌名回 parameter error；
             // 旧脚本要 musicInfo.name（歌名）。两边都要：songId 走 rid，
@@ -263,6 +258,17 @@ final class LiziRouter {
                 songName = req.string("name")
             } else {
                 songId = req.string("name").isEmpty ? req.string("id") : req.string("name")
+            }
+        case "kugou":
+            // 酷狗：LX 脚本认 32 位 hex hash；不是 hash 时传「歌名 歌手」
+            //（脚本按歌名搜）。id 本身已是 hash 时直接传，不拼歌名。
+            let kgId = req.string("id").isEmpty ? req.string("hash") : req.string("id")
+            if kgId.count == 32 && kgId.allSatisfy({ $0.isHexDigit }) {
+                songId = kgId
+            } else {
+                let nm = req.string("name")
+                let ar = req.string("artists").isEmpty ? req.string("artist") : req.string("artists")
+                songId = nm.isEmpty ? kgId : (ar.isEmpty ? nm : "\(nm) \(ar)")
             }
         default:
             songId = req.string("id")

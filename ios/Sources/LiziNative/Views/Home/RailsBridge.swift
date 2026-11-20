@@ -12,7 +12,8 @@ import Foundation
 /// - featured（精选）：netease → /api/top/playlist（limit 12，默认 feed）
 ///   / newsong feed → /api/personalized；qq → /api/qq/recommend/playlists（9）
 ///   / newsongs feed → /api/qq/recommend/new-songs（30）；
-///   kugou → /api/kugou/top/playlists（12）/ newsongs feed → /api/kugou/top/songs；
+///   kugou → /api/kugou/top/songs?type=1（新歌速递，默认 feed）
+///   / playlists feed → /api/kugou/top/playlists（12，精选歌单）；
 ///   qishui → /api/qishui/feed（20）；bodian → /api/bodian/recommendations；
 ///   kuwo → /api/kuwo/recommend/playlists（12）/ ranks feed → /api/kuwo/rank/list；
 ///   applemusic → /api/applemusic/playlists（12）。
@@ -28,21 +29,23 @@ import Foundation
 ///   再 /api/qishui/playlist/tracks；
 ///   bodian → 真名未核实到（fond 接口只回歌单对象、原生只取了 id，
 ///   仓内无字面记载），保持「我的喜欢」，不编；
-///   kugou / kuwo / applemusic → 没有喜欢接口，rail 里只有本地星标，
+///   kuwo / kugou / applemusic → 没有喜欢接口，rail 里只有本地星标，
 ///   标题如实叫「本地星标收藏」，没有就诚实空态写清原因。
 /// - playlists（我收藏的歌单）：netease → /api/user/playlist，分我创建
 ///   （subscribed==false）/ 我收藏（subscribed==true），未登录 → 诚实空态；
-///   qq / kugou / qishui / bodian → 各自 /api/<platform>/user/playlists
-///   （汽水滤掉 isLikedPlaylist 那张）；kuwo → 无用户歌单接口，诚实空态；
+///   qq / qishui / bodian / kugou → 各自 /api/<platform>/user/playlists
+///   （汽水滤掉 isLikedPlaylist 那张；酷狗未登录回 401，LoginGate 先拦）；kuwo → 无用户歌单接口，诚实空态；
 ///   applemusic → /api/applemusic/playlists 兜底，前面插说明卡
 ///   「官方热门歌单（非本人收藏）」。
 /// - radio（电台）：netease → /api/netease/dj/recommend（8）；
-///   qq → /api/qq/radio/categories；kugou → /api/kugou/fm/class；
+///   qq → /api/qq/radio/categories；
+///   kugou → /api/kugou/fm/class（电台分类）；
 ///   qishui → /api/qishui/feed/modes；bodian → /api/bodian/personal/fm
 ///   （直接是曲目）；kuwo → 只有栏目目录、无单集曲目接口，诚实空态不冒充；
 ///   applemusic → 公开接口无电台，诚实空态。
 /// - 频道曲目（详情页下钻）：netease → /api/netease/dj/program；
-///   qq → /api/qq/radio/tracks；kugou → /api/kugou/fm/songs；
+///   qq → /api/qq/radio/tracks；
+///   kugou → /api/kugou/fm/songs；
 ///   qishui → /api/qishui/feed 带 mode；bodian FM 本身就是曲目列表；
 ///   kuwo / applemusic 无电台不设入口。
 /// - 歌单曲目（详情页下钻）：复用 NativeBridge.playlistDetail，
@@ -75,7 +78,7 @@ enum RailKind: String, CaseIterable, Hashable {
     /// 空态文案、详情页标题都从这里取，三处一致）。
     /// - netease / qishui：「我喜欢的音乐」（上游歌单 `name` 字段本名：
     ///   网易 specialType==5，见 `specs/netease.md:478`；汽水
-    ///   `base_info.type==1`，见 `specs/sidecars.md:496`）。
+    ///   `base_info.type==1`，见 `specs/sidecars.md:401`）。
     /// - qq：「我喜欢」（QQ 的 dirid 201 收藏夹，`QQ.swift`
     ///   `userLikedSongs` 调 `CgiGetDiss disstid:0, dirid:201`；该接口
     ///   只回曲目不回名字，名字见壳版 `public/app.js:11373` 注释
@@ -84,7 +87,7 @@ enum RailKind: String, CaseIterable, Hashable {
     ///   只回歌单对象且原生只取了 id，仓内无字面记载；保持「我的喜欢」，
     ///   不编。真机核实路径：登录后看 `/api/bodian/user/playlists` 里
     ///   fond 那条的 `name` 字段（`bodianPlaylist` 已原样透传它）。
-    /// - kugou / kuwo / applemusic：无喜欢接口，rail 里只有本地星标，
+    /// - kuwo / kugou / applemusic：无喜欢接口，rail 里只有本地星标，
     ///   标题如实叫「本地星标收藏」（与 `railLocalLiked` 的 groupHeader
     ///   文案同款），不冒充平台歌单名。
     /// - 未知平台：回落到通用「我的喜欢」。
@@ -94,7 +97,7 @@ enum RailKind: String, CaseIterable, Hashable {
         case "qq": return "我喜欢"
         case "qishui": return "我喜欢的音乐"
         case "bodian": return "我的喜欢"
-        case "kugou", "kuwo", "applemusic": return "本地星标收藏"
+        case "kuwo", "kugou", "applemusic": return "本地星标收藏"
         default: return "我的喜欢"
         }
     }
@@ -105,7 +108,7 @@ enum RailKind: String, CaseIterable, Hashable {
     }
 }
 
-/// 一个电台频道（qq / 酷狗 / 汽水是频道目录；网易是 DJ 电台）。
+/// 一个电台频道（qq / 汽水是频道目录；网易是 DJ 电台）。
 struct RadioStation: Identifiable, Codable, Hashable {
     var id: String
     var name: String
@@ -195,14 +198,14 @@ extension NativeBridge {
     /// 该平台精选有哪些 feed（id + 展示名；详情页切 feed 用）。
     /// r22j：顺序照抄壳版 FEAT_FEEDS（app.js）——滚轮里第一项就是首页
     /// 精选行的默认 feed：网易推荐歌单 wheel:false 不进滚轮，默认推荐新歌；
-    /// 酷狗新歌速递在前、精选歌单在后；酷我排行榜在前、推荐歌单在后。
+    /// 酷我排行榜在前、推荐歌单在后。
     static func featuredFeeds(for platform: String) -> [(id: String, name: String)] {
         switch platform {
         case "netease": return [("newsong", "推荐新歌"), ("playlists", "推荐歌单")]
         case "qq": return [("playlists", "推荐歌单"), ("newsongs", "新歌首发")]
-        case "kugou": return [("newsongs", "新歌速递"), ("playlists", "精选歌单")]
         case "qishui": return [("feed", "为你推荐")]
         case "bodian": return [("playlists", "推荐歌单")]
+        case "kugou": return [("newsongs", "新歌速递"), ("playlists", "精选歌单")]
         case "kuwo": return [("ranks", "排行榜"), ("playlists", "推荐歌单")]
         case "applemusic": return [("playlists", "热门歌单")]
         default: return []
@@ -266,29 +269,6 @@ extension NativeBridge {
             return railDone(kind: .featured, platform: platform, feed: f,
                             entries: lists.map { RailEntry.playlist($0) },
                             emptyReason: "QQ 音乐没返回推荐歌单")
-        case "kugou":
-            if f == "newsongs" {
-                guard let d = await call(path: "/api/kugou/top/songs", query: ["type": "1"]) else {
-                    return railFailed(kind: .featured, platform: platform, feed: f)
-                }
-                if let e = railError(d) {
-                    return RailResult(kind: .featured, platform: platform, feed: f, error: e)
-                }
-                let tracks = railRows(d, keys: ["tracks"]).compactMap { Track.from(dict: $0, platform: platform) }
-                return railDone(kind: .featured, platform: platform, feed: f,
-                                entries: tracks.map { RailEntry.track($0) },
-                                emptyReason: "酷狗没返回新歌")
-            }
-            guard let d = await call(path: "/api/kugou/top/playlists", query: ["limit": "12"]) else {
-                return railFailed(kind: .featured, platform: platform, feed: f)
-            }
-            if let e = railError(d) {
-                return RailResult(kind: .featured, platform: platform, feed: f, error: e)
-            }
-            let lists = railRows(d, keys: ["playlists"]).compactMap { railPlaylistFrom($0, platform: platform) }
-            return railDone(kind: .featured, platform: platform, feed: f,
-                            entries: lists.map { RailEntry.playlist($0) },
-                            emptyReason: "酷狗没返回精选歌单")
         case "qishui":
             guard let d = await call(path: "/api/qishui/feed", query: ["limit": "20"]) else {
                 return railFailed(kind: .featured, platform: platform, feed: f)
@@ -311,6 +291,29 @@ extension NativeBridge {
             return railDone(kind: .featured, platform: platform, feed: f,
                             entries: lists.map { RailEntry.playlist($0) },
                             emptyReason: "波点没返回推荐歌单")
+        case "kugou":
+            if f == "newsongs" {
+                guard let d = await call(path: "/api/kugou/top/songs", query: ["type": "1"]) else {
+                    return railFailed(kind: .featured, platform: platform, feed: f)
+                }
+                if let e = railError(d) {
+                    return RailResult(kind: .featured, platform: platform, feed: f, error: e)
+                }
+                let tracks = railRows(d, keys: ["tracks"]).compactMap { Track.from(dict: $0, platform: platform) }
+                return railDone(kind: .featured, platform: platform, feed: f,
+                                entries: tracks.map { RailEntry.track($0) },
+                                emptyReason: "酷狗没返回新歌速递")
+            }
+            guard let d = await call(path: "/api/kugou/top/playlists", query: ["limit": "12"]) else {
+                return railFailed(kind: .featured, platform: platform, feed: f)
+            }
+            if let e = railError(d) {
+                return RailResult(kind: .featured, platform: platform, feed: f, error: e)
+            }
+            let lists = railRows(d, keys: ["playlists"]).compactMap { railPlaylistFrom($0, platform: platform) }
+            return railDone(kind: .featured, platform: platform, feed: f,
+                            entries: lists.map { RailEntry.playlist($0) },
+                            emptyReason: "酷狗没返回精选歌单")
         case "kuwo":
             if f == "ranks" {
                 guard let d = await call(path: "/api/kuwo/rank/list") else {
@@ -422,7 +425,7 @@ extension NativeBridge {
             return railDone(kind: .liked, platform: platform,
                             entries: tracks.map { RailEntry.track($0) },
                             emptyReason: "波点的「我的喜欢」是空的")
-        case "kugou", "kuwo", "applemusic":
+        case "kuwo", "kugou", "applemusic":
             // 这三家没有「我喜欢的音乐」列表接口：只显示本地星标（P2 起 PlaybackStore
             // 同时持久化完整 Track），没有就诚实空态写清原因，不编假数据。
             return await railLocalLiked(kind: .liked, platform: platform)
@@ -432,7 +435,7 @@ extension NativeBridge {
         }
     }
 
-    /// 本地星标兜底（kugou / kuwo / applemusic 的喜欢 rail，标题是
+    /// 本地星标兜底（kuwo / kugou / applemusic 的喜欢 rail，标题是
     /// 「本地星标收藏」）：有星标就列出来并在前面插一张说明卡，
     /// 没有就诚实空态。
     /// r22l 编译修：PlaybackStore 是 @MainActor（第 22 轮第 5 件，代际计数器
@@ -445,10 +448,10 @@ extension NativeBridge {
         guard !local.isEmpty else {
             let reason: String
             switch platform {
-            case "kugou":
-                reason = "酷狗没有「我喜欢的音乐」列表接口——在本 App 里点星标收藏的歌会显示在这里"
             case "kuwo":
                 reason = "酷我没有「我喜欢的音乐」接口——在本 App 里点星标收藏的歌会显示在这里"
+            case "kugou":
+                reason = "酷狗没有「我喜欢的音乐」列表接口——在本 App 里点星标收藏的歌会显示在这里"
             case "applemusic":
                 reason = "Apple Music 公开接口没有「我喜欢的歌」列表——在本 App 里点星标收藏的歌会显示在这里"
             default:
@@ -512,17 +515,6 @@ extension NativeBridge {
             return railDone(kind: .playlists, platform: platform,
                             entries: lists.map { RailEntry.playlist($0) },
                             emptyReason: "QQ 音乐没有返回歌单")
-        case "kugou":
-            guard let d = await call(path: "/api/kugou/user/playlists") else {
-                return railFailed(kind: .playlists, platform: platform)
-            }
-            if let e = railError(d) {
-                return RailResult(kind: .playlists, platform: platform, error: e)
-            }
-            let lists = railRows(d, keys: ["playlists"]).compactMap { railPlaylistFrom($0, platform: platform) }
-            return railDone(kind: .playlists, platform: platform,
-                            entries: lists.map { RailEntry.playlist($0) },
-                            emptyReason: "酷狗没有返回歌单")
         case "qishui":
             guard let d = await call(path: "/api/qishui/user/playlists", query: ["limit": "100"]) else {
                 return railFailed(kind: .playlists, platform: platform)
@@ -547,6 +539,17 @@ extension NativeBridge {
             return railDone(kind: .playlists, platform: platform,
                             entries: lists.map { RailEntry.playlist($0) },
                             emptyReason: "波点没有返回歌单")
+        case "kugou":
+            guard let d = await call(path: "/api/kugou/user/playlists") else {
+                return railFailed(kind: .playlists, platform: platform)
+            }
+            if let e = railError(d) {
+                return RailResult(kind: .playlists, platform: platform, error: e)
+            }
+            let lists = railRows(d, keys: ["playlists"]).compactMap { railPlaylistFrom($0, platform: platform) }
+            return railDone(kind: .playlists, platform: platform,
+                            entries: lists.map { RailEntry.playlist($0) },
+                            emptyReason: "酷狗没有返回歌单")
         case "kuwo":
             return railEmpty(kind: .playlists, platform: platform,
                              reason: "酷我 Web 没有用户歌单接口（Cookie 登录态只影响播放请求），这里是空的，不编内容。")
@@ -602,17 +605,6 @@ extension NativeBridge {
             return railDone(kind: .radio, platform: platform,
                             entries: stations.map { RailEntry.station($0) },
                             emptyReason: "QQ 音乐没返回电台频道")
-        case "kugou":
-            guard let d = await call(path: "/api/kugou/fm/class") else {
-                return railFailed(kind: .radio, platform: platform)
-            }
-            if let e = railError(d) {
-                return RailResult(kind: .radio, platform: platform, error: e)
-            }
-            let stations = railRows(d, keys: ["stations"]).compactMap { railStationFrom($0, platform: platform) }
-            return railDone(kind: .radio, platform: platform,
-                            entries: stations.map { RailEntry.station($0) },
-                            emptyReason: "酷狗没返回电台频道")
         case "qishui":
             guard let d = await call(path: "/api/qishui/feed/modes") else {
                 return railFailed(kind: .radio, platform: platform)
@@ -636,6 +628,17 @@ extension NativeBridge {
             return railDone(kind: .radio, platform: platform,
                             entries: tracks.map { RailEntry.track($0) },
                             emptyReason: "波点私人 FM 没返回歌曲")
+        case "kugou":
+            guard let d = await call(path: "/api/kugou/fm/class") else {
+                return railFailed(kind: .radio, platform: platform)
+            }
+            if let e = railError(d) {
+                return RailResult(kind: .radio, platform: platform, error: e)
+            }
+            let stations = railRows(d, keys: ["stations"]).compactMap { railStationFrom($0, platform: platform) }
+            return railDone(kind: .radio, platform: platform,
+                            entries: stations.map { RailEntry.station($0) },
+                            emptyReason: "酷狗没返回电台分类")
         case "kuwo":
             return railEmpty(kind: .radio, platform: platform,
                              reason: "酷我只开放电台栏目目录，没有单集曲目接口，无法播放——不拿目录冒充电台。")
@@ -648,7 +651,7 @@ extension NativeBridge {
         }
     }
 
-    // MARK: - 频道曲目（详情页下钻；kuwo / applemusic 无电台不设入口）
+    // MARK: - 频道曲目（详情页下钻；kuwo / applemusic 无电台不设入口；酷狗走 /api/kugou/fm/songs）
 
     static func railStationTracks(platform: String, stationId: String) async -> RailResult {
         switch platform {
@@ -690,18 +693,6 @@ extension NativeBridge {
             return railDone(kind: .radio, platform: platform,
                             entries: tracks.map { RailEntry.track($0) },
                             emptyReason: "这个电台暂时没有曲目")
-        case "kugou":
-            guard let d = await call(path: "/api/kugou/fm/songs",
-                                     query: ["fmid": stationId, "limit": "30"]) else {
-                return railFailed(kind: .radio, platform: platform)
-            }
-            if let e = railError(d) {
-                return RailResult(kind: .radio, platform: platform, error: e)
-            }
-            let tracks = railRows(d, keys: ["tracks"]).compactMap { Track.from(dict: $0, platform: platform) }
-            return railDone(kind: .radio, platform: platform,
-                            entries: tracks.map { RailEntry.track($0) },
-                            emptyReason: "这个电台暂时没有曲目")
         case "qishui":
             guard let d = await call(path: "/api/qishui/feed",
                                      query: ["limit": "50", "mode": stationId]) else {
@@ -714,6 +705,18 @@ extension NativeBridge {
             return railDone(kind: .radio, platform: platform,
                             entries: tracks.map { RailEntry.track($0) },
                             emptyReason: "这个场景暂时没有曲目")
+        case "kugou":
+            guard let d = await call(path: "/api/kugou/fm/songs",
+                                     query: ["fmid": stationId, "limit": "30"]) else {
+                return railFailed(kind: .radio, platform: platform)
+            }
+            if let e = railError(d) {
+                return RailResult(kind: .radio, platform: platform, error: e)
+            }
+            let tracks = railRows(d, keys: ["tracks"]).compactMap { Track.from(dict: $0, platform: platform) }
+            return railDone(kind: .radio, platform: platform,
+                            entries: tracks.map { RailEntry.track($0) },
+                            emptyReason: "这个电台暂时没有曲目")
         default:
             return railEmpty(kind: .radio, platform: platform,
                              reason: "这个频道暂时没有曲目")
@@ -851,7 +854,7 @@ extension NativeBridge {
     }
 
     /// 电台 / 频道字典 → RadioStation（网易 DJ：picUrl / programCount /
-    /// dj.nickname；汽水场景：coverUrl / group；QQ / 酷狗：stations 归一化形状）。
+    /// dj.nickname；汽水场景：coverUrl / group；QQ：stations 归一化形状）。
     private static func railStationFrom(_ d: [String: Any], platform: String) -> RadioStation? {
         guard let id = railString(d["id"]), !id.isEmpty else { return nil }
         let name = (d["name"] as? String) ?? (d["title"] as? String) ?? ""

@@ -293,7 +293,7 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
                   let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
             switch type {
             case .began:
-                // 第 16 轮第 3 件：中断/前后台是酷狗闪退链路上的原生步骤，
+                // 第 16 轮第 3 件：中断/前后台是闪退链路上的原生步骤，
                 // 崩在切后台/被抢时诊断里要有最后一步（之前全是静默）。
                 DiagLog.shared.recordPlaybackStep("audio interruption began")
                 self.webView.evaluateJavaScript("window.__liziAudioInterruptionBegan && window.__liziAudioInterruptionBegan()")
@@ -569,7 +569,7 @@ final class WebHost: NSObject, ObservableObject, WKUIDelegate, WKNavigationDeleg
                 audioSessionActivated = true
                 do {
                     try AVAudioSession.sharedInstance().setActive(true)
-                    // 第 16 轮第 3 件：会话激活点——酷狗点播链路上的原生步骤。
+                    // 第 16 轮第 3 件：会话激活点——点播链路上的原生步骤。
                     DiagLog.shared.recordPlaybackStep("audiosession activate ok (first play)")
                 } catch {
                     DiagLog.shared.recordPlaybackStep("audiosession activate FAIL (first play): \(error.localizedDescription)")

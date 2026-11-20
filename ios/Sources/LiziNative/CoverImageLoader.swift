@@ -65,15 +65,14 @@ actor CoverImageLoader {
            let image = UIImage(data: proxyResp.body) {
             return image
         }
-        // 2) 直链兜底。
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            if let image = UIImage(data: data) {
-                return image
-            }
-        } catch {
-            // 直链也失败：返回 nil，调用方占位，不抛错、不编图。
+        // 2) 直链兜底（r24：走 Proxies.directImageData——同一个门、6s 上限、
+        // 入口 https 归一；旧写法 URLSession.shared.data(from:) 默认 60s，
+        // 代理死透后直链再等 60s，一张图最坏 100s 才占位）。
+        if let data = await Proxies.directImageData(url),
+           let image = UIImage(data: data) {
+            return image
         }
+        // 直链也失败：返回 nil，调用方占位，不抛错、不编图。
         return nil
     }
 

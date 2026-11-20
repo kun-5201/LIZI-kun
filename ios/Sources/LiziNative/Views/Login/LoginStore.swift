@@ -4,8 +4,8 @@ import Foundation
 ///
 /// 持有 7 个平台的登录态（`LoginState`：loggedIn / 昵称 / 头像 URL / vip / 会员类型），
 /// 状态来源一律是后端 status 接口——网易 `/api/session`（`loggedIn/profile/vip`），
-/// 其余 6 家 `/api/<platform>/status`（qq / kugou / kuwo / qishui / bodian /
-/// applemusic）。登录态本身持久化在后端 `SessionStore`（文件：网易 session.json、
+/// 其余 6 家 `/api/<platform>/status`（qq / kuwo / qishui / bodian /
+/// kugou / applemusic）。登录态本身持久化在后端 `SessionStore`（文件：网易 session.json、
 /// 各边车 `.auth-*.json`、Apple Music token 在 UserDefaults，见
 /// `ios/Sources/Lizi/Server/SessionStore.swift` 与各平台 `logout` 分支）；
 /// 本类只做内存态 + 启动 / 出现时重查，不自己另写一套持久化。
@@ -83,7 +83,14 @@ final class LoginStore: ObservableObject {
 
     /// 同步入口（r23f：设置页 / 账号详情页 `.onAppear` 里直接调，不包 Task）。
     /// 内部起 Task 并行刷 7 家；结果经 `@Published states` 发布，账号行随之重绘。
+    /// r24 第 1 件节流：首页 `.task` 里每次新建 HomeView 都调这里（冷启动
+    /// 登录墙不能一直判「未登录」）；60 秒内只刷一次，免得回首页一次
+    /// 就并行打 7 个 status。登录成功后调的是单平台 `refresh(platform:)`
+    /// （静态），不受这个节流影响。
+    private var lastRefreshAllAt: Date?
     func refresh() {
+        if let at = lastRefreshAllAt, Date().timeIntervalSince(at) < 60 { return }
+        lastRefreshAllAt = Date()
         Task { await refreshAll() }
     }
 
@@ -163,7 +170,7 @@ final class LoginStore: ObservableObject {
     static func logoutEndpoint(for platform: String) -> (path: String, method: String)? {
         switch platform {
         case "netease": return ("/api/logout", "POST")
-        case "qq", "kugou", "kuwo", "qishui", "bodian": return ("/api/\(platform)/logout", "GET")
+        case "qq", "kuwo", "qishui", "bodian", "kugou": return ("/api/\(platform)/logout", "GET")
         case "applemusic": return ("/api/applemusic/logout", "POST")
         default: return nil
         }
@@ -174,7 +181,6 @@ final class LoginStore: ObservableObject {
     /// status 接口字典 → LoginState。各平台回的形状（均已核对后端实现）：
     /// - 网易 `/api/session`：`{ loggedIn, profile: { nickname, avatar, vipType } }`，
     ///   未登录另带 `reason`（no-session / expired / verify-failed）。
-    /// - 酷狗 `/api/kugou/status`：`{ loggedIn, nickname, avatar, uid, vip, error }`。
     /// - QQ `/api/qq/status`：`{ loggedIn, nickname, avatar, uin }`；上游 401 时
     ///   `{ loggedIn: false, stale: true, nickname, avatar, uin }`（失效头像照留）。
     /// - 酷我 `/api/kuwo/status`：`{ loggedIn, uid, nickname: "", avatar: "", vip: false,
@@ -182,6 +188,8 @@ final class LoginStore: ObservableObject {
     /// - 汽水 `/api/qishui/status`：`{ loggedIn, user: { nickname, avatar }, uid }`，
     ///   续期失败时另带 `stale: true`。
     /// - 波点 `/api/bodian/status`：`{ loggedIn, user: { nickname, avatarUrl }, uid }`。
+    /// - 酷狗 `/api/kugou/status`：`{ loggedIn, nickname, avatar, uid, vip }`
+    ///   （有 token 时调 user_detail 验登录态；未登录 `{ loggedIn: false }`）。
     /// - Apple Music `/api/applemusic/status`：`{ loggedIn, vip, nickname, error }`
     ///   （nickname 是服务端原样回的 "Apple Music"，不是本类编的）。
     static func parse(platform: String, dict: [String: Any]) -> LoginState {

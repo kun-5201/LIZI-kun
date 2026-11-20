@@ -159,7 +159,7 @@ struct SettingsView: View {
     // MARK: - 1. 平台账号
 
     private var accountSection: some View {
-        sectionCard(title: "平台账号", note: "七家平台平级，登录方式各不相同，限制都写在自己那一行里。") {
+        sectionCard(title: "平台账号", note: "六家平台平级，登录方式各不相同，限制都写在自己那一行里。") {
             ForEach(settings.platformAccounts()) { account in
                 // r23f：真入口（占位文案已删）。登录态取 platformAccounts()
                 // 的实读会话（与 LoginStore 同源）；昵称取自 LoginStore，

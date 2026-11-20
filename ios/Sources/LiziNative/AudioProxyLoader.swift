@@ -11,7 +11,7 @@ import Foundation
 /// - 平台直链：host 必须在 `Proxies.audioHosts[source]` 里（QQ 只认 *.qq.com）；
 ///   不在白名单的 host 直接拒绝加载（不发请求，不当 SSRF 口子）。
 /// - LX 直链：不限域名（脚本会返回任意 CDN；壳版 Proxies 同款结论），只放行 http/https。
-/// - Referer：`Proxies.audioReferer[source]`（酷狗/波点有；QQ 用 https://y.qq.com/；
+/// - Referer：`Proxies.audioReferer[source]`（波点有；QQ 用 https://y.qq.com/；
 ///   没有的平台不带）。
 ///
 /// 注意：这只是「直链失败后的兜底一次」，不是常驻代理——直链能走就走直链。

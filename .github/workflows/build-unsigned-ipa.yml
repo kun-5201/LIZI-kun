@@ -149,6 +149,93 @@ jobs:
           test -s ios/Sources/LiziNative/Resources/LXSponsored/linglan.js
           echo "sponsored LX script fetched: $(wc -c < ios/Sources/LiziNative/Resources/LXSponsored/linglan.js) bytes"
 
+      # r24 Folia 酷狗移植：赞助脚本里的酷狗（kg）路由必须在打包前剥掉——
+      # 赞助源不再提供酷狗（Folia 酷狗边车是唯一酷狗实现；LX 兜底只认用户
+      # 自加的自定义源，见 LX.swift sourceMap 注释）。只剥 kg 键，不动
+      # wy/tx/kw/mg/qs。按结构匹配 MUSIC_QUALITY 对象字面量（花括号配对，
+      # 不写死行号——secret 拉到的可能是更新版脚本）；解析失败或断言失败
+      # 直接失败构建，绝不带着旧路由交差。secret 未配（文件不存在）时跳过。
+      - name: Strip Kugou route from sponsored LX script
+        run: |
+          python3 - <<'EOF'
+          import json, re, sys
+
+          path = "ios/Sources/LiziNative/Resources/LXSponsored/linglan.js"
+          try:
+              src = open(path, encoding="utf-8").read()
+          except FileNotFoundError:
+              print("linglan.js not present (secret unset); nothing to strip")
+              sys.exit(0)
+
+          def extract_object(text):
+              """按花括号配对取 MUSIC_QUALITY = {...} 的对象字面量（字符串内
+              的花括号不算），返回 (start, end, obj_text)；找不到抛错。"""
+              anchor = text.find("MUSIC_QUALITY")
+              if anchor < 0:
+                  raise ValueError("MUSIC_QUALITY not found")
+              j = text.index("{", anchor)
+              depth = 0
+              in_str = None
+              esc = False
+              k = j
+              while k < len(text):
+                  ch = text[k]
+                  if in_str is not None:
+                      if esc:
+                          esc = False
+                      elif ch == "\\":
+                          esc = True
+                      elif ch == in_str:
+                          in_str = None
+                  else:
+                      if ch in "\"'":
+                          in_str = ch
+                      elif ch == "{":
+                          depth += 1
+                      elif ch == "}":
+                          depth -= 1
+                          if depth == 0:
+                              break
+                  k += 1
+              if depth != 0:
+                  raise ValueError("unbalanced braces in MUSIC_QUALITY")
+              return anchor, k + 1, text[j:k + 1]
+
+          try:
+              anchor, end, obj_text = extract_object(src)
+              obj = json.loads(obj_text)
+          except (ValueError, json.JSONDecodeError) as e:
+              print(f"ERROR: cannot parse MUSIC_QUALITY as a JSON object literal ({e}); refusing to bundle an un-stripped script")
+              sys.exit(1)
+
+          # 只删 kg 键，不动 wy/tx/kw/mg/qs；musicSources 由 MUSIC_QUALITY
+          # 的键生成，删键即删路由。
+          if "kg" in obj:
+              del obj["kg"]
+              new_text = "MUSIC_QUALITY = " + json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + ";"
+              if end < len(src) and src[end] == ";":
+                  end += 1
+              src = src[:anchor] + new_text + src[end:]
+              open(path, "w", encoding="utf-8").write(src)
+              print("stripped kg from linglan.js MUSIC_QUALITY")
+          else:
+              print("linglan.js MUSIC_QUALITY has no kg key; nothing to strip")
+
+          # 断言：MUSIC_QUALITY 内无 kg；文件其余部分无 "kg" 平台键。
+          src = open(path, encoding="utf-8").read()
+          try:
+              _, _, obj_text = extract_object(src)
+              obj = json.loads(obj_text)
+          except (ValueError, json.JSONDecodeError) as e:
+              print(f"ERROR: re-parse of stripped MUSIC_QUALITY failed ({e})")
+              sys.exit(1)
+          assert "kg" not in obj, "kg still in MUSIC_QUALITY after strip"
+          if re.search(r'"kg"\s*:', src):
+              print('ERROR: file still contains a "kg" platform key outside MUSIC_QUALITY')
+              sys.exit(1)
+          print("linglan.js kg strip verified: MUSIC_QUALITY keys =", ",".join(obj.keys()))
+          EOF
+
       - name: Generate Xcode project (XcodeGen)
         run: |
           brew install xcodegen

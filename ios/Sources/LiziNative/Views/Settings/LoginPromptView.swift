@@ -21,9 +21,9 @@ import SwiftUI
 /// 判定表只认原生已有的「需要登录」判定点（端点逐条注明出处），不新发明登录墙：
 /// - liked（我喜欢的歌单）：netease / qq / qishui / bodian 调各平台自己的
 ///   用户喜欢接口（`RailsBridge.railLiked`：网易 specialType==5 歌单、
-///   QQ dirid 201、汽水 type==1 歌单、波点 liked_songs）；kugou / kuwo /
+///   QQ dirid 201、汽水 type==1 歌单、波点 liked_songs）；kuwo /
 ///   applemusic 是本地星标兜底，不用登录 → 不设墙。
-/// - playlists（我收藏的歌单）：netease / qq / kugou / qishui / bodian 调
+/// - playlists（我收藏的歌单）：netease / qq / qishui / bodian / kugou 调
 ///   各平台用户歌单接口（`RailsBridge.railMyPlaylists`）；kuwo 没有用户歌单
 ///   接口、applemusic 是公开热门歌单兜底 → 不设墙。
 /// - cloudDrive（我的云盘）：只有网易有个人云盘取链口
@@ -94,7 +94,7 @@ enum LoginGate {
         case .liked:
             return ["netease", "qq", "qishui", "bodian"]
         case .playlists:
-            return ["netease", "qq", "kugou", "qishui", "bodian"]
+            return ["netease", "qq", "qishui", "bodian", "kugou"]
         case .cloudDrive:
             return ["netease"]
         case .radio:

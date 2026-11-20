@@ -159,17 +159,16 @@ final class NativeIslandCoordinator: ObservableObject {
             via = "proxy"
             return data
         }
-        // 2) 直链。
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            if let down = downsample(data) {
-                coverCache[track.id] = down
-                via = "direct"
-                return down
-            }
-        } catch {
-            // 直链也失败：返回 nil，扩展画默认 ♪，不编封面。
+        // 2) 直链（r24：走 Proxies.directImageData——同一个门、6s 上限、入口
+        // https 归一；旧写法 URLSession.shared.data(from:) 默认 60s，
+        // startForTrack 在起岛前等它，最坏 40s + 60s 才起岛）。
+        if let data = await Proxies.directImageData(url),
+           let down = downsample(data) {
+            coverCache[track.id] = down
+            via = "direct"
+            return down
         }
+        // 直链也失败：返回 nil，扩展画默认 ♪，不编封面。
         return nil
     }
 
@@ -185,7 +184,12 @@ final class NativeIslandCoordinator: ObservableObject {
         }
         let scale = targetWidth / image.size.width
         let size = CGSize(width: targetWidth, height: image.size.height * scale)
-        let renderer = UIGraphicsImageRenderer(size: size)
+        // r24：format.scale = 1（根因见 LiveActivityManager.thumbnail 注释——
+        // 默认 format 用主屏 scale，@3x 手机上 "120px" 实际渲成 360px，
+        // JPEG 约 25KB，进 fittedState 时原图档就必超 3800B 预算）。
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
         let resized = renderer.image { _ in
             image.draw(in: CGRect(origin: .zero, size: size))
         }

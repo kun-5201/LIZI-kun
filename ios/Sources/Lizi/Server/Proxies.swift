@@ -4,8 +4,71 @@ import Foundation
 /// 对标 server.mjs 的 proxyImage / proxySourceAudio / proxyQQAudio。
 /// 只放行 AUDIO_HOSTS 白名单里的 CDN 域名，别把口子开成任意 SSRF。
 
+/// 封面取图并发门（r24 新写）：同一时刻最多 4 个上游取图在跑，FIFO 排队。
+/// 根因（2026-11-20 08:30 真机诊断 + 本轮核对）：首页各轨全是普通 HStack
+/// （非 Lazy），一屏几十张封面同时起取图，全涌进 URLSession.shared；
+/// 共享会话单 host 默认只开 6 连接，排队请求在会话队列里空等，而空闲超时
+/// 从 resume 那一刻就开始计时——尾部请求还没拿到连接就 -1001，再乘旧实现
+/// 的 2 候选 × 2 重试 = 每张图 20003ms 成批死，http 腿再补一个 -1022。
+/// 门把并发压到 4（< 6，会话内永不排队），排队发生在 Swift 侧、不进
+/// URLSession 的超时计时；每个开始跑的请求都有完整超时可用。
+/// VM 证据：单发 curl p3/p4.music.126.net https 全部 200（首字节 1.5–1.7s），
+/// 端点本身是好的；Referer 也已排除（无 Referer 同样 200，错 Referer 只会
+/// 快 403、不会 10s 超时）。VM 通 ≠ 真机通：真机出口若另有拦截，快速失败 +
+/// 占位，下次诊断凭新日志的 ms / code 再分。
+actor CoverFetchGate {
+    static let shared = CoverFetchGate()
+    static let maxConcurrent = 4
+    private var running = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    /// 在门内跑一次取图：拿槽 → 跑 work → 还槽（work 抛错/取消也还）。
+    /// 返回取图结果 + 等槽毫秒数（诊断用：总 ms 大而 waitMs 小 = 上游 stalls；
+    /// waitMs 大 = 首页并发把门堵了）。
+    func run<T>(_ work: () async throws -> T) async throws -> (value: T, waitMs: Int) {
+        let t0 = Date()
+        guard await acquire() else { throw CancellationError() }
+        let waitMs = Int(Date().timeIntervalSince(t0) * 1000)
+        defer { release() }
+        let value = try await work()
+        return (value, waitMs)
+    }
+
+    /// 拿一个取图槽；等槽期间被取消返回 false（调用方不跑取图）。
+    private func acquire() async -> Bool {
+        if running < Self.maxConcurrent {
+            running += 1
+            return true
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            waiters.append(continuation)
+        }
+        // 被 resume 叫醒时槽已是我们的（release 把槽直接交给下一个 waiter，
+        // running 计数不变）；若等槽期间调用方已取消，这次取图不跑了、把槽还回去。
+        if Task.isCancelled {
+            release()
+            return false
+        }
+        return true
+    }
+
+    private func release() {
+        if let next = waiters.first {
+            waiters.removeFirst()
+            next.resume()
+        } else {
+            running -= 1
+        }
+    }
+}
+
 enum Proxies {
     /// 各源音频 CDN 白名单（server.mjs 的 AUDIO_HOSTS 原样搬过来）。
+    /// r24 Folia 酷狗移植：`kugou` 行必须留——Folia 的 song_url 回的直链
+    /// 落在 .kugou.com / .kglink.com，`/api/kugou/audio` 代理靠它放行；
+    /// `bodian` 行里的 .kugou.com 也留（波点曲目可能挂酷狗图床/音频域）；
+    /// `audioReferer["kugou"]` 与图片代理的 .kugou.com 同理（封面走
+    /// imge.kugou.com，Referer 发 www.kugou.com）。
     static let audioHosts: [String: [String]] = [
         // 域名后缀匹配：".kugou.com" 匹配 xxx.kugou.com
         "kugou": [".kugou.com", ".kgmusic.cn", ".kglink.com", ".kugou.com.cn"],
@@ -42,8 +105,72 @@ enum Proxies {
         return suffixes.contains { h == $0.dropFirst() || h.hasSuffix($0) }
     }
 
+    /// 单次取图上限（秒，r24 新写）：VM 实测网易 CDN 首字节 1.5–1.7s，
+    /// 6s 是 3.5 倍余量，仍比旧的 10s 短；配合“只取一次、不重试”，
+    /// 代理腿最坏 6s（旧 40s）。
+    private static let imageFetchTimeout: TimeInterval = 6
+
+    /// 封面专用会话（r24 新写）：与 URLSession.shared 分池——音频/API 流量
+    /// 不再和封面抢同一批连接；请求空闲 6s、整程 8s（数据细流也不许无限拖）；
+    /// 单 host 6 连接是系统默认值，这里写明：真正限流的是 CoverFetchGate，
+    /// 不是会话。
+    private static let imageSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 6
+        config.timeoutIntervalForResource = 8
+        config.httpMaximumConnectionsPerHost = 6
+        return URLSession(configuration: config)
+    }()
+
+    /// 封面 URL 入口 https 归一（r24 新写）：只换 scheme，不换 host。
+    /// 真机 ATS 下 http 永远 -1022，升上去是唯一能成的路；https 原样过。
+    /// 各家上游原样返回的封面多是 http（网易 picUrl、QQ 部分 pic 字段），
+    /// 归一放在入口，各调用点不再各自升级——模型层（NativeBridge 等数据链）
+    /// 一个字不动。
+    static func upgradedImageURL(_ url: URL) -> URL {
+        guard url.scheme == "http" else { return url }
+        var comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        comps?.scheme = "https"
+        return comps?.url ?? url
+    }
+
+    /// 直链腿唯一入口（r24 新写）：CoverImageLoader / 岛 / 锁屏 / 舞台主色共用。
+    /// 旧写法各处 `URLSession.shared.data(from:)`：默认 60s 空闲超时、7 天总
+    /// 上限、无并发门——代理 40s 死透后直链再等 60s，一张图最坏 100s 才占位。
+    /// 新写法：入口 https 归一 → 同一个门、同一个 6s 会话、带各家 Referer/UA；
+    /// 任何失败回 nil（调用方占位），不抛错。
+    static func directImageData(_ url: URL) async -> Data? {
+        let fetchURL = upgradedImageURL(url)
+        guard let host = fetchURL.host else { return nil }
+        var request = URLRequest(url: fetchURL, timeoutInterval: imageFetchTimeout)
+        let ref = imageReferer(host)
+        if !ref.isEmpty {
+            request.setValue(ref, forHTTPHeaderField: "Referer")
+        }
+        request.setValue(imageUA, forHTTPHeaderField: "User-Agent")
+        do {
+            let fetched = try await CoverFetchGate.shared.run {
+                try await imageSession.data(for: request)
+            }
+            let (data, resp) = fetched.value
+            guard let http = resp as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else { return nil }
+            return data
+        } catch {
+            return nil
+        }
+    }
+
     /// /api/img?url=：封面代理（绕开防盗链）。
     /// 白名单、上限、重定向再校验均按规格文档 §7.1。
+    /// r24 重写（根因：2026-11-20 08:30 真机诊断 + 本轮核查）——旧实现
+    /// （http→https 候选 × 每候选重试 2 次 × 10s）整段删除，不是改数：
+    /// https 腿在真机上 10s 超时 ×2 = 20003ms，http 腿 ATS -1022 秒拦；
+    /// VM 单发同款 URL 全部 200，Referer 也已排除（见 CoverFetchGate 注释）。
+    /// 新逻辑：入口一次升 https → 门（最多 4 并发）→ 单次取图 6s → 失败立刻
+    /// 502，不重试、不回退 http。代理腿最坏 6s（旧 40s）。
+    /// 保留：取消（-999）回 499 不重试（r20 的修法）；上游 HTTP 错误
+    /// （403/404）不重试、直接 502；Content-Type 与 10MB 上限。
     static func proxyImage(_ req: HttpRequest) async -> HttpResponse {
         guard let raw = req.query["url"], let url = URL(string: raw),
               url.scheme == "http" || url.scheme == "https" else {
@@ -57,88 +184,66 @@ enum Proxies {
                 fields: ["host": url.host ?? "", "reason": "proxy-host-not-allowed", "code": 403, "lane": "proxy"])
             return .json(403, ["error": "host not allowed"])
         }
-        // http → https：第 13 轮第 2 件（日志 07:05:50，播酷狗时封面 URL 是
-        // http://y.gtimg.cn，代理原样拉被 ATS -1022 秒拦，/api/img 回 502）。
-        // ATS 在真机上拦一切明文 http（本地 127.0.0.1 除外），而封面 URL
-        // 是各家上游原样返回的 http、还跨平台混用（播酷狗的歌也可能挂 QQ 图床
-        // 的图），不能按平台一家一家加。白名单里的图床全部先升 https 再拉
-        // （y.gtimg.cn / imge.kugou.com / p*.music.126.net 已 curl 实测
-        // https 200；酷我图床代码里本来就是 https 前缀）。
-        // https 拉不到（网络错）才回退原 http 试一次——真机上 http 本来就
-        // 走不通，回退只影响 VM/开发环境；上游 HTTP 错误（403/404）不重试，
-        // 直接记日志回 502（和原来一致）。
-        var candidates: [URL] = []
-        if url.scheme == "http",
-           var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) {
-            comps.scheme = "https"
-            if let u = comps.url { candidates.append(u) }
-        }
-        candidates.append(url)
+        let fetchURL = upgradedImageURL(url)
         let started = Date()
-        // 网络错 / 超时每个候选地址重试一次（10s 超时；两候选都死透最坏 ~40s，
-        // 常见情况 https 一次就成；上游 HTTP 错误（403/404 等）不重试，直接记日志回 502。
-        var lastError: Error?
-        for fetchURL in candidates {
-        for _ in 0..<2 {
-            do {
-                var request = URLRequest(url: fetchURL, timeoutInterval: 10)
-                let ref = imageReferer(host)
-                if !ref.isEmpty {
-                    request.setValue(ref, forHTTPHeaderField: "Referer")
-                }
-                request.setValue(imageUA, forHTTPHeaderField: "User-Agent")
-                let (data, resp) = try await URLSession.shared.data(for: request)
-                guard let http = resp as? HTTPURLResponse else {
-                    return .error(502, "no http response")
-                }
-                // 跟随重定向后，再校验一次最终 URL 的 host。
-                if let finalURL = http.url, let finalHost = finalURL.host, !imageHostAllowed(finalHost) {
-                    DiagLog.shared.recordLog(category: "cover",
-                        message: "img proxy 403 redirect host not allowed: \(host) -> \(finalHost)",
-                        fields: ["host": finalHost, "reason": "proxy-redirect-host-not-allowed", "code": 403, "lane": "proxy"])
-                    return .json(403, ["error": "redirect host not allowed"])
-                }
-                // 先判状态再判 Content-Type：上游 403 常回 HTML 错误页，旧代码
-                // 会报 415「not an image」，掩盖真实原因；现在直接记上游状态。
-                guard (200..<300).contains(http.statusCode) else {
-                    let ms = Int(Date().timeIntervalSince(started) * 1000)
-                    DiagLog.shared.recordLog(category: "cover",
-                        message: "img proxy \(host) upstream HTTP \(http.statusCode) (\(ms)ms)",
-                        fields: ["host": host, "reason": "proxy-status-\(http.statusCode)", "code": http.statusCode, "lane": "proxy"])
-                    return .error(502, "上游 \(host) 返回 HTTP \(http.statusCode)")
-                }
-                let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? "image/jpeg"
-                guard contentType.hasPrefix("image/") else {
-                    return .json(415, ["error": "not an image"])
-                }
-                if data.count > 10 * 1024 * 1024 {
-                    return .json(413, ["error": "image too large"])
-                }
-                return HttpResponse(status: http.statusCode, headers: [
-                    "Content-Type": contentType,
-                    "Cache-Control": "public, max-age=86400",
-                ], body: data)
-            } catch {
-                // 第 20 轮：任务被取消（-999，调用方导航走了 / 视图没了 / 连接断了）
-                // 不是失败：不重试、不记日志，立刻回 499。旧代码把取消当普通
-                // 错误重试 4 次（2 候选 × 2 次）还记一条 fetch failed，诊断里
-                // 几十条 -999 全是这么来的。注意：URLSession 的 async API 在
-                // 这里漏出的是原始 NSURLError -999，不是 CancellationError，
-                // 两边都要认。
-                if error is CancellationError || (error as NSError).code == NSURLErrorCancelled {
-                    return .error(499, "cancelled")
-                }
-                lastError = error
-                continue
+        var gateWaitMs = 0
+        do {
+            var request = URLRequest(url: fetchURL, timeoutInterval: imageFetchTimeout)
+            let ref = imageReferer(host)
+            if !ref.isEmpty {
+                request.setValue(ref, forHTTPHeaderField: "Referer")
             }
+            request.setValue(imageUA, forHTTPHeaderField: "User-Agent")
+            let fetched = try await CoverFetchGate.shared.run {
+                try await imageSession.data(for: request)
+            }
+            gateWaitMs = fetched.waitMs
+            let (data, resp) = fetched.value
+            guard let http = resp as? HTTPURLResponse else {
+                return .error(502, "no http response")
+            }
+            // 跟随重定向后，再校验一次最终 URL 的 host。
+            if let finalURL = http.url, let finalHost = finalURL.host, !imageHostAllowed(finalHost) {
+                DiagLog.shared.recordLog(category: "cover",
+                    message: "img proxy 403 redirect host not allowed: \(host) -> \(finalHost)",
+                    fields: ["host": finalHost, "reason": "proxy-redirect-host-not-allowed", "code": 403, "lane": "proxy"])
+                return .json(403, ["error": "redirect host not allowed"])
+            }
+            // 先判状态再判 Content-Type：上游 403 常回 HTML 错误页，旧代码
+            // 会报 415「not an image」，掩盖真实原因；现在直接记上游状态。
+            guard (200..<300).contains(http.statusCode) else {
+                let ms = Int(Date().timeIntervalSince(started) * 1000)
+                DiagLog.shared.recordLog(category: "cover",
+                    message: "img proxy \(host) upstream HTTP \(http.statusCode) (\(ms)ms gateWait=\(gateWaitMs)ms)",
+                    fields: ["host": host, "reason": "proxy-status-\(http.statusCode)", "code": http.statusCode, "lane": "proxy"])
+                return .error(502, "上游 \(host) 返回 HTTP \(http.statusCode)")
+            }
+            let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? "image/jpeg"
+            guard contentType.hasPrefix("image/") else {
+                return .json(415, ["error": "not an image"])
+            }
+            if data.count > 10 * 1024 * 1024 {
+                return .json(413, ["error": "image too large"])
+            }
+            return HttpResponse(status: http.statusCode, headers: [
+                "Content-Type": contentType,
+                "Cache-Control": "public, max-age=86400",
+            ], body: data)
+        } catch {
+            // 第 20 轮：任务被取消（-999，调用方导航走了 / 视图没了 / 连接断了）
+            // 不是失败：不重试、不记日志，立刻回 499。注意：URLSession 的 async API 在
+            // 这里漏出的是原始 NSURLError -999，不是 CancellationError，
+            // 两边都要认。
+            if error is CancellationError || (error as NSError).code == NSURLErrorCancelled {
+                return .error(499, "cancelled")
+            }
+            let ms = Int(Date().timeIntervalSince(started) * 1000)
+            let code = (error as NSError).code
+            DiagLog.shared.recordLog(category: "cover",
+                message: "img proxy \(host) fetch failed (\(ms)ms gateWait=\(gateWaitMs)ms code=\(code)): \(error.localizedDescription)",
+                fields: ["host": host, "reason": "proxy-error", "lane": "proxy"])
+            return .error(502, error.localizedDescription)
         }
-        }
-        let ms = Int(Date().timeIntervalSince(started) * 1000)
-        let errText = lastError.map { String(describing: $0) } ?? "unknown error"
-        DiagLog.shared.recordLog(category: "cover",
-            message: "img proxy \(host) fetch failed (\(ms)ms): \(errText)",
-            fields: ["host": host, "reason": "proxy-error", "lane": "proxy"])
-        return .error(502, errText)
     }
 
     private static let imageHostsExact: Set<String> = [

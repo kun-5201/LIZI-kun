@@ -186,7 +186,7 @@ final class SettingsStore: ObservableObject {
     /// - 网易云：SessionStore.hasMusicU（MUSIC_U Cookie）
     /// - QQ / 酷狗 / 汽水 / 波点 / 酷我：各平台 sidecarAuth（登录后才有）
     /// - Apple Music：开发者 token / 用户 token 任一已保存
-    /// 注意：酷狗/汽水/波点的 `*-device` 设备号不是登录态，不算。
+    /// 注意：汽水/波点/酷狗的 `*-device` 设备号不是登录态，不算。
     struct PlatformAccount: Identifiable {
         let id: String
         let name: String
@@ -339,13 +339,13 @@ final class SettingsStore: ObservableObject {
         lxStatus = parts.joined(separator: " ")
     }
 
-    /// LX 平台短码 → 设置页显示名（wy/tx/kg/kw/qs/mg；未知短码原样显示）。
+    /// LX 平台短码 → 设置页显示名（wy/tx/kw/kg/qs/mg；未知短码原样显示）。
     static func lxPlatformDisplayName(_ code: String) -> String {
         switch code {
         case "wy": return "网易云"
         case "tx": return "QQ"
-        case "kg": return "酷狗"
         case "kw": return "酷我"
+        case "kg": return "酷狗"
         case "qs": return "汽水"
         case "mg": return "咪咕"
         case "local": return "本地"

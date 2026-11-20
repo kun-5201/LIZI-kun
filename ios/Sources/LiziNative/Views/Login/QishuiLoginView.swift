@@ -35,12 +35,12 @@ import SwiftUI
 /// 直读 status 一次确认回到未登录才显示「已退出登录」。
 ///
 /// r23a 接线（共享底座由 r23a 建，本文件只用接口、不另建底座；与
-/// Kugou/Kuwo/AppleMusic/NetEase 四家同款静态调用——注意 QQLoginView 用的是
+/// Kuwo/AppleMusic/NetEase 三家同款静态调用——注意 QQLoginView 用的是
 /// `LoginStore.shared.refresh`，底座定稿时两处写法要统一成一种）：
 /// - `LoginStore.refresh(platform:)`（静态）：重读 `/api/<platform>/status`
 ///   同步共享登录态；`LoginStore.logout(platform:)`（静态）：调后端 logout
 ///   并清本地态。refresh 不返回值，loggedIn 由本文件直读
-///   `/api/qishui/status` 顶层 `loggedIn`（KugouLoginView.status() 同款写法，
+///   `/api/qishui/status` 顶层 `loggedIn`（同款写法，
 ///   call 回 nil 按未登录算）。
 ///   本文件不定义 `LoginStore`，也不定义 `QrLoginView` / `LoginSheetView`。
 /// - 二维码区目前用原生 SwiftUI 直渲（`Image(uiImage:)`）；r23a 的
@@ -173,7 +173,7 @@ struct QishuiLoginView: View {
     // MARK: - 登录态确认与登出（refresh/logout 走 LoginStore，loggedIn 直读 status）
 
     /// 登录态以 `/api/qishui/status` 为准：顶层 `loggedIn`
-    ///（KugouLoginView.status() 同款写法；call 回 nil 按未登录算）。
+    ///（同款写法；call 回 nil 按未登录算）。
     private func statusLoggedIn() async -> Bool {
         guard let d = await NativeBridge.call(path: "/api/qishui/status") else { return false }
         return (d["loggedIn"] as? NSNumber)?.boolValue == true

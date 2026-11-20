@@ -9,10 +9,10 @@ import SwiftUI
 ///   到曲目列表（歌单曲目走 `NativeBridge.railPlaylistTracks`）。
 /// - 电台频道型：频道卡片列表，点频道在本页内下钻到频道曲目
 ///   （走 `NativeBridge.railStationTracks`；频道曲目端点：网易
-///   netease/dj/program、QQ qq/radio/tracks、酷狗 kugou/fm/songs、
+///   netease/dj/program、QQ qq/radio/tracks、
 ///   汽水 qishui/feed 带 mode；波点 FM 本身就是曲目列表，不下钻；
 ///   酷我 / Apple Music 无电台，不设入口）。
-/// - 精选有多个 feed 的平台（网易 / QQ / 酷狗 / 酷我）：顶部有 feed 切换，
+/// - 精选有多个 feed 的平台（网易 / QQ / 酷我）：顶部有 feed 切换，
 ///   切 feed 重新拉取；首页行只放默认 feed（见 RailsBridge）。
 ///
 /// 导航缝合（工人 A 的活，本页不碰 AppNavigation.swift）：

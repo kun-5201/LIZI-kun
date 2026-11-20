@@ -65,7 +65,7 @@ targets:
           - audio
         # 灵动岛开关（见上面 settings 注释）：主 App 的 Info.plist 必须有
         # 这两个 key，系统才允许 Activity.request；扩展的 plist 不需要——
-        # 实测：酷狗主 App 有、其 Widget 扩展没有；kun 主 App 有、扩展没有。
+        # 实测：主 App 有、其 Widget 扩展没有；kun 主 App 有、扩展没有。
         NSSupportsLiveActivities: true
         NSSupportsLiveActivitiesFrequentUpdates: true
         UILaunchScreen: {}
@@ -129,11 +129,11 @@ targets:
       # 共享后端：7 平台服务 + LX + 歌词 + 诊断 + 会话 + 加密 + 代理 + 本地文件 + 边车。
       - Sources/Lizi/Server/NetEase.swift
       - Sources/Lizi/Server/QQ.swift
-      - Sources/Lizi/Server/Kugou.swift
       - Sources/Lizi/Server/Qishui.swift
       - Sources/Lizi/Server/Bodian.swift
       - Sources/Lizi/Server/Kuwo.swift
       - Sources/Lizi/Server/AppleMusic.swift
+      - Sources/Lizi/Server/FoliaKugou.swift
       - Sources/Lizi/Server/LX.swift
       - Sources/Lizi/Server/LXSources.swift
       - Sources/Lizi/Server/LXScriptEngine.swift

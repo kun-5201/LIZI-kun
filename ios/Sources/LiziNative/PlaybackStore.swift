@@ -11,7 +11,7 @@ import Foundation
 ///   但 VIP 歌的试听地址直接拒掉，不放试听片段）
 /// - 波点 / Apple Music：LX 不支持它们，永远走老顺序；本地文件直接播文件 URL。
 ///
-/// 第 16 轮教训：酷狗崩溃点在取到资源之后、播放启动那一段——播放启动路径
+/// 第 16 轮教训：崩溃点在取到资源之后、播放启动那一段——播放启动路径
 /// **不要留强制解包**，每一步调 `DiagLog.recordPlaybackStep`（文件落盘）。
 /// 音频会话：AVAudioSession .playback 独占（不设 mixWithOthers），第一次真正
 /// 播放时才激活（照抄壳版 ContentView 的做法，避免打开 App 就抢走别的 App 的声音）。
@@ -696,7 +696,7 @@ final class PlaybackStore: ObservableObject {
             }
             return NativeBridge.SongURLResult(reason: "unavailable", via: "local")
         }
-        let lxSupported = ["netease", "qq", "kugou", "kuwo", "qishui"].contains(track.platform)
+        let lxSupported = ["netease", "qq", "kuwo", "qishui", "kugou"].contains(track.platform)
         let member = await NativeBridge.isMember(platform: track.platform)
         guard gen == resolveGeneration, !Task.isCancelled else {
             DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=member source=\(track.platform) id=\(track.id)")

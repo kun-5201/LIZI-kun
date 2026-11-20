@@ -3,7 +3,7 @@ import Compression
 
 /// 波点边车：bodian-music-api@0.1.2（MIT）的 Swift 移植。
 /// 上游细节见 /tmp/qishui-bodian-details.md（逐字摘自包内 src/）。
-/// 主服务路由与归一化见 specs/sidecars.md §6。
+/// 主服务路由与归一化见 specs/sidecars.md §5。
 /// 注意：
 /// - 每次调用 query 恒带 uid（会话 uid 或 -1）与 token（无会话为空）。
 /// - 除注明外目录/曲库调用均未签名；音频两步（checkRight/audioUrl）与登录换凭证已签名。
@@ -189,7 +189,7 @@ final class BodianService {
         return bdZlibInflate(deflate)
     }
 
-    /// zlib 解压（COMPRESSION_ZLIB，缓冲翻倍重试），与 Kuwo/Kugou 的守卫写法一致：
+    /// zlib 解压（COMPRESSION_ZLIB，缓冲翻倍重试），与 Kuwo 的守卫写法一致：
     /// 空 Data 时 withUnsafeBytes 的 baseAddress 是 nil，旧写法 baseAddress! 会直接
     /// 杀死进程（bdGunzip 的守卫允许 pos == count-8 即空 deflate 体时就会走到这里）。
     private static func bdZlibInflate(_ data: Data) -> Data? {
@@ -734,7 +734,7 @@ final class BodianService {
                 "trackCount": scInt(it, "musicCount") != 0 ? scInt(it, "musicCount") : (scInt(it, "songCount") != 0 ? scInt(it, "songCount") : (scInt(it, "total") != 0 ? scInt(it, "total") : (scInt(it, "count") != 0 ? scInt(it, "count") : scInt(it, "songNum"))))]
     }
 
-    // MARK: - 路由分发（主服务形状，见 specs/sidecars.md §6 表右列）
+    // MARK: - 路由分发（主服务形状，见 specs/sidecars.md §5.4 表右列）
 
     private static func bdHTTPCode(_ e: BodianError) -> Int {
         switch e.code {

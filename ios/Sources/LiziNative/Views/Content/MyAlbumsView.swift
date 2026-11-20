@@ -24,6 +24,31 @@ import SwiftUI
 /// 约束：禁缩放（全页不加任何 magnification 手势，尺寸固定）；
 /// 封面无图用 `CoverImageView` 的白色底 + 音符占位，不用金色；无强制解包。
 /// 3D 手感只能真机确认，VM 上只做静态检查。
+///
+/// r24（2026-11-20，第 4 件，手势链重写——不是 P2 代码换参数：旧的
+/// `shelfDragGesture`（容器 SwiftUI DragGesture，只有 onEnded）与各本的
+/// `.onTapGesture` 全部删掉，改为 UIKit `ShelfTouchView` + 模型同一套
+/// 新入口；用户原话「后面我会查看代码，不能拿以前的代码」）：
+/// - 根因（静态核对，三条都坐实）：
+///   1. 方向反了：旧手势 dx<0（左滑）调 `selectPrevious`——壳版
+///      myalbums.js 是 `pos = from − dx/gap`、卡的 x = (i − pos) × gap，
+///      左滑 pos 变大 = 下一张，手指往左、架子往右跳；架子抄了播放页
+///      CoverFlow「左滑上一首」的方向，违背了自己的壳版对照物。
+///   2. 拖动全程没反馈：旧手势只有 onEnded，手指在架子上划、架子一动不动，
+///      松手才跳一档；到头（第 0 张左滑 / 最后一张右滑）还被 clamp 吞成
+///      完全没反应。两点加起来就是用户说的「无法转动」。
+///   3. 父子手势裁决：容器 `.gesture(DragGesture)` + 各本 `.onTapGesture`，
+///      谁先拿到触摸全看 SwiftUI 的裁决，和首页环 r21/r22c 在 ScrollView
+///      里丢手势是同一类失手；改成 UIKit 一对识别器（pan + tap，
+///      tap require(toFail: pan)，与 StripTouchView 同款），触摸只归一处。
+/// - 新链（对照壳版 myalbums.js stage 的 pointerdown/move/up）：
+///   拖动跟手（dragOffset，内容跟手指走；到头 0.32 橡皮筋；一轮最多一档），
+///   松手惯性（速度 × 260ms / 一档宽，四舍五入吸附到最近一档），
+///   点按坐标命中（hitIndex `round(pos + (x − centerX)/gap)` 同款，
+///   ≤8px 算点按）；spine 点本进专辑页、flow 点中间进专辑页、
+///   点两侧切到中间——点按语义一字不动。
+/// - 不动的部分：变换表（spine 扇开角 fan ±22°/tanh 0.85、flow metrics）、
+///   形态切换与持久化、步进按钮、空态、数据（只读 AlbumShelfStore）。
 
 // MARK: - 形态与固定尺寸（照抄壳版参数，见文件头）
 
@@ -52,8 +77,6 @@ private let spineFan: Double = 22
 private let spineDamp: Double = 0.85
 /// 两形态共用的 SwiftUI 透视系数（CoverFlowView 的 perspective3D，近似 CSS 1100px）。
 private let shelfPerspective: CGFloat = 0.5
-/// 两形态共用的滑动切张阈值（CoverFlowView 的 56px）。
-private let shelfSwipeThreshold: CGFloat = 56
 /// 正面流：单张尺寸 / 轨道高（照抄 CoverFlowView / PlayerTokens，188 / 254）。
 private let flowItemSize: CGFloat = 188
 private let flowTrackHeight: CGFloat = 254
@@ -99,6 +122,58 @@ final class MyAlbumsViewModel: ObservableObject {
 
     func selectPrevious() { select(index: selectedIndex - 1) }
     func selectNext() { select(index: selectedIndex + 1) }
+
+    // MARK: - r24 手势链（新写，第 4 件；对照壳版 public/pages/myalbums.js）
+
+    /// 拖动中的跟手偏移（pt；+ = 内容跟着手指往右；松手即清零，
+    /// 壳版 S.pos 的点数版：pos = from − dx/gap，卡的 x = (i − pos) × gap）。
+    @Published var dragOffset: CGFloat = 0
+
+    /// 一档的拖动距离（pt）：spine = 书脊间距 58；flow = 单张边长 188
+    /// （CoverFlowView 的 dragProgress 分母 itemSize 同款）。
+    var stepPx: CGFloat { form == .spine ? spineSpacing : flowItemSize }
+
+    /// 拖动中的分数位置（壳版 S.pos：选中下标 − dx/gap；扇开角/透明度/
+    /// 缩放都按它算，松手吸附到最近整数）。
+    var dragPosition: CGFloat {
+        CGFloat(selectedIndex) - dragOffset / stepPx
+    }
+
+    /// 手指落下（ShelfTouchView touchesBegan）：新一轮拖动，跟手偏移清零。
+    func shelfDragBegan() {
+        dragOffset = 0
+    }
+
+    /// 手指移动（ShelfTouchView pan .changed；壳版 pointermove 同款）：
+    /// 内容跟手；到头再拖按 0.32 橡皮筋（壳版 `raw < 0 → raw *= 0.32`
+    /// 同款）；一轮最多一档（CoverFlowView dragProgress 夹 ±1 同款）。
+    func shelfDragMoved(dx: CGFloat) {
+        guard !albums.isEmpty else { return }
+        var offset = dx
+        let last = albums.count - 1
+        if (selectedIndex <= 0 && dx > 0) || (selectedIndex >= last && dx < 0) {
+            offset = dx * 0.32
+        }
+        dragOffset = max(-stepPx, min(stepPx, offset))
+    }
+
+    /// 手指抬起（ShelfTouchView pan .ended；壳版 pointerup 同款）：
+    /// 松手速度（pt/s）× 0.26s 换算成像素再除以一档宽（壳版
+    /// `S.vel * 260 / gapPx()` 同款，速度单位已换算成 pt/s），
+    /// 加到已拖距离上、四舍五入到最近一档、夹在两头；方向是壳版的
+    /// 方向——左滑下一张、右滑上一张（旧代码反了：dx<0 调 selectPrevious，
+    /// 手指往左、架子往右跳，第 4 件「转不动」的另一半根因）。
+    /// 没过半档就回弹（dragOffset 清零 + 0.38s easeOut）。
+    func shelfDragEnded(dx: CGFloat, velocity: CGFloat) {
+        guard !albums.isEmpty else { return }
+        let projected = dx + velocity * 0.26
+        let steps = max(-1, min(1, Int((projected / stepPx).rounded())))
+        let target = min(max(selectedIndex - steps, 0), albums.count - 1)
+        withAnimation(.easeOut(duration: 0.38)) {
+            selectedIndex = target
+            dragOffset = 0
+        }
+    }
 
     /// 切换形态并持久化（下次启动保持）。
     func toggleForm() {
@@ -200,19 +275,29 @@ struct MyAlbumsView: View {
         }
     }
 
-    /// 滑动切张（两形态共用；方向和播放页 CoverFlow / 首页大卡一致：
-    /// 左滑上一张、右滑下一张；阈值 56px，8px 内死区不抢点按）。
-    private var shelfDragGesture: some Gesture {
-        DragGesture(minimumDistance: 8, coordinateSpace: .local)
-            .onEnded { value in
-                let dx = value.translation.width
-                guard abs(dx) > shelfSwipeThreshold, viewModel.albums.count >= 2 else { return }
-                if dx < 0 {
-                    viewModel.selectPrevious()
-                } else {
-                    viewModel.selectNext()
-                }
+    /// 点按命中（r24，第 4 件；壳版 hitIndex
+    /// `round(pos + (x − centerX) / gap)` 同款）：spine 按书脊间距换算，
+    /// flow 按最近一张卡中心换算；点在架子外面（算出来越界）回 nil = 空白，
+    /// 不动作。调用方按形态执行点按语义（spine 点本进专辑页；
+    /// flow 点中间进专辑页、点两侧切到中间）。
+    private func shelfHitIndex(x: CGFloat, centerX: CGFloat) -> Int? {
+        guard !viewModel.albums.isEmpty else { return nil }
+        if viewModel.form == .spine {
+            let idx = Int((viewModel.dragPosition + (x - centerX) / spineSpacing).rounded())
+            return viewModel.albums.indices.contains(idx) ? idx : nil
+        }
+        var best: (index: Int, distance: CGFloat)?
+        for offset in flowOffsets {
+            let index = viewModel.selectedIndex + offset
+            guard viewModel.albums.indices.contains(index) else { continue }
+            let cx = centerX + flowMetrics(for: offset).offsetX
+            let d = abs(x - cx)
+            if best == nil || d < best!.distance {
+                best = (index, d)
             }
+        }
+        guard let best, best.distance <= flowItemSize / 2 else { return nil }
+        return best.index
     }
 
     /// 点一张进专辑页（约定：工人 A 的 `.album(platform:id:)` 路由）。
@@ -223,9 +308,12 @@ struct MyAlbumsView: View {
 
     // MARK: - spine：侧立 3D 书架
 
-    /// 侧立架可见窗口：选中张前后各 6 本（再远的不渲染，收藏再多也不堆视图）。
+    /// 侧立架可见窗口：选中张前后各 6 本（再远的不渲染，收藏再多也不堆视图；
+    /// r24：拖动中按分数位置取整，窗口跟着手指走，边缘一本跨过半档才换，
+    /// 不在拖动中途闪现/消失）。
     private var visibleSpineIndices: [Int] {
-        viewModel.albums.indices.filter { abs($0 - viewModel.selectedIndex) <= 6 }
+        let center = Int(viewModel.dragPosition.rounded())
+        return viewModel.albums.indices.filter { abs($0 - center) <= 6 }
     }
 
     private var spineShelf: some View {
@@ -233,7 +321,10 @@ struct MyAlbumsView: View {
             ZStack(alignment: .bottom) {
                 ForEach(visibleSpineIndices, id: \.self) { index in
                     let album = viewModel.albums[index]
-                    let offset = index - viewModel.selectedIndex
+                    // r24：分数偏移（壳版 d = i − S.pos）：拖动中扇开角/透明度/
+                    // 缩放/横坐标都跟着手指连续变，松手才吸附到整数（旧代码只用
+                    // 整数偏移，拖动全程画面一动不动）。
+                    let offset = CGFloat(index) - viewModel.dragPosition
                     SpineBookView(album: album)
                         .opacity(spineOpacity(for: offset))
                         .scaleEffect(spineScale(for: offset))
@@ -242,15 +333,27 @@ struct MyAlbumsView: View {
                             axis: (x: 0, y: 1, z: 0),
                             perspective: shelfPerspective
                         )
-                        .offset(x: CGFloat(offset) * spineSpacing)
+                        .offset(x: offset * spineSpacing)
                         .zIndex(Double(100 - abs(offset)))
-                        .onTapGesture { openAlbum(album) }
+                        // 点按不再走各本的 .onTapGesture（已删，见文件头）：
+                        // 触摸层盖在上面，VoiceOver 激活走这里。
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("专辑：\(album.title)")
+                        .accessibilityAction { openAlbum(album) }
                         .animation(.easeOut(duration: 0.38), value: viewModel.selectedIndex)
                 }
+                // r24：触摸层（ShelfTouchView，UIKit，文件尾）盖在最上层——
+                // 拖动跟手 + 点按命中都归它（旧的 .gesture(shelfDragGesture)
+                // 与各本的 .onTapGesture 已删，第 4 件根因见文件头）。
+                ShelfTouchView(viewModel: viewModel) { x, centerX in
+                    if let idx = shelfHitIndex(x: x, centerX: centerX) {
+                        openAlbum(viewModel.albums[idx])
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(height: spineHeight + 20)
             .contentShape(Rectangle())
-            .gesture(shelfDragGesture)
             // 架板：书脊底部落在这条线上
             RoundedRectangle(cornerRadius: 3)
                 .fill(LiziTokens.ink.opacity(0.14))
@@ -261,21 +364,22 @@ struct MyAlbumsView: View {
     }
 
     /// 扇开角（壳版 REF：fan ±22°、tanh 阻尼 0.85；符号和 CoverFlow 一致：
-    /// 左边 +、右边 −，整排像扇子一样张开）。
-    private func spineAngle(for offset: Int) -> Double {
+    /// 左边 +、右边 −，整排像扇子一样张开；r24：入参改成分数偏移，
+    /// 拖动中角度连续跟手）。
+    private func spineAngle(for offset: CGFloat) -> Double {
         -spineFan * tanh(spineDamp * Double(offset))
     }
 
-    private func spineScale(for offset: Int) -> CGFloat {
-        switch abs(offset) {
+    private func spineScale(for offset: CGFloat) -> CGFloat {
+        switch abs(Int(offset.rounded())) {
         case 0: return 1.05
         case 1: return 0.98
         default: return 0.94
         }
     }
 
-    private func spineOpacity(for offset: Int) -> Double {
-        switch abs(offset) {
+    private func spineOpacity(for offset: CGFloat) -> Double {
+        switch abs(Int(offset.rounded())) {
         case 0: return 1
         case 1: return 0.92
         default: return 0.78
@@ -296,10 +400,24 @@ struct MyAlbumsView: View {
                 flowItem(offset: offset)
                     .zIndex(flowZIndex(for: offset))
             }
+            // r24：触摸层（ShelfTouchView，UIKit，文件尾）盖在最上层——
+            // 拖动跟手 + 点按命中都归它（旧的 .gesture(shelfDragGesture)
+            // 与各张的 .onTapGesture 已删，第 4 件根因见文件头）。
+            ShelfTouchView(viewModel: viewModel) { x, centerX in
+                if let idx = shelfHitIndex(x: x, centerX: centerX) {
+                    if idx == viewModel.selectedIndex {
+                        // 点中间那张进专辑页
+                        openAlbum(viewModel.albums[idx])
+                    } else {
+                        // 点两侧切到中间
+                        viewModel.select(index: idx)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(height: flowTrackHeight)
         .contentShape(Rectangle())
-        .gesture(shelfDragGesture)
         .padding(.top, 8)
     }
 
@@ -307,7 +425,12 @@ struct MyAlbumsView: View {
     private func flowItem(offset: Int) -> some View {
         let index = viewModel.selectedIndex + offset
         let album = viewModel.albums.indices.contains(index) ? viewModel.albums[index] : nil
-        let metrics = flowMetrics(for: offset)
+        // r24：拖动跟手——有效档位 = offset − dragProgress
+        // （CoverFlowView r23j 同款插值；dragProgress = dragOffset / 单张边长，
+        // 夹 ±1；手指停封面就停，dragOffset 不挂动画；旧代码拖动全程
+        // 画面一动不动，松手才跳一档）。
+        let dragProgress = max(-1, min(1, viewModel.dragOffset / flowItemSize))
+        let metrics = flowMetrics(forEffectiveOffset: Double(offset) - Double(dragProgress))
 
         VStack(spacing: 8) {
             CoverImageView(url: album?.coverURL, placeholderIconSize: 64)
@@ -330,12 +453,14 @@ struct MyAlbumsView: View {
             perspective: shelfPerspective
         )
         .offset(x: metrics.offsetX)
-        .onTapGesture {
+        // 点按不再走各张的 .onTapGesture（已删，见文件头）：
+        // 触摸层盖在上面，VoiceOver 激活走这里（语义与旧点按一字不动）。
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(offset == 0 ? "打开专辑：\(album?.title ?? "专辑")" : "切换到专辑：\(album?.title ?? "专辑")")
+        .accessibilityAction {
             if offset == 0 {
-                // 点中间那张进专辑页
                 openAlbum(album)
             } else if viewModel.albums.indices.contains(index) {
-                // 点两侧切到中间
                 viewModel.select(index: index)
             }
         }
@@ -366,6 +491,23 @@ struct MyAlbumsView: View {
         default:
             return FlowMetrics(offsetX: 0, scale: 1, rotateY: 0, opacity: 0)
         }
+    }
+
+    /// 相邻两档 metrics 间插值（CoverFlowView.metrics(forEffectiveOffset:)
+    /// 同款；拖动时封面在两档之间跟手走，不跳变）。
+    private func flowMetrics(forEffectiveOffset effective: Double) -> FlowMetrics {
+        let clamped = min(2, max(-2, effective))
+        let lo = Int(floor(clamped))
+        let hi = min(2, lo + 1)
+        let f = clamped - Double(lo)
+        let a = flowMetrics(for: lo)
+        let b = flowMetrics(for: hi)
+        return FlowMetrics(
+            offsetX: a.offsetX + (b.offsetX - a.offsetX) * CGFloat(f),
+            scale: a.scale + (b.scale - a.scale) * CGFloat(f),
+            rotateY: a.rotateY + (b.rotateY - a.rotateY) * f,
+            opacity: a.opacity + (b.opacity - a.opacity) * f
+        )
     }
 
     private func flowZIndex(for offset: Int) -> Double {
@@ -560,5 +702,135 @@ struct MyAlbumsEntryView: View {
         let albums = AlbumShelfStore.load()
         count = albums.count
         firstCoverURL = albums.first?.coverURL
+    }
+}
+
+// MARK: - 架子触摸层（r24，第 4 件，新写）
+
+/// 架子的触摸层：一个透明 UIView，盖在书脊 / 封面卡上方，接管架子上的
+/// 全部触摸（壳版 myalbums.js 里 stage 的 pointerdown + pointermove +
+/// pointerup 同款——一根手指从按下一路管到松手，手指不抬起、没有
+/// SwiftUI 手势半路接力；setPointerCapture 的等价物就是 UIKit 里
+/// 同一根触摸序列固定发给同一个视图）。
+///
+/// 为什么重写（第 4 件根因，见文件头）：方向反了、拖动全程没反馈、
+/// 到头被 clamp 吞掉、父子 SwiftUI 手势裁决不可靠。新写只动这一条链：
+/// 变换表（spine 扇开角 / flow metrics）、形态切换、点按语义
+/// （spine 点本进专辑页、flow 点中间进专辑页、点两侧切到中间）一字不动。
+struct ShelfTouchView: UIViewRepresentable {
+    @ObservedObject var viewModel: MyAlbumsViewModel
+    /// 点按命中某张（x = 触摸点本地横坐标，centerX = 架子中心横坐标；
+    /// 调用方用 shelfHitIndex 换算下标、按形态执行点按语义）。
+    var onTap: (CGFloat, CGFloat) -> Void
+
+    @MainActor
+    func makeUIView(context: Context) -> ShelfTouchUIView {
+        let view = ShelfTouchUIView()
+        view.model = viewModel
+        view.onTap = onTap
+        return view
+    }
+
+    @MainActor
+    func updateUIView(_ uiView: ShelfTouchUIView, context: Context) {
+        uiView.model = viewModel
+        uiView.onTap = onTap
+    }
+}
+
+/// 架子的 UIKit 宿主视图（主线程；手势回调都在主线程进模型）。
+@MainActor
+final class ShelfTouchUIView: UIView, UIGestureRecognizerDelegate {
+    weak var model: MyAlbumsViewModel?
+    var onTap: ((CGFloat, CGFloat) -> Void)?
+
+    /// 本次触摸起点横坐标（touchesBegan 记，pan 的 .began 要等到第一下
+    /// 移动才回调，等不及——起点丢了，跟手偏移就从错的位置起算）。
+    private var startX: CGFloat = 0
+    /// 本次拖动累计的最大位移（壳版 `S.drag.moved`：≤8px = 点按，>8px = 拖动）。
+    private var moved: CGFloat = 0
+    /// 最近 110ms 的（时间，x）采样，松手速度用（ring.js SAMPLE_MS 同款）。
+    private var samples: [(time: Date, x: CGFloat)] = []
+
+    private lazy var pan: UIPanGestureRecognizer = {
+        let recognizer = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        recognizer.delegate = self
+        return recognizer
+    }()
+
+    private lazy var tap: UITapGestureRecognizer = {
+        let recognizer = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        recognizer.delegate = self
+        // 点按只在 pan 没认出来时才算（带一点位移的轻触按拖动走，不双重触发；
+        // 与 StripTouchView 同款）。
+        recognizer.require(toFail: pan)
+        return recognizer
+    }()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isAccessibilityElement = false
+        addGestureRecognizer(pan)
+        addGestureRecognizer(tap)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        false
+    }
+
+    /// 手指刚落下：记起点、清采样、模型跟手偏移清零（新一轮拖动）。
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesBegan(touches, with: event)
+        guard let touch = touches.first else { return }
+        startX = touch.location(in: self).x
+        moved = 0
+        samples = [(Date(), startX)]
+        model?.shelfDragBegan()
+    }
+
+    @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
+        guard let model else { return }
+        let x = recognizer.location(in: self).x
+        switch recognizer.state {
+        case .changed:
+            let dx = x - startX
+            moved = max(moved, abs(dx))
+            let now = Date()
+            samples.append((now, x))
+            while samples.count > 2, now.timeIntervalSince(samples[0].time) > 0.110 {
+                samples.removeFirst()
+            }
+            model.shelfDragMoved(dx: dx)
+        case .ended, .cancelled:
+            guard moved > 8 else { return }
+            let dx = x - startX
+            var velocity: CGFloat = 0
+            if samples.count > 1 {
+                let first = samples[0]
+                let last = samples[samples.count - 1]
+                let span = last.time.timeIntervalSince(first.time)
+                if span > 0.008 {
+                    velocity = max(-3000, min(3000, (last.x - first.x) / CGFloat(span)))
+                }
+            }
+            model.shelfDragEnded(dx: dx, velocity: velocity)
+        default:
+            break
+        }
+    }
+
+    @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .ended else { return }
+        let location = recognizer.location(in: self)
+        onTap?(location.x, bounds.width / 2)
     }
 }

@@ -56,7 +56,7 @@ final class NowPlayingCoordinator: ObservableObject {
     private var coverFailedTrackId: String?
     /// 第 21 轮第 3 件：动态封面准备（Route A 编码 + Route B token 抓取）
     /// 是崩溃窗口里最重的两件并发工作，原来切歌就并行启动、和挂死的 LX
-    /// kg 挤在同一个窗口里。改成等 startedTrackId（startItem 里 player.play()
+    /// 挤在同一个窗口里。改成等 startedTrackId（startItem 里 player.play()
     /// 之后才置）再启动：没声之前只挂静态封面，动效晚到几秒、不丢；
     /// LX 挂死时 A/B 根本不启动，窗口里只剩取链本身。以下三件为此服务：
     /// 已对哪首歌启动过准备（每首只启动一次）、到货的封面图暂存（启动时用）、
@@ -225,7 +225,7 @@ final class NowPlayingCoordinator: ObservableObject {
         // 换歌了，上一首的失败标记清掉（重试只针对同一首歌耗尽时守门）。
         if coverFailedTrackId != track.id { coverFailedTrackId = nil }
         // 第 21 轮第 3 件：路线 B 的 prepare 不再这里启动——它要抓苹果网页
-        // token（2.4MB 首页 + 3.3MB JS + 正则），和挂死的 LX kg 挤在同一个
+        // token（2.4MB 首页 + 3.3MB JS + 正则），和挂死的 LX 挤在同一个
         // 窗口里。改成等 startedTrackId 再由 kickAnimatedPrepares 启动
         // （见 artworkPrepareKickedTrackId 注释）；匹配只用歌手+专辑名，
         // 不依赖封面，所以启动时机挪后不影响匹配结果。
@@ -267,11 +267,10 @@ final class NowPlayingCoordinator: ObservableObject {
             image = UIImage(data: proxyResp.body)
         }
         if image == nil {
-            do {
-                let (data, _) = try await URLSession.shared.data(from: url)
+            // r24：走 Proxies.directImageData——同一个门、6s 上限、入口 https
+            // 归一；旧写法 URLSession.shared.data(from:) 默认 60s。
+            if let data = await Proxies.directImageData(url) {
                 image = UIImage(data: data)
-            } catch {
-                image = nil
             }
         }
         // 第 21 轮第 3 件：零尺寸图（坏数据解出来 0x0）按下载失败处理，
@@ -395,7 +394,7 @@ final class NowPlayingCoordinator: ObservableObject {
 
     /// 锁屏静态图尺寸（照抄壳版 ContentView.lockScreenSized）：最长边压到
     /// 1000px 再交给系统（全屏铺满要大图，但 3000px 原图没必要）；小图原样
-    /// 返回——上游给的 240/300px 小封面（酷狗 240、QQ 300）在这里不放大，
+    /// 返回——上游给的 240/300px 小封面（QQ 300）在这里不放大，
     /// 放大也补不出细节；全屏清晰度要靠上游给大图或动态视频（720x960）。
     private static func lockScreenSized(_ image: UIImage) -> UIImage {
         let maxEdge: CGFloat = 1000

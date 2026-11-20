@@ -10,8 +10,8 @@ import SwiftUI
 /// 诚实边界（不编假数据）：
 /// - 曲目数为 0 或接口无数据时显示空态，写清原因，不编曲目。
 /// - 部分平台的详情接口只回曲目、不回歌单名/封面/创建者（bodian
-///   /api/bodian/playlist/tracks、酷我榜单 /api/kuwo/rank/tracks、酷狗
-///   /api/kugou/playlist/tracks、Apple Music /api/applemusic/playlist/tracks）：
+///   /api/bodian/playlist/tracks、酷我榜单 /api/kuwo/rank/tracks、
+///   Apple Music /api/applemusic/playlist/tracks）：
 ///   标题为空时显示「〈平台名〉歌单」通用名（不是真实歌单名），封面用白色底 +
 ///   音符占位，曲目数显示已加载数；网易/QQ/汽水回完整歌单对象，正常显示。
 /// - 标题与曲目同时为空 = 接口没有返回数据或请求失败（两种情况桥接层无法区分，
@@ -133,7 +133,7 @@ struct PlaylistDetailView: View {
         return "\(SearchViewModel.label(for: platform))歌单"
     }
 
-    /// 曲目数：上游给了总数（网易/QQ/汽水/酷狗 trackCount）就显示总数；
+    /// 曲目数：上游给了总数（网易/QQ/汽水 trackCount）就显示总数；
     /// tracks-only 接口只有已加载数（playlistFrom 已回落为 tracks.count），
     /// 显示已加载数，不谎称总数。
     private func countText(_ playlist: Playlist) -> String {

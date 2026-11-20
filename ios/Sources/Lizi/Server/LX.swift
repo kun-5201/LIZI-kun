@@ -6,9 +6,11 @@ import Foundation
 
 enum LXResolver {
     /// liziair 的 source 名 -> LX 的 source 名。波点 / Spotify 没有 LX 解析
-    /// （新音源也不支持 bd）；汽水（qs）第 11 轮第 9 件接进来。
+    /// （新音源也不支持 bd）；汽水（qs）第 11 轮第 9 件接进来；
+    /// 酷狗（kg）r24 接回：赞助脚本的 kg 入口已在构建机上剥掉（见工作流），
+    /// 这里的映射只服务用户自加的 LX 自定义源（pdone 系等）作 LX 兜底。
     static let sourceMap: [String: String] = [
-        "netease": "wy", "qq": "tx", "kugou": "kg", "kuwo": "kw",
+        "netease": "wy", "qq": "tx", "kuwo": "kw", "kugou": "kg",
         // 汽水（qs）：第 11 轮第 8/9 件——新音源（聆澜音源赞助版 v9.0.1）上报 qs
         // 平台，取链实测通（320k）；App 之前把 qishui 拦在 LX 门外（""），
         // 平台拿不到地址时直接走演示音。波点 / Spotify 没有 LX 解析（脚本也不支持 bd）。

@@ -118,7 +118,7 @@ enum NativeBridge {
 
     // MARK: - 搜索（只用各平台自己的接口，绝不用 LX）
 
-    /// 按平台搜歌。`platform` 为 netease/qq/kugou/qishui/bodian/kuwo/applemusic；
+    /// 按平台搜歌。`platform` 为 netease/qq/qishui/bodian/kuwo/applemusic；
     /// 不支持的平台返回空 SearchResult（不编假数据）。
     static func search(platform: String, query: String,
                        limit: Int = 20, offset: Int = 0) async -> SearchResult {
@@ -138,7 +138,7 @@ enum NativeBridge {
             let total = (d["songCount"] as? NSNumber)?.intValue ?? tracks.count
             return SearchResult(tracks: tracks, hasMore: offset + tracks.count < total,
                                 totalCount: total)
-        case "qq", "kugou", "kuwo", "qishui", "bodian", "applemusic":
+        case "qq", "kuwo", "qishui", "bodian", "applemusic", "kugou":
             guard let d = await call(path: "/api/\(platform)/search", query: base) else {
                 return SearchResult(errors: [platform: Self.searchErrorText])
             }
@@ -189,10 +189,6 @@ case "qq":
 let d = await call(path: "/api/qq/song/url",
 query: ["mid": key, "quality": param])
 return songURLFromSidecar(d, platform: "qq", quality: quality)
-case "kugou":
-let d = await call(path: "/api/kugou/song/url",
-query: ["hash": key, "quality": param])
-return songURLFromSidecar(d, platform: "kugou", quality: quality)
 case "kuwo":
 let d = await call(path: "/api/kuwo/song/url",
 query: ["id": key, "quality": param])
@@ -211,6 +207,13 @@ let d = await call(path: "/api/applemusic/song/url", query: ["id": key])
 var r = songURLFromSidecar(d, platform: "applemusic", quality: quality)
 r.isPreview = true
 return r
+case "kugou":
+// Folia 取链：hash（platformKey 即大写 hash）+ albumId / albumAudioId
+//（有专辑 id 时服务端先走带 album 的 song_url，再走 hash-only）。
+let d = await call(path: "/api/kugou/song/url",
+query: ["hash": key, "albumId": track.albumId,
+"albumAudioId": "\(track.albumAudioId)", "quality": param])
+return songURLFromSidecar(d, platform: "kugou", quality: quality)
 case "local":
 return SongURLResult(url: nil, reason: "local", via: "local")
 default:
@@ -218,13 +221,13 @@ return SongURLResult(reason: "unavailable", via: "platform")
 }
 }
 
-/// 边车 song/url 的通用解析（qq/kugou/kuwo/qishui/bodian/applemusic 同形：
+/// 边车 song/url 的通用解析（qq/kuwo/qishui/bodian/applemusic/kugou 同形：
 /// { url, preview, quality, reason}）。
 /// 第 22 轮第 5 件：回的地址先升 https（Upstream.upgradedAudioURL，与
 /// 探活验的地址一致——探活验升级后、播放器播 http 原址等于验一套播一套；
-/// 酷狗/酷我平台腿也在此升级，kg 第一复现平台同款修法）。
-/// 升级表只含实测支持 https 的域（.music.126.net/.qq.com/.kugou.com/
-/// .kuwo.cn/.kglink.com）；汽水 CDN 域（.365yg.com 等）未实测，不进表、
+/// 酷我平台腿也在此升级（同款修法）。
+/// 升级表只含实测支持 https 的域（.music.126.net/.qq.com/
+/// .kuwo.cn/.kugou.com/.kglink.com）；汽水 CDN 域（.365yg.com 等）未实测，不进表、
 /// 不编——汽水地址原样走直链/代理，行为与修前一致。
 private static func songURLFromSidecar(_ d: [String: Any]?, platform: String,
 quality: AudioQuality) -> SongURLResult {
@@ -247,7 +250,9 @@ reason: "", via: "platform", clipStartMs: clipStartMs)
 
 /// 网易个人云盘取链（照抄 player.js fetchCloudUrl：按 id 精确匹配，
 /// 再按「歌名 + 歌手」归一化匹配；列表按会话缓存 10 分钟，最多 5 页）。
-/// QQ / 酷狗 / 酷我没有同等的个人云盘取链口，其它平台直接返回 nil。
+/// QQ / 酷我没有同等的个人云盘取链口；酷狗云盘取链在服务端
+/// /api/kugou/user/cloud_url（songURL 的 cloud=1 走它），原生编排的
+/// 云盘腿只接网易，其它平台直接返回 nil。
 static func cloudSongURL(track: Track) async -> SongURLResult? {
 guard track.platform == "netease" else { return nil}
 guard SessionStore.shared.hasMusicU else { return nil}
@@ -319,7 +324,7 @@ return ca.isEmpty || ca.contains(artistKey) || artistKey.contains(ca)
 // MARK: - 取链：LX（只做取链 fallback，绝不做搜索）
 
 /// LX 取链（/api/lx/song/url，25 秒硬超时；没有 LX 解析的平台返回 nil）。
-/// 支持：netease / qq / kugou / kuwo / qishui；bodian / applemusic / spotify 没有 LX 解析。
+/// 支持：netease / qq / kuwo / qishui；bodian / applemusic / spotify 没有 LX 解析。
 static func lxSongURL(track: Track, quality: AudioQuality) async -> SongURLResult? {
 guard let lxSource = LXResolver.sourceMap[track.platform],!lxSource.isEmpty else { return nil}
 var query: [String: String] = ["source": track.platform,
@@ -327,7 +332,11 @@ var query: [String: String] = ["source": track.platform,
 "name": track.title, "artists": track.artist]
 switch track.platform {
 case "qq": query["mid"] = track.platformKey
-case "kugou": query["hash"] = track.platformKey
+case "kugou":
+// 酷狗 LX 兜底：hash 当 id 传（Router 的 kugou 分支认 32 位 hex hash；
+// 不是 hash 时 Router 按「歌名 歌手」传，name/artists 已在 query 里）。
+query["id"] = track.platformKey
+query["hash"] = track.platformKey
 default: query["id"] = track.platformKey
 }
 let d: [String: Any]?
@@ -405,7 +414,7 @@ if let vipType = profile["vipType"] as? NSNumber, vipType.intValue > 0 { return 
 if (profile["vipType"] as? NSNumber)?.boolValue == true { return true}
 }
 return (d["vip"] as? NSNumber)?.boolValue == true
-case "qq", "kugou", "kuwo", "qishui", "bodian":
+case "qq", "kuwo", "qishui", "bodian", "kugou":
 d = await call(path: "/api/\(platform)/status")
 guard let d, (d["loggedIn"] as? NSNumber)?.boolValue == true else { return false}
 return (d["vip"] as? NSNumber)?.boolValue == true
@@ -432,8 +441,6 @@ return false
             d = await call(path: "/api/lyric", query: ["id": key])
         case "qq":
             d = await call(path: "/api/qq/lyric", query: ["mid": key])
-        case "kugou":
-            d = await call(path: "/api/kugou/lyric", query: ["hash": key, "s": track.title])
         case "kuwo":
             d = await call(path: "/api/kuwo/lyric",
                            query: ["id": key].merging(meta) { a, _ in a })
@@ -441,6 +448,11 @@ return false
             d = await call(path: "/api/qishui/lyric", query: ["id": key])
         case "bodian":
             d = await call(path: "/api/bodian/lyric", query: ["id": key])
+        case "kugou":
+            // 酷狗歌词：hash + 歌名/歌手/专辑/时长（秒），服务端先走
+            // Folia 两步（search_lyric → download），再走 LRCLIB 兜底。
+            d = await call(path: "/api/kugou/lyric",
+                           query: ["hash": key].merging(meta) { a, _ in a })
         case "applemusic":
             d = await call(path: "/api/applemusic/lyric",
                            query: meta.merging(["id": key]) { a, _ in a })
@@ -467,24 +479,55 @@ return false
 
     // MARK: - 每日推荐 / 歌单 / 歌手 / 专辑
 
-    /// 每日推荐（各平台自己的推荐接口；没有官方接口的平台返回空数组，不编假数据）。
-    /// - netease: /api/recommend/songs（需登录；未登录返回空）
-    /// - qq: /api/qq/recommend/new-songs
-    /// - kugou: /api/kugou/everyday/recommend
-    /// - kuwo: /api/kuwo/daily
-    /// - applemusic: /api/applemusic/daily
-    /// - qishui / bodian: 没有每日推荐官方接口 → []
+    /// 每日推荐（各平台自己的推荐接口；壳版 `marqSource` 同款映射，
+    ///   见 `public/app.js`；r24 第 1 件逐平台核对后重写）。
+    /// - netease: /api/recommend/songs（需登录；未登录 / 取空时退到
+    ///   /api/personalized 推荐新歌，壳版 paintDaily 同款兜底——匿名
+    ///   也有 30 首可看，不是空态）。
+    /// - qq: /api/qq/user/daily-songs（需登录）；未登录（401 空态）
+    ///   或取空时退到 /api/qq/recommend/radar（匿名雷达推荐，
+    ///   壳版 marqSource 同款）。旧写法调 /api/qq/recommend/new-songs
+    ///   是「新歌首发」不是每日推荐，内容错位。
+    /// - qishui: /api/qishui/feed（推荐流，匿名可用 20 首；旧写法
+    ///   直接回 []，错——壳版 marqSource 就是走 feed）。
+    /// - bodian: /api/bodian/ai/playlist?index=0（潮趣日推，匿名可用；
+    ///   旧写法直接回 []，错——壳版 bodianDaily 就是这条）。
+    /// - kuwo: /api/kuwo/daily；kugou: /api/kugou/everyday/recommend
+    ///   （Folia everyday_recommend）；applemusic: /api/applemusic/daily
+    ///   （公开排行榜 RSS）。三家形状都是 { tracks }，已核对，不动。
     static func dailyRecommend(platform: String) async -> [DailyTrack] {
-        let path: String
         switch platform {
-        case "netease": path = "/api/recommend/songs"
-        case "qq": path = "/api/qq/recommend/new-songs"
-        case "kugou": path = "/api/kugou/everyday/recommend"
-        case "kuwo": path = "/api/kuwo/daily"
-        case "applemusic": path = "/api/applemusic/daily"
-        default: return []
+        case "netease":
+            if let tracks = await dailyTracks(path: "/api/recommend/songs", platform: platform),
+               !tracks.isEmpty { return tracks }
+            return await dailyTracks(path: "/api/personalized", platform: platform) ?? []
+        case "qq":
+            if let tracks = await dailyTracks(path: "/api/qq/user/daily-songs", platform: platform),
+               !tracks.isEmpty { return tracks }
+            return await dailyTracks(path: "/api/qq/recommend/radar",
+                                     query: ["page": "1"], platform: platform) ?? []
+        case "qishui":
+            return await dailyTracks(path: "/api/qishui/feed",
+                                     query: ["count": "20"], platform: platform) ?? []
+        case "bodian":
+            return await dailyTracks(path: "/api/bodian/ai/playlist",
+                                     query: ["index": "0"], platform: platform) ?? []
+        case "kuwo":
+            return await dailyTracks(path: "/api/kuwo/daily", platform: platform) ?? []
+        case "kugou":
+            return await dailyTracks(path: "/api/kugou/everyday/recommend", platform: platform) ?? []
+        case "applemusic":
+            return await dailyTracks(path: "/api/applemusic/daily", platform: platform) ?? []
+        default:
+            return []
         }
-        guard let d = await call(path: path) else { return [] }
+    }
+
+    /// 每日推荐一行请求的归一化读数（{ tracks } / { data } / { songs }；
+    /// 请求本身没通（call 回 nil）或上游回空都给 []，调用方按空走下一条兜底）。
+    private static func dailyTracks(path: String, query: [String: String] = [:],
+                                    platform: String) async -> [DailyTrack]? {
+        guard let d = await call(path: path, query: query) else { return nil }
         let rows: [[String: Any]] = (d["tracks"] as? [[String: Any]])
             ?? (d["data"] as? [[String: Any]])
             ?? (d["songs"] as? [[String: Any]]) ?? []
@@ -499,8 +542,11 @@ return false
     /// - kuwo 榜单（isRank=true）: /api/kuwo/rank/tracks（api.js kuwoRankTracks，
     ///   只回 { id, total, tracks }，没有歌单名/封面；同上按 tracks-only 解析）。
     ///   榜单标记来自搜索/榜单字典的 rank 字段（见 Playlist.isRank）。
-    /// - kugou / applemusic 的 tracks 接口同样只回曲目（kugou 另有 trackCount，
-    ///   applemusic 只有 tracks），标题/封面为空时详情页同样显示通用名 + 占位封面。
+    /// - applemusic 的 tracks 接口同样只回曲目（只有 tracks），标题/封面为空时
+    ///   详情页同样显示通用名 + 占位封面。
+    /// - kugou: /api/kugou/playlist/tracks（只回 { tracks }，没有歌单名/封面；
+    ///   歌单名/封面/曲数走 /api/kugou/playlist/detail，playlistFrom 按
+    ///   tracks-only 解析时曲数显示已加载数）。
     /// - netease / qq / qishui 回完整歌单对象（name/cover/creator/tracks）。
     static func playlistDetail(platform: String, id: String, isRank: Bool = false) async -> Playlist {
         let path: String
@@ -508,7 +554,6 @@ return false
         switch platform {
         case "netease": path = "/api/playlist/detail"
         case "qq": path = "/api/qq/playlist/detail"
-        case "kugou": path = "/api/kugou/playlist/tracks"
         case "kuwo":
             if isRank {
                 path = "/api/kuwo/rank/tracks"
@@ -519,6 +564,9 @@ return false
         case "qishui": path = "/api/qishui/playlist/detail"
         case "bodian":
             path = "/api/bodian/playlist/tracks"
+            query["limit"] = "50"
+        case "kugou":
+            path = "/api/kugou/playlist/tracks"
             query["limit"] = "50"
         case "applemusic": path = "/api/applemusic/playlist/tracks"
         default: return Playlist(id: id, source: platform)
@@ -661,8 +709,13 @@ extension Track {
         else if let n = dict["interval"] as? NSNumber { durationMs = n.intValue * 1000 }
         else if let n = dict["Duration"] as? NSNumber { durationMs = n.intValue * 1000 }
         let fee = (dict["fee"] as? NSNumber)?.intValue ?? 0
-        let platformKey = (dict["mid"] as? String) ?? (dict["hash"] as? String)
-            ?? (dict["rid"] as? String) ?? idString
+        let platformKey = (dict["mid"] as? String)
+            ?? (dict["rid"] as? String) ?? (dict["hash"] as? String) ?? idString
+        if albumId.isEmpty {
+            if let s = dict["albumId"] as? String { albumId = s }
+            else if let n = dict["albumIdNum"] as? NSNumber { albumId = n.stringValue }
+        }
+        let albumAudioId = (dict["albumAudioId"] as? NSNumber)?.intValue ?? 0
         let artistIds: [String]
         if let arr = dict["artistIds"] as? [String] { artistIds = arr }
         else if let arr = dict["artistIds"] as? [NSNumber] { artistIds = arr.map { $0.stringValue } }
@@ -671,6 +724,7 @@ extension Track {
                      artist: artist.isEmpty ? "未知歌手" : artist, album: album,
                      coverURL: URL(string: coverString),
                      durationMs: durationMs, vip: fee != 0,
-                     platformKey: platformKey, albumId: albumId, artistIds: artistIds)
+                     platformKey: platformKey, albumId: albumId,
+                     albumAudioId: albumAudioId, artistIds: artistIds)
     }
 }

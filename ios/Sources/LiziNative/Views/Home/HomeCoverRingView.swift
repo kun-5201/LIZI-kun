@@ -104,6 +104,32 @@ import UIKit
 /// 按钮，用户现在根本找不到环；按钮开环不接管手指，`beginDrag: false`）。
 /// 拖动时顶部再暗一档（`isRingDragging` 驱动，视频：拖动时顶部大卡片变暗）。
 /// 本轮只动本文件；播放页、闪退相关文件、HomeView.swift 一行不动。
+///
+/// r24（2026-11-20，第 3/4/5 件，手势链按视频 + ring.js 重写——不是 r22c
+/// 代码换参数：旧的「上滑开环」判定、覆盖层 SwiftUI DragGesture +
+/// onTapGesture、架子那套全部删掉，改为两处 UIKit 触摸层 + 模型同一套
+/// 入口；用户原话「后面我会查看代码，不能拿以前的代码」）：
+/// - 第 3 件（用户原话「修复 3d 封面要上滑的 bug」「就是要上滑才能转动」）：
+///   上滑门槛删掉。平面带上横向一拖就开环，手指不抬起继续拖就是转环
+///   （ring.js enterRing「手指不用抬起，展开后继续拖就是转环」，
+///   触发条件从「上滑」改成「横向」；视频 0.9–1.0s 的上滑展开动作本身
+///   不再是必要步骤——用户最新指令优先于视频这一处）。
+///   竖向拖动（上/下都一样）交还 ScrollView 滚页面，不再开环。
+/// - 第 4 件（「3D 封面只会在中间」「下面的专辑也无法转动」）：
+///   环只停中间的根因是开环后的第二根手指走覆盖层 SwiftUI
+///   DragGesture——它与同视图的 onTapGesture 叠在一起，真机上到不了
+///   模型，角一直停在 0。重写后覆盖层触摸走 UIKit RingTouchView
+///   （UIPan + UITap，tap require(toFail: pan)，与 StripTouchView
+///   同款；r23 长按死锁的教训：每个触摸面只挂一对识别器，不叠
+///   highPriority / sequenced / 长按）。专辑架见 MyAlbumsView.swift 文件头。
+/// - 第 5 件：其余行为照视频 + ring.js（自动跑马带 24px/s、展开
+///   520ms easeOutQuint、每像素 180/(πR)×1.45°、110ms 采样限幅
+///   ±1400°/s、τ=1.08s 投影 + 118 临界阻尼弹簧吸附、松手 1s 后
+///   430ms 收回、点空白 220ms 快收、下滑 >90px 退出、底部提示
+///   「拖动旋转 · 点击播放 · 松手收回」、径向变暗 + 拖动时顶部再暗一档）。
+///   尺寸仍按视频实测（平面卡 0.51vw、环卡 0.39vw）。
+/// - 约束（用户长期规则）：全程不加任何捏合/双击缩放手势；只旋转与
+///   展开/收回。横屏竖屏同一套（尺寸按 tier 分档，与朝向无关）。
 
 // MARK: - 状态机
 
@@ -158,6 +184,10 @@ final class HomeCoverRingModel: ObservableObject {
     var ringOpenY: CGFloat = 0
     var ringStartAngle: CGFloat = 0
     var ringStartX: CGFloat = 0
+    /// 本次环拖动的起点纵坐标（下滑退出用，ring.js onPressMove ring 分支
+    /// `dy > 90` 的起点；平面带入口取开环点 `ringOpenY`，覆盖层入口取
+    /// 触摸落点——两者与各自的 x 在同一坐标系里）。
+    var ringDragStartY: CGFloat = 0
     /// 最近 110ms 的（时间，转角）采样，用于松手角速度。
     var ringSamples: [(time: Date, angle: CGFloat)] = []
     /// 收回任务代号：新开环 / 新拖动即 +1，旧任务醒来发现代号变了就作废。
@@ -289,8 +319,9 @@ final class HomeCoverRingModel: ObservableObject {
     // MARK: 平面带触摸状态机（壳版 ring.js onPressMove strip 分支，
     // 由 StripTouchView 的 UIPanGestureRecognizer 驱动；x/y 均为平面带本地坐标）
 
-    /// 平面带触摸的移动结果：`.failGesture` = 竖向占优且向下，
-    /// 识别器自毁、把手势交还 ScrollView（壳版「下滑 = 交还页面」同款）。
+    /// 平面带触摸的移动结果：`.failGesture` = 竖向占优，
+    /// 识别器自毁、把手势交还 ScrollView（ring.js「下滑 = 交还页面」同款；
+    /// r24 起上/下都交还，上滑开环已删，见 stripTouchMoved）。
     enum StripMoveOutcome {
         case handled
         case failGesture
@@ -298,24 +329,32 @@ final class HomeCoverRingModel: ObservableObject {
 
     /// 手指按下（pan .began）：记按压起点；旧 press 残留（上一根手势被系统
     /// 打断没走到 ended）直接作废重建，否则下次拖动会跳变。
+    /// 手指按下就停跑马带（tickFlat 看 flatDragging；ring.js
+    /// flat.pressed 同款），松手再按 dragResumeDwell 恢复。
     func stripTouchBegan(x: CGFloat, y: CGFloat) {
         guard ringPhase == .closed else { return }
+        flatDragging = true
         stripPress = StripPress(
-            startX: x, startY: y,
-            baseOffset: flatOffsetX, decided: .undecided
+            startX: x, startY: y, decided: .undecided
         )
     }
 
-    /// 手指移动（pan .changed）：
-    /// - 环已开（同一根手指）：先判下滑退出（相对开环点 dy>90 且竖向占优），
-    ///   否则继续转环；
-    /// - 10px 内不判方向；竖向占优（|dy|>|dx|×1.25）且向上 → 开环（锚点=
-    ///   手指下最近的卡，手指不抬起继续拖就是转环）；竖向占优且向下 →
-    ///   `.failGesture`（识别器自毁，ScrollView 接管滚页面）；
-    /// - 横向占优 → 1:1 滚跑马带，不开环。
+    /// 手指移动（pan .changed；r24 重写，第 3 件）：
+    /// - 环已开（同一根手指）：环拖动还没走出 5px 之前，下滑 >90px 且
+    ///   竖向占优 → 收回（ring.js onPressMove ring 分支「明显向下滑 =
+    ///   退出环」；5px 死区是 RING_THRESHOLD）；否则继续转环。
+    /// - 环没开：10px 内不判方向（ring.js DRAG_THRESHOLD=10）；
+    ///   横向占优（|dx|>|dy|×1.25）→ 开环（锚点 = 手指下最近的卡，
+    ///   ring.js nearestFlatIdx；手指不抬起继续拖就是转环，
+    ///   ring.js enterRing 同款语义）；
+    ///   竖向占优（上/下都一样）→ `.failGesture`（识别器自毁，
+    ///   ScrollView 接管滚页面；上滑开环这一步按用户指令已删掉，
+    ///   视频 0.9–1.0s 的上滑展开不再是必要步骤）。
+    /// - 平面带不再支持横向手滚（横向拖动现在开环；跑马带本身
+    ///   自动 24px/s 走，见 tickFlat）。
     func stripTouchMoved(x: CGFloat, y: CGFloat) -> StripMoveOutcome {
         if ringPhase == .open {
-            if ringDragging {
+            if ringDragging, abs(x - ringStartX) < Self.ringThreshold {
                 let dx = x - ringStartX
                 let dy = y - ringOpenY
                 if dy > Self.swipeDownExit, abs(dy) > abs(dx) * 1.25 {
@@ -329,8 +368,7 @@ final class HomeCoverRingModel: ObservableObject {
         guard ringPhase == .closed else { return .handled }
         if stripPress == nil {
             stripPress = StripPress(
-                startX: x, startY: y,
-                baseOffset: flatOffsetX, decided: .undecided
+                startX: x, startY: y, decided: .undecided
             )
             return .handled
         }
@@ -339,49 +377,40 @@ final class HomeCoverRingModel: ObservableObject {
         let dy = y - press.startY
         if press.decided == .undecided {
             if hypot(dx, dy) < Self.dragThreshold { return .handled }
-            if abs(dy) > abs(dx) * 1.25 {
-                if dy < 0 {
-                    let anchor = anchorNearestFlatCard(x: x)
-                    openRing(anchor: anchor, atX: x, atY: y)
-                    press.decided = .openedRing
-                    stripPress = press
-                } else {
-                    press.decided = .vertical
-                    stripPress = press
-                    return .failGesture
-                }
+            if abs(dx) > abs(dy) * 1.25 {
+                let anchor = anchorNearestFlatCard(x: x)
+                openRing(anchor: anchor, atX: x, atY: y)
+                press.decided = .openedRing
+                stripPress = press
                 return .handled
             }
-            press.decided = .horizontal
+            press.decided = .handedToScroll
             stripPress = press
-        }
-        if press.decided == .horizontal {
-            flatDragging = true
-            flatOffsetX = normalizedFlat(press.baseOffset + dx)
+            return .failGesture
         }
         return .handled
     }
 
-    /// 手指抬起 / 手势取消（pan .ended/.cancelled，壳版 onPressUp/onPressCancel
-    /// strip 分支同款：环开着 = 松手走惯性+弹簧吸附，带子拖动 = 停 1.0s 再走）。
+    /// 手指抬起 / 手势取消（pan .ended/.cancelled，ring.js onPressUp /
+    /// onPressCancel strip 分支同款：环开着 = 松手走惯性+弹簧吸附；
+    /// 环没开 = 跑马带停 dragResumeDwell 再走）。
     func stripTouchEnded() {
         defer { stripPress = nil }
+        flatDragging = false
         if ringPhase == .open {
             ringDragEnded()
             return
         }
-        if flatDragging {
-            flatDragging = false
-            flatDwellUntil = Date()
-                .addingTimeInterval(Self.dragResumeDwell)
-        }
+        flatDwellUntil = Date()
+            .addingTimeInterval(Self.dragResumeDwell)
     }
 
     // MARK: 开环 / 收回
 
-    /// 开环。
-    /// - `beginDrag: true`（平面带上滑）：展开这根手指不用抬起，直接记为
-    ///   拖动起点，继续拖就是转环（壳版 enterRing 同款；同一根手指的后续移动
+    /// 开环（r24：第 3 件后入口只剩两处——平面带横向拖动、入口按钮点按；
+    ///   上滑入口已删）。
+    /// - `beginDrag: true`（平面带横向拖动）：展开这根手指不用抬起，直接记为
+    ///   拖动起点，继续拖就是转环（ring.js enterRing 同款；同一根手指的后续移动
     ///   由平面带的 `StripTouchView` 接着转发，不走覆盖层新挂的手势）。
     /// - `beginDrag: false`（入口按钮点按）：只展开、不接管手指；下一根
     ///   手指落在覆盖层上时由覆盖层手势重新 `ringDragStart`（liziHome 坐标，
@@ -441,12 +470,28 @@ final class HomeCoverRingModel: ObservableObject {
 
     // MARK: 环拖动 / 松手
 
-    func ringDragStart(x: CGFloat) {
+    /// 覆盖层手指刚落下（还没动）：只取消待执行的松手收回
+    /// （ring.js onOverlayDown → beginPress → clearHold 同款；
+    /// 拖动本身 5px 后才由 ringDragStart 接管，见 RingTouchView）。
+    func ringTouchBegan() {
+        guard ringPhase == .open else { return }
+        closeGeneration += 1
+    }
+
+    /// 环拖动的起点（r24：第 3 件后两个入口共用——平面带开环手指与
+    /// 覆盖层新手指）。
+    /// - `y`：拖动起点纵坐标（下滑退出用）；平面带入口不传，取开环点
+    ///   `ringOpenY`（与旧 `stripTouchMoved` 的 strip-local y 同一坐标系）；
+    ///   覆盖层入口传覆盖层本地 y（RingTouchView 的坐标原点与
+    ///   "liziHome" 同在屏左上角，见 RingTouchView 注释）。
+    /// 同时取消待执行的松手收回（代号 +1；ring.js beginPress clearHold 同款）。
+    func ringDragStart(x: CGFloat, y: CGFloat? = nil) {
         guard ringPhase == .open, !ringDragging else { return }
         ringDragging = true
         isRingDragging = true
         ringStartAngle = angle
         ringStartX = x
+        ringDragStartY = y ?? ringOpenY
         ringSamples = [(Date(), angle)]
         closeGeneration += 1
     }
@@ -601,11 +646,14 @@ final class HomeCoverRingModel: ObservableObject {
         3.2 / (3.2 + (1 - facing))
     }
 
-    /// 点按命中：取包含该点、离正前方最近的卡（壳版 onPressUp 点选同款，
+    /// 点按命中：取包含该点、离正前方最近的卡（ring.js onPressUp 点选同款，
     /// 用包围盒近似旋转后的卡）。
-    func hitTestRingCard(at point: CGPoint, screenWidth: CGFloat) -> Int? {
+    /// r24：纵向锚点与 ringLayer 同款回落——stripCenter 还没量到时
+    /// （如按钮在布局前被点到）用屏高 ×0.62，不再拿 y=0 去比（那会让
+    /// 点卡永远判空）；screenHeight 不传时回落 0，即只信 stripCenter。
+    func hitTestRingCard(at point: CGPoint, screenWidth: CGFloat, screenHeight: CGFloat? = nil) -> Int? {
         let cx = screenWidth / 2
-        let cy = stripCenter.y
+        let cy = stripCenter.y > 0 ? stripCenter.y : (screenHeight ?? 0) * 0.62
         let r = effectiveRadius()
         var best: (index: Int, world: CGFloat)?
         for slot in visibleSlots() {
@@ -626,19 +674,19 @@ final class HomeCoverRingModel: ObservableObject {
     }
 }
 
-/// 平面带按压判定。
+/// 平面带按压判定（r24：第 3 件后只剩三种——没判向、已开环、已交还 ScrollView；
+/// 旧的 `.horizontal`（横向手滚跑马带）与 `.vertical`（上滑开环）已随
+/// 上滑门槛一起删掉）。
 struct StripPress {
     var startX: CGFloat
     var startY: CGFloat
-    var baseOffset: CGFloat
     var decided: StripDecision
 }
 
 enum StripDecision {
     case undecided
-    case horizontal
-    case vertical
     case openedRing
+    case handedToScroll
 }
 
 // MARK: - 平面带（常态）
@@ -774,11 +822,13 @@ struct HomeCoverRingView: View {
 
     /// 入口提示行：左 = 手势提示，右 = 点按入口（「展开 3D 环」按钮，
     /// 锚点 = 带子正中间那张卡；开环不接管手指，`beginDrag: false`）。
+    /// r24：第 3 件后提示改成拖动（上滑入口已删，chevron.up 图标也换掉，
+    /// 别再暗示用户去上滑）。
     private var entryHintRow: some View {
         HStack(spacing: 6) {
-            Image(systemName: "chevron.up")
+            Image(systemName: "arrow.left.and.right")
                 .font(.system(size: 10, weight: .semibold))
-            Text("上滑展开 3D 环 · 拖动旋转")
+            Text("拖动展开 3D 环 · 拖动旋转")
                 .font(.liziBody(size: LiziTokens.size12))
             Spacer()
             Button(action: {
@@ -787,7 +837,7 @@ struct HomeCoverRingView: View {
                 HStack(spacing: 4) {
                     Text("展开 3D 环")
                         .font(.liziBody(size: LiziTokens.size12, weight: .medium))
-                    Image(systemName: "chevron.up")
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
                         .font(.system(size: 10, weight: .semibold))
                 }
                 .padding(.horizontal, 12)
@@ -884,23 +934,21 @@ struct HomeRingOverlayView: View {
                         .shadow(color: .black.opacity(0.5), radius: 8, x: 0, y: 1)
                         .padding(.bottom, max(16, geo.safeAreaInsets.bottom + 10))
                 }
+                // r24：触摸层（RingTouchView，UIKit，文件尾）盖在最上层——
+                // 整块覆盖层的触摸都归它：拖动转环、点卡播歌、点空白收回、
+                // 下滑退出（ring.js onOverlayDown + window pointer 监听同款）。
+                // 旧的 SwiftUI DragGesture + onTapGesture 已删（第 4 件根因：
+                // 两者叠在同一视图上，真机上拖动到不了模型）。
+                RingTouchView(model: model) { idx in
+                    model.tapRingCard(trackIndex: idx, store: playback)
+                } onTapBlank: {
+                    model.closeRing(quick: true)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .contentShape(Rectangle())
             .opacity(model.overlayOpacity)
-            .gesture(ringGesture(screenWidth: geo.size.width))
-            // 点按走 TapGesture（带位置）：r21 的 DragGesture(minimumDistance: 5)
-            // 的 onEnded 判点按是死的——纯点按（位移 <5px）根本触发不了
-            // DragGesture，点卡播歌到不了模型。<5px=点按、≥5px=拖动，
-            // 与壳版 RING_THRESHOLD=5 同款分界；两者互斥，不会双重触发。
-            .onTapGesture(count: 1, coordinateSpace: .named("liziHome")) { location in
-                guard model.ringPhase == .open else { return }
-                if let idx = model.hitTestRingCard(at: location, screenWidth: geo.size.width) {
-                    model.tapRingCard(trackIndex: idx, store: playback)
-                } else {
-                    model.closeRing(quick: true)
-                }
-            }
         }
         .ignoresSafeArea()
     }
@@ -957,38 +1005,6 @@ struct HomeRingOverlayView: View {
         )
         .position(x: cx, y: cy)
     }
-
-    /// 环手势（壳版 ring.js onPressMove/onPressUp ring 分支）：
-    /// - 5px 死区；明显下滑（dy>90 且 |dy|>|dx|×1.25）→ 退出环；
-    /// - 横向拖动 → 转环（松手走惯性+弹簧吸附，见 model.ringDragEnded）；
-    /// - 点按不走这里（见 `.onTapGesture`）：DragGesture 的 onEnded 收不到
-    ///   <5px 的纯点按，r21 在这里判点按是死的，本轮删掉。
-    /// 坐标空间用 .named("liziHome")：点按位置与环锚点 stripCenter
-    /// 在同一坐标系里比（.global 在有导航栏偏移时会错位）。
-    private func ringGesture(screenWidth: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 5, coordinateSpace: .named("liziHome"))
-            .onChanged { value in
-                guard model.ringPhase == .open else { return }
-                let dx = value.translation.width
-                let dy = value.translation.height
-                if !model.ringDragging {
-                    if dy > HomeCoverRingModel.swipeDownExit,
-                       abs(dy) > abs(dx) * 1.25 {
-                        model.closeRing()
-                        return
-                    }
-                    if hypot(dx, dy) < HomeCoverRingModel.ringThreshold { return }
-                    model.ringDragStart(x: value.location.x)
-                }
-                model.ringDragMoved(toX: value.location.x)
-            }
-            .onEnded { _ in
-                guard model.ringPhase == .open else { return }
-                if model.ringDragging {
-                    model.ringDragEnded()
-                }
-            }
-    }
 }
 
 /// 环里的一张卡：封面 + 歌名 + 歌手（壳版 .mring__card：封面下只写歌名；
@@ -1041,9 +1057,11 @@ private struct RingCardView: View {
 /// 壳版的等价物是 `.mstrip { touch-action: none; }`（见 public/m/m.css），
 /// 即带子拥有全部触摸；这里用 UIKit 识别器复刻同一条语义：
 /// - `shouldBeRequiredToFailBy`：ScrollView 的 pan 必须等我们的 pan 先失败
-///   才开始滚页面——上滑/横向由我们接管，页面滚不动；
-/// - 方向判定后是竖向下滑：我们的 pan 自毁（`isEnabled` 开关一次），
-///   ScrollView 接管，页面接着滚（壳版「下滑 = 交还页面」同款）；
+///   才开始滚页面——横向由我们接管（r24：第 3 件后横向 = 开环+转环），
+///   页面滚不动；
+/// - 方向判定后是竖向（上/下都一样）：我们的 pan 自毁（`isEnabled` 开关一次），
+///   ScrollView 接管，页面接着滚（ring.js「下滑 = 交还页面」同款；
+///   上滑开环已按用户指令删掉，见模型 `stripTouchMoved`）；
 /// - 同一根手指从按下一路管到开环、转环、松手（壳版 window pointer 监听
 ///   同款），不依赖「覆盖层半路出现后新 DragGesture 能接到旧触摸」。
 ///
@@ -1151,5 +1169,150 @@ final class StripTouchUIView: UIView, UIGestureRecognizerDelegate {
         guard let model, recognizer.state == .ended else { return }
         let location = recognizer.location(in: self)
         onTapCard?(model.anchorNearestFlatCard(x: location.x))
+    }
+}
+
+// MARK: - 环覆盖层触摸层（r24，第 3/4 件，新写）
+
+/// 全屏环覆盖层的触摸层：一个透明 UIView，盖在环卡与提示文字上方，
+/// 接管环开着时的全部触摸（ring.js 里覆盖层 `.mring` 的 pointerdown +
+/// window pointermove/pointerup 同款——同一根手指从按下一路管到
+/// 松手，不依赖 SwiftUI 手势半路接力）。
+///
+/// 为什么不用 SwiftUI DragGesture + onTapGesture（r22c 旧做法，第 4 件根因）：
+/// 两者挂在同一视图上，真机上拖动到不了模型——环开着、手指拖环面，
+/// 角一直停在 0，只有锚点卡停在中间（「3D 封面只会在中间」）。
+/// 这里只挂一对 UIKit 识别器（pan + tap，tap require(toFail: pan)，
+/// 与 StripTouchView 同款）：r23 长按死锁的教训——不要再叠
+/// highPriorityGesture / sequenced / 长按识别器抢同一根触摸。
+///
+/// 坐标：本视图铺满整块覆盖层，覆盖层又铺满整屏；本地坐标原点与
+/// "liziHome" 坐标系同在屏左上角，所以本地 (x, y) 可以直接当
+/// liziHome 坐标用（ringDragStart / hitTestRingCard 的入参）。
+struct RingTouchView: UIViewRepresentable {
+    @ObservedObject var model: HomeCoverRingModel
+    var onTapCard: (Int) -> Void
+    var onTapBlank: () -> Void
+
+    @MainActor
+    func makeUIView(context: Context) -> RingTouchUIView {
+        let view = RingTouchUIView()
+        view.model = model
+        view.onTapCard = onTapCard
+        view.onTapBlank = onTapBlank
+        return view
+    }
+
+    @MainActor
+    func updateUIView(_ uiView: RingTouchUIView, context: Context) {
+        uiView.model = model
+        uiView.onTapCard = onTapCard
+        uiView.onTapBlank = onTapBlank
+    }
+}
+
+/// 环覆盖层的 UIKit 宿主视图（主线程；手势回调都在主线程进模型）。
+@MainActor
+final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
+    weak var model: HomeCoverRingModel?
+    var onTapCard: ((Int) -> Void)?
+    var onTapBlank: (() -> Void)?
+
+    /// 本次触摸起点（touchesBegan 记，pan 的 .began 要等到第一下移动才回调，
+    /// 等不及——起点丢了，5px 死区与下滑退出都没法算）。
+    private var startX: CGFloat = 0
+    private var startY: CGFloat = 0
+    /// 5px 死区过了没有（ring.js RING_THRESHOLD=5：没过 = 还不算拖动）。
+    private var dragStarted = false
+
+    private lazy var pan: UIPanGestureRecognizer = {
+        let recognizer = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        recognizer.delegate = self
+        return recognizer
+    }()
+
+    private lazy var tap: UITapGestureRecognizer = {
+        let recognizer = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        recognizer.delegate = self
+        // 点按只在 pan 没认出来时才算（带一点位移的轻触按拖动走，不双重触发；
+        // 与 StripTouchView 同款）。
+        recognizer.require(toFail: pan)
+        return recognizer
+    }()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isAccessibilityElement = false
+        addGestureRecognizer(pan)
+        addGestureRecognizer(tap)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        false
+    }
+
+    /// 手指刚落下（pan 的 .began 要等到第一下移动才回调，等不及）：
+    /// 记起点 + 取消待执行的松手收回（ring.js onOverlayDown → beginPress →
+    /// clearHold 同款，不然手指按着不动 1s，环会在手指底下收掉）。
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesBegan(touches, with: event)
+        guard let touch = touches.first else { return }
+        let location = touch.location(in: self)
+        startX = location.x
+        startY = location.y
+        dragStarted = false
+        model?.ringTouchBegan()
+    }
+
+    @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
+        guard let model else { return }
+        let location = recognizer.location(in: self)
+        switch recognizer.state {
+        case .changed:
+            guard model.ringPhase == .open else { return }
+            let dx = location.x - startX
+            let dy = location.y - startY
+            if !dragStarted {
+                // 下滑退出（ring.js onPressMove ring 分支：明显向下滑 =
+                // 退出环；只在拖动还没起步时判，拖起来以后竖向分量忽略）。
+                if dy > HomeCoverRingModel.swipeDownExit, abs(dy) > abs(dx) * 1.25 {
+                    model.closeRing()
+                    recognizer.isEnabled = false
+                    recognizer.isEnabled = true
+                    return
+                }
+                if hypot(dx, dy) < HomeCoverRingModel.ringThreshold { return }
+                dragStarted = true
+                model.ringDragStart(x: location.x, y: location.y)
+            }
+            model.ringDragMoved(toX: location.x)
+        case .ended, .cancelled:
+            if dragStarted {
+                dragStarted = false
+                model.ringDragEnded()
+            }
+        default:
+            break
+        }
+    }
+
+    @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
+        guard let model, recognizer.state == .ended else { return }
+        guard model.ringPhase == .open else { return }
+        let location = recognizer.location(in: self)
+        if let idx = model.hitTestRingCard(at: location, screenWidth: bounds.width, screenHeight: bounds.height) {
+            onTapCard?(idx)
+        } else {
+            onTapBlank?()
+        }
     }
 }

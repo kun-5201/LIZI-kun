@@ -13,7 +13,7 @@ import SwiftUI
 ///   publishTime, size, artists: [{id, name}] }, songs }。歌手 id 保留，可点进歌手页。
 /// - kuwo：GET /api/kuwo/album/tracks?id= → { name, cover, total, tracks }；
 ///   无公司/简介/发行日期/歌手 id——歌手名取自首支曲目，仅文本展示，不可点，不编。
-/// - qq / kugou / qishui / bodian / applemusic：服务端无专辑详情路由 → 诚实空态，不编数据。
+/// - qq / qishui / bodian / applemusic：服务端无专辑详情路由 → 诚实空态，不编数据。
 ///
 /// 约定：
 /// - 不建导航、不改 RootView/AppNavigation：返回栏沿用 SearchView 的模式，
@@ -300,8 +300,6 @@ final class AlbumViewModel: ObservableObject {
             await loadKuwo()
         case "qq":
             unsupportedReason = "QQ 暂无专辑详情接口：服务端没有 album 详情路由。"
-        case "kugou":
-            unsupportedReason = "酷狗暂无专辑详情接口：服务端没有 album 详情路由。"
         case "qishui":
             unsupportedReason = "汽水暂无专辑详情接口：服务端没有 album 详情路由。"
         case "bodian":

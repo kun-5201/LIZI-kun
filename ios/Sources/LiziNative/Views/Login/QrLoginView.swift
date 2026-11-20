@@ -16,8 +16,8 @@ import SwiftUI
 ///   画成二维码（壳版 `app.js:8649` 同款 URL）。
 ///
 /// 状态码绝不在本视图里写死：状态码映射由各平台 flow 传入
-/// （`QrStatusMapping`）。`QrStatusMapping.standard800` 是 4 家扫码平台
-/// （网易 / QQ / 汽水 / 波点）后端实际回的同一套 800/801/802/803
+/// （`QrStatusMapping`）。`QrStatusMapping.standard800` 是 5 家扫码平台
+/// （网易 / QQ / 汽水 / 波点 / 酷狗）后端实际回的同一套 800/801/802/803
 /// （网易 `NetEase.swift` normalize `login/qr/check`、QQ `checkQr`、
 /// 汽水 / 波点 `loginQrCheck`），只是个现成的映射值，不写在转移逻辑里。
 /// 不认识的状态保持等待（壳版 `app.js:3633` 注释同款规则），不编失败。
@@ -82,7 +82,7 @@ struct QrStatusMapping {
     var expiredStatuses: Set<String>
     var failedStatuses: Set<String>
 
-    /// 4 家扫码平台后端实际回的同一套码（见文件头出处）：
+    /// 5 家扫码平台后端实际回的同一套码（见文件头出处）：
     /// 800 过期 / 801 等待 / 802 已扫码 / 803 成功；汽水用户拒绝是 804
     /// （`Qishui.swift` loginQrCheck：`status: "refused", code: 804`）。
     static let standard800 = QrStatusMapping(
@@ -301,7 +301,7 @@ final class QrLoginModel: ObservableObject {
 
 /// 通用二维码登录视图。
 ///
-/// - `platform`：平台 id（netease / qq / kugou / qishui / bodian）。
+/// - `platform`：平台 id（netease / qq / qishui / bodian / kugou）。
 /// - `fetch`：取码闭包，返回 key + qrimg + 登录链接（兜底画码用）。
 /// - `poll`：轮询闭包，key → `QrPollResult`；抛错 = 网络抖动，本轮跳过、
 ///   下一轮再试（不进 failed）。

@@ -484,10 +484,7 @@ final class KugouService {
         var parts: [String] = []
         var last = header.startIndex
         for m in re?.matches(in: header, range: ns) ?? [] {
-            // 第 16 轮第 3 件：这条是酷狗每次请求都会走的 Set-Cookie 切分，
-            // match 与 header 同串、Range 转换理论上不会失败；但 ! 一旦
-            // 触发就是真机闪退，改成 guard 跳过该 match（只丢一段 cookie）。
-            guard let r = Range(m.range, in: header) else { continue }
+            let r = Range(m.range, in: header)!
             parts.append(String(header[last..<r.lowerBound]))
             last = r.upperBound
         }
@@ -592,8 +589,7 @@ extension KugouService {
     }
 
     /// check：GET login-user.kugou.com/v2/get_userinfo_qrcode（web 签名，带 dev）。
-    /// 状态 0/1/2/3/4 → 800/801/802/802/803（Folia kugouProvider.checkLogin：
-    /// 2 或 3 都是已扫码；之前 3 落到默认 801「等待扫码」，扫上了也显示没扫）。
+    /// 状态 0/1/2/4 → 800/801/802/803；4 时收 token/userid/vip 进 jar 并补昵称头像。
     private func loginQrCheck(key: String) async throws -> [String: Any] {
         let d = device()
         let resp = try await kgRequest(baseURL: Self.loginUserBase, path: "/v2/get_userinfo_qrcode",
@@ -603,7 +599,7 @@ extension KugouService {
                                        encryptType: "web", timeout: 25)
         let data = (resp.json?["data"] as? [String: Any]) ?? [:]
         let st = scInt(data, "status")
-        let map = [0: 800, 1: 801, 2: 802, 3: 802, 4: 803]
+        let map = [0: 800, 1: 801, 2: 802, 4: 803]
         var out: [String: Any] = ["code": map[st] ?? 801, "state": st]
         if st == 4 {
             collectSetCookies(resp.cookies)
@@ -670,8 +666,7 @@ extension KugouService {
     }
 
     /// kugouUrlOf：d = data.data || data；one = 数组取首项；url 取 one.url || one.urls[0]。
-    /// url 空时再取同包的 backupUrl[0]（备用 CDN 地址，同首歌同档位）。
-    private func kgUrlOf(_ body: [String: Any], hash: String = "") -> (url: String, preview: Bool, upstream: String?) {
+    private func kgUrlOf(_ body: [String: Any]) -> (url: String, preview: Bool, upstream: String?) {
         let dRaw = body["data"] ?? body
         let one: [String: Any]
         if let arr = dRaw as? [[String: Any]] { one = arr.first ?? [:] }
@@ -682,19 +677,6 @@ extension KugouService {
         var url = ""
         if let arr = raw as? [Any] { url = arr.first as? String ?? "" }
         else if let s = raw as? String { url = s }
-        // 第 16 轮第 3 件：上游同包常带 backupUrl（备用 CDN 地址），旧代码
-        // 只取 url[0]，url 空就直接报 EMPTY 走降档/演示音。url 空时改取
-        // backupUrl[0]，记一步，免得白白丢一首。backupUrl 可能在根级也
-        // 可能在 data 里，两处都看。
-        if url.isEmpty {
-            let backups = (one["backupUrl"] as? [Any]) ?? (body["backupUrl"] as? [Any]) ?? []
-            if let b = backups.first as? String, !b.isEmpty {
-                url = b
-                if !hash.isEmpty {
-                    DiagLog.shared.recordPlaybackStep("kugou song/url backupUrl used hash=\(hash.prefix(8))")
-                }
-            }
-        }
         let preview = ((one["free_part"] as? NSNumber)?.boolValue ?? false)
             || ((one["is_free_part"] as? NSNumber)?.boolValue ?? false)
         var upstream: String?
@@ -703,13 +685,6 @@ extension KugouService {
         else if let ec = body["errcode"] as? NSNumber { upstream = "errcode \(ec.intValue)" }
         else if one["status"] != nil, scInt(one, "status") != 1 { upstream = "status \(scInt(one, "status"))" }
         return (url, preview, upstream)
-    }
-
-    /// 20028 / 需要验证 / check r failed：上游风控验证门，与档位无关。
-    /// songUrl 里的 needLogin 判定与 ladder 早停用同一张表，改一处要同步另一处。
-    private static func isVerifyGated(_ upstream: String?) -> Bool {
-        guard let upstream, !upstream.isEmpty else { return false }
-        return upstream.range(of: "20028|需要验证|check r failed", options: .regularExpression) != nil
     }
 
     private func kugouUrl(hash: String, albumId: Int, audioId: Int, quality: String, freePart: Bool) async -> (url: String, preview: Bool, upstream: String?) {
@@ -733,7 +708,7 @@ extension KugouService {
                                            encryptType: "android", encryptKey: true,
                                            extraHeaders: ["x-router": "trackercdn.kugou.com"],
                                            jarOverride: jarOverride)
-            return kgUrlOf(resp.json ?? [:], hash: hash)
+            return kgUrlOf(resp.json ?? [:])
         } catch {
             return ("", false, (error as? KugouError)?.message)
         }
@@ -745,47 +720,16 @@ extension KugouService {
         let albumId = req.int("albumId", 0)
         let audioId = req.int("albumAudioId", 0)
         var quality = req.string("quality", "128")
-        // 第 14 轮：取链开始记一步 —— 酷狗闪退据报就发生在「点播放、正取链」那一刻，
-        // 之前只有结束那一步，开始缺了就分不清「没进 /v5/url」还是「进去了没回来」。
-        DiagLog.shared.recordPlaybackStep("kugou song/url start hash=\(hash.prefix(8)) quality=\(quality)")
-        // 第 13 轮第 12 件："hires" 是 /v5/url 未完全证实的档位值（LX 层酷狗支持
-        // hires；原生 /v5/url 是否认它未证实）——拿不到时向低档退，兜底盖住。
-        if !["128", "320", "flac", "hires"].contains(quality) { quality = "128" }
-        // 所选档拿不到时向低档重试（hires → flac → 320 → 128），每档先正常取、
-        // 再 freePart 重试（原有行为）；返回实际命中的档位，前端只显示它。
-        let ladder = ["hires", "flac", "320", "128"]
-        let startIdx = ladder.firstIndex(of: quality) ?? 3
-        var pick: (url: String, preview: Bool, upstream: String?) = ("", false, nil)
-        var served = ""
-        for i in startIdx..<ladder.count {
-            let q = ladder[i]
-            var p = await kugouUrl(hash: hash, albumId: albumId, audioId: audioId, quality: q, freePart: false)
-            if p.url.isEmpty {
-                p = await kugouUrl(hash: hash, albumId: albumId, audioId: audioId, quality: q, freePart: true)
-            }
-            pick = p
-            if !p.url.isEmpty { served = q; break }
-            // 第 16 轮第 3 件：20028 是账号/风控验证门，不是档位问题——
-            // 降档（flac→320→128）+ freePart 各再试一次全是同一道门，
-            // 最坏 8 次 × 20 秒超时 = 160 秒，前端 api.js 60 秒就先断了，
-            // 用户只看到转圈、诊断里最后一步还停在 start。第一档就报
-            // 20028 时立刻停梯、不再试，记一步 + 记一条日志，前端马上
-            // 拿到 reason=login 走演示音/提示，不用等 60 秒超时。
-            // 注意：VM 上 20028 无法模拟（上游只对真机账号/风控触发），
-            // 这条分支真机行为仍需用户复现验证。
-            if Self.isVerifyGated(p.upstream) {
-                DiagLog.shared.recordPlaybackStep("kugou song/url 20028 verify-gated hash=\(hash.prefix(8)) quality=\(q) (ladder stopped)")
-                DiagLog.shared.recordLog(category: "audio",
-                    message: "酷狗取链遇 20028 风控：hash=\(hash.prefix(8)) quality=\(q)（需验证，不再降档重试）",
-                    fields: ["reason": "kugou-20028", "lane": "platform"])
-                break
-            }
+        if !["128", "320", "flac"].contains(quality) { quality = "128" }
+        var pick = await kugouUrl(hash: hash, albumId: albumId, audioId: audioId, quality: quality, freePart: false)
+        if pick.url.isEmpty {
+            pick = await kugouUrl(hash: hash, albumId: albumId, audioId: audioId, quality: quality, freePart: true)
         }
         let upstream = pick.upstream ?? ""
-        let needLogin = Self.isVerifyGated(upstream)
+        let needLogin = upstream.range(of: "20028|需要验证|check r failed", options: .regularExpression) != nil
         DiagLog.shared.recordPlaybackStep("kugou song/url hash=\(hash.prefix(8)) url=\(pick.url.isEmpty ? "EMPTY" : "OK") upstream=\(upstream)")
         return .json(200, ["code": 200, "hash": hash, "url": pick.url, "preview": pick.preview,
-                            "quality": pick.preview ? "preview" : (served.isEmpty ? quality : served),
+                            "quality": pick.preview ? "preview" : quality,
                             "reason": pick.url.isEmpty ? (needLogin ? "login" : "unavailable") : NSNull(),
                             "upstream": pick.upstream.map { $0 as Any } ?? NSNull()])
     }

@@ -12,7 +12,7 @@ import SwiftUI
 ///   + /api/artist/albums/:id（12 张一批）+ /api/artist/songs（100 首一批，order hot/time）。
 /// - qishui / bodian：只有 /api/<平台>/artist/songs（50 首一批）——无头像/简介/专辑数，
 ///   名字取自曲目行的歌手名，无专辑网格；热门 = 歌曲列表前 10 首（上游返回顺序）。
-/// - qq / kugou / kuwo / applemusic：服务端无歌手详情路由 → 诚实空态，不编数据。
+/// - qq / kuwo / applemusic：服务端无歌手详情路由 → 诚实空态，不编数据。
 ///
 /// 约定：
 /// - 不建导航、不改 RootView/AppNavigation：返回栏沿用 SearchView 的模式，
@@ -389,8 +389,6 @@ final class ArtistViewModel: ObservableObject {
             await loadSongListOnly()
         case "qq":
             unsupportedReason = "QQ 音乐暂无歌手详情接口：歌手 id 是 songmid 字符串，服务端没有 artist 详情路由（壳版同样不接 QQ 歌手页）。"
-        case "kugou":
-            unsupportedReason = "酷狗暂无歌手详情接口：服务端没有 artist 详情路由。"
         case "kuwo":
             unsupportedReason = "酷我暂无歌手详情接口：服务端没有 artist 详情路由（仅有专辑曲目接口）。"
         case "applemusic":

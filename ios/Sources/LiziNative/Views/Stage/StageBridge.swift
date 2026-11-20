@@ -449,16 +449,20 @@ final class StageBridge: NSObject, ObservableObject {
         }
         if accentTrackId == trackId { return }
         accentTrackId = trackId
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+        // r24：走 Proxies.directImageData——同一个门、6s 上限、入口 https 归一；
+        // 旧写法 dataTask 直连原地址：http 在真机上 ATS -1022，https 无超时
+        // 上限（默认 60s），主色一直算不出来。
+        Task { [weak self] in
             guard let self else { return }
-            guard let data, let image = UIImage(data: data),
+            guard let data = await Proxies.directImageData(url),
+                  let image = UIImage(data: data),
                   let rgb = Self.averageColor(of: image) else { return }
-            Task { @MainActor in
+            await MainActor.run {
                 guard self.accentTrackId == trackId else { return }
                 self.accent = rgb
                 self.pushInit(force: false)
             }
-        }.resume()
+        }
     }
 
     private static func averageColor(of image: UIImage) -> [Int]? {

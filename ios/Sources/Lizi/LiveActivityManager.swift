@@ -284,12 +284,24 @@ final class LiveActivityManager {
                 }
             }
         }
+        // r24：档位 + 诊断。旧档止于 64px q0.5，但 08:30 诊断 remaining 3694
+        // 时连它都进不去——本轮用真网易封面实测：64px q0.5 只要 1311B（估算
+        // 1870B），预算根本不是问题；真正的原因是 thumbnail() 默认用主屏
+        // scale 渲染（见该函数注释），@3x 手机上 "64px" 实际是 192px、约 6KB，
+        // 三档全超。修法：thumbnail 里 scale=1（px 即像素）+ 补 48/32/24 三档
+        // 兜底病态图；诊断里记 cover 字节数与最小档实测字节数，下次一眼分清
+        // “解不出”还是“真超预算”。
+        var smallestThumbBytes: Int?
+        var smallestEstimated: Int?
         if let data = state.coverData, let image = UIImage(data: data) {
-            for (px, quality) in [(96, CGFloat(0.6)), (80, CGFloat(0.5)), (64, CGFloat(0.5))] {
+            for (px, quality) in [(96, CGFloat(0.6)), (80, CGFloat(0.5)), (64, CGFloat(0.5)),
+                                  (48, CGFloat(0.5)), (32, CGFloat(0.4)), (24, CGFloat(0.35))] {
                 guard let thumb = thumbnail(image, maxSide: CGFloat(px), quality: quality) else { continue }
                 // 先估算再确认：base64 膨胀 + 16 字节余量，进不去直接跳过本档，
                 // 不做整 state 的 JSON 编码；估算能进才编一次确认。
                 let estimated = baseSize + thumb.count * 4 / 3 + 16
+                smallestThumbBytes = thumb.count
+                smallestEstimated = estimated
                 guard estimated <= islandPayloadBudget else { continue }
                 var candidate = state
                 candidate.coverData = thumb
@@ -304,11 +316,21 @@ final class LiveActivityManager {
                     return candidate
                 }
             }
+        } else if let data = state.coverData {
+            // coverData 在但解不出图（空数据 / 非图片体）：逐档循环一次都没跑，
+            // 旧日志只写 cover dropped，分不清是解码失败还是预算不够。
+            if log {
+                DiagLog.shared.recordLog(category: "island",
+                    message: "island payload cover undecodable bytes=\(data.count)",
+                    fields: ["reason": "island-cover-undecodable", "lane": "island"])
+            }
+            calcOutcome = "dropped-undecodable"
+            return noCover
         }
         let size = payloadSize(title: title, artist: artist, state: noCover)
         if log {
             DiagLog.shared.recordLog(category: "island",
-                message: "island payload bytes=\(baseSize)->\(size) cover dropped (no tier fits, remaining=\(remaining))",
+                message: "island payload bytes=\(baseSize)->\(size) cover dropped (no tier fits, remaining=\(remaining) smallestThumb=\(smallestThumbBytes.map(String.init) ?? "-") smallestEstimated=\(smallestEstimated.map(String.init) ?? "-"))",
                 fields: ["reason": "island-payload-cover-dropped", "lane": "island"])
         }
         calcOutcome = "dropped-no-tier-fits"
@@ -316,6 +338,12 @@ final class LiveActivityManager {
     }
 
     /// 等比缩到最长边 px，JPEG 重压（只在 fittedState 超预算时走，不常跑）。
+    /// r24：format.scale = 1——px 在这里指像素。旧写法 `UIGraphicsImageRenderer(size:)`
+    /// 用默认 format（主屏 scale），@3x 手机上 maxSide 64 实际渲成 192×192 像素，
+    /// JPEG 约 6KB（真网易封面实测：192px q0.5 = 5990B，估算 8108B），96/80/64
+    /// 三档全超 3800B 预算，岛封面必丢（08:30 诊断 bytes=106->106 的根因；
+    /// 之前误以为是“预算不够”，实测 64px q0.5 只要 1311B，预算根本够）。
+    /// 协调器的 downsample 同病（"120px" 实际 360px、约 25KB），那边一起改。
     private static func thumbnail(_ image: UIImage, maxSide: CGFloat, quality: CGFloat) -> Data? {
         let size = image.size
         guard size.width > 0, size.height > 0 else { return nil }
@@ -323,7 +351,9 @@ final class LiveActivityManager {
         let target = scale >= 1
             ? size
             : CGSize(width: max(1, size.width * scale), height: max(1, size.height * scale))
-        let renderer = UIGraphicsImageRenderer(size: target)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: target, format: format)
         let resized = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: target)) }
         return resized.jpegData(compressionQuality: quality)
     }

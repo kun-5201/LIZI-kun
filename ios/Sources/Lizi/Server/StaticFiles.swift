@@ -115,7 +115,10 @@ enum Upstream {
     /// 根因见 project.yml 注释：plist 里 NSAllowsArbitraryLoads 已被系统
     /// 静默忽略，URLSession 拉 http 上游直接 -1022。凡实测支持 https 的
     /// 音频域，在探活、代理取上游之前一律先升成 https；没验过的域不动。
-    static let audioHTTPSSuffixes = [".music.126.net", ".qq.com", ".kugou.com", ".kuwo.cn", ".kglink.com"]
+    /// r24：随 Folia 酷狗边车接回其音频域（网关 / 歌词 / m.kugou.com 的
+    /// https 本轮 VM 实测通；音频 CDN 域沿用旧表实测结论：酷狗 FLAC 等
+    /// 音频直链走 .kugou.com / .kglink.com）。
+    static let audioHTTPSSuffixes = [".music.126.net", ".qq.com", ".kuwo.cn", ".kugou.com", ".kglink.com"]
 
     /// http → https（仅升级表里的域；host 不变，只换 scheme）。
     static func upgradedAudioURL(_ url: URL) -> URL {

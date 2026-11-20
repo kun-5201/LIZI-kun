@@ -517,7 +517,7 @@ final class LXSourceRegistry {
     ///    QQ 两家 CDN 都把 MP3 误标成 application/x-www-form-urlencoded，
     ///    按 CT 卡会把能播的 QQ 链全杀掉；206 本身已证明是真分片）；
     ///  - 200 + ≥1 字节：要求 Content-Type 是音频（audio/*、video/*、
-    ///    application/octet-stream——酷狗 FLAC 就回这个；QQ 误标的
+    ///    application/octet-stream——FLAC 就回这个；QQ 误标的
     ///    application/x-www-form-urlencoded 也认），text/html、
     ///    application/json 之类的错误页直接判死，换下一个候选。
     ///  - 401/403 = 结论不明：实测证明 403 是针对那条具体地址的（vkey 在
@@ -636,8 +636,8 @@ final class LXSourceRegistry {
     /// musicUrl 平台 + 实际报了什么平台），前端原样显示，不再只给一句
     /// 「不是有效的落雪音源脚本」；同时记一条诊断日志（category probe，
     /// message 以 "lx-source-import: " 开头，见 LXSourceStore.diagLog）。
-    /// 平台 id 归一化：有的脚本用长名（kuwo/netease/qq/kugou/migu），取歌链
-    /// 只认短名（kw/wy/tx/kg/mg），这里统一映射，免得「源在列表里、歌永远
+    /// 平台 id 归一化：有的脚本用长名（kuwo/netease/qq/migu/kugou），取歌链
+    /// 只认短名（kw/wy/tx/mg/kg），这里统一映射，免得「源在列表里、歌永远
     /// 走不到它」。
     private func validate(script: String, displayName: String? = nil) throws -> (name: String, version: String, author: String, platforms: [String], instance: LXScriptInstance) {
         let label = displayName ?? LXSourceStore.headerValue(script, "name") ?? "自定义源"
@@ -671,7 +671,7 @@ final class LXSourceRegistry {
             }
             throw fail("validate-no-musicUrl", reason)
         }
-        let alias: [String: String] = ["kuwo": "kw", "netease": "wy", "qq": "tx", "kugou": "kg", "migu": "mg"]
+        let alias: [String: String] = ["kuwo": "kw", "netease": "wy", "qq": "tx", "migu": "mg", "kugou": "kg"]
         let platforms = Array(Set(rawPlatforms.map { alias[$0] ?? $0 })).sorted()
         let name = LXSourceStore.headerValue(script, "name").map(LXSourceStore.displayName)
         let version = LXSourceStore.headerValue(script, "version") ?? ""

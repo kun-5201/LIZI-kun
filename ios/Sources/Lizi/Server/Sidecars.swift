@@ -1,8 +1,9 @@
 import Foundation
 
-/// 七个边车服务：qq / kugou / kuwo / qishui / bodian / spotify / applemusic。
-/// 实现细节见 specs/sidecars.md；QQ/酷狗的上游在 npm 包内（见各源文件头的说明），
-/// 汽水/波点的 guard 签名在协议库内；酷我与 Spotify 已按源码 1:1 移植。
+/// 七个边车服务：qq / kuwo / qishui / bodian / spotify / applemusic / kugou。
+/// 实现细节见 specs/sidecars.md；QQ 的上游在 npm 包内（见各源文件头的说明），
+/// 汽水/波点的 guard 签名在协议库内；酷我与 Spotify 已按源码 1:1 移植；
+/// 酷狗按 Folia 的酷狗流程新写（FoliaKugou.swift 文件头有对照出处）。
 /// 其余路由按 Node 版的空态/错误原样返回，绝不编假数据。
 /// 第 13 轮第 24 件：Apple Music（公开 API：iTunes Search + 排行榜 RSS +
 /// LRCLIB 歌词；播放是 30 秒试听；整首要开发者 token + 原生 MusicKit 播放器）。
@@ -10,10 +11,10 @@ final class SidecarService {
     let kuwo = KuwoService()
     let spotify = SpotifyService()
     let qq = QQService()
-    let kugou = KugouService()
     let qishui = QishuiService()
     let bodian = BodianService()
     let applemusic = AppleMusicService()
+    let kugou = FoliaKugouService()
 
     func handleQQ(_ req: HttpRequest) async -> HttpResponse {
         await handle(req, source: "qq")
@@ -22,12 +23,12 @@ final class SidecarService {
     func handle(_ req: HttpRequest, source: String) async -> HttpResponse {
         switch source {
         case "qq": return await qq.handle(req)
-        case "kugou": return await kugou.handle(req)
         case "kuwo": return await kuwo.handle(req)
         case "qishui": return await qishui.handle(req)
         case "bodian": return await bodian.handle(req)
         case "spotify": return await spotify.handle(req)
         case "applemusic": return await applemusic.handle(req)
+        case "kugou": return await kugou.handle(req)
         default:
             return .json(404, ["code": 404, "error": "unknown source: \(source)"])
         }
@@ -80,7 +81,7 @@ func scCookieValue(_ setCookie: String?, _ name: String) -> String? {
     return nil
 }
 
-// MARK: - KRC → LRC / YRC（酷狗与汽水共用，server.mjs 的 krcToLrc / krcToYrc）
+// MARK: - KRC → LRC / YRC（汽水与 Folia 酷狗共用，server.mjs 的 krcToLrc / krcToYrc）
 
 /// KRC 行格式 [起始ms,时长ms]<字偏移,字时长,0>字…，字偏移为相对行首毫秒。
 func krcToLrc(_ krc: String) -> String {

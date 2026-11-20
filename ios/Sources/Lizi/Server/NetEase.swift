@@ -733,12 +733,18 @@ extension NetEaseService {
                 "similarIds": similarIds,
             ]
         case "recommend/songs":
-            // 第 14 轮第 9 件：上游 /v1/discovery/recommend/songs 回的是
-            // data.dailySongs（不是 data.recommend），旧写法 arr(data, "recommend")
-            // 永远是空——这条映射目前是死代码（recommend/songs 走 passthroughWeapi
-            // 直接回原始 JSON），但修掉它，免得哪条路一旦走映射就把每日推荐吞成空。
-            let daily = arr(data, "dailySongs")
-            let tracks = (daily.isEmpty ? arr(data, "recommend") : daily).compactMap { toTrack($0) }
+            // r24 第 1 件根因：上游 /v1/discovery/recommend/songs 回的是
+            // { code, data: { dailySongs, recommendReasons } }——dailySongs
+            // 包在 data 里，不在顶层。旧写法 arr(data, "dailySongs") 在顶层
+            // 找永远是空，再退 arr(data, "recommend") 也是空，于是登录后
+            // 每日推荐也永远是空（用户 08:35「每日推荐也没有数据」）。
+            // 这条映射不是死代码：/api/recommend/songs 走 handleApi →
+            // normalize 才是 NativeBridge.dailyRecommend 的 live 路径；
+            // /api/netease/recommend/songs 的 passthrough 才是另一条。
+            let inner = dict(data, "data")
+            let daily = arr(inner, "dailySongs")
+            let fallback = arr(inner, "recommend").isEmpty ? arr(data, "recommend") : arr(inner, "recommend")
+            let tracks = (daily.isEmpty ? fallback : daily).compactMap { toTrack($0) }
             return ["code": code, "tracks": tracks]
         case "artist/:id":
             let a = dict(data, "artist")

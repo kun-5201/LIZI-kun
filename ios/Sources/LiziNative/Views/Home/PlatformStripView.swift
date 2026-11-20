@@ -21,14 +21,13 @@ import UIKit
 ///   标题不动）；标题宽用 PreferenceKey 实测，初值按最长标题
 ///   「我喜欢的音乐」估 144，避免第一帧按 0 算出满宽溢出。
 /// - 顺序与壳版 hall/accounts.js 注册表一致：
-///   网易云 / QQ 音乐 / 酷狗 / 汽水 / 波点 / 酷我音乐 / Apple Music。
+///   网易云 / QQ 音乐 / 汽水 / 波点 / 酷我音乐 / Apple Music。
 /// - 切台只换数据、不拆音频（见 HomeViewModel.selectPlatform 注释）。
 ///   未登录图标壳版是 opacity .45（`.pstrip__i.is-off`）；原生首页
 ///   没有接登录态（登录是 P4），不编假登录态——图标一律全亮度，
 ///   登录态接进来之前不做明暗区分（见 r22j 驱动 3h）。
 /// - 图标渲染：真 logo（`Assets.xcassets` 里的 `Platform<Name>` imageset，
-///   由 `public/assets/platforms/*.svg` 渲染成 48/96/144 PNG；酷狗用自含
-///   蓝底的 `kugou.svg`，不用纯白的 `kugou-mark.svg`）。图标本身自带圆角
+///   由 `public/assets/platforms/*.svg` 渲染成 48/96/144 PNG）。图标本身自带圆角
 ///   底色与字形，这里只按 22pt 框定、描选中圈；不联网拉图。品牌色 +
 ///   首字 monogram 瓷砖是资源缺失时的兜底（字段在 `LiziPlatforms.Info`）。
 /// - 封面只用真数据：图标是平台 logo 资源，跑马带封面是各平台每日推荐
@@ -61,7 +60,7 @@ struct PlatformStripView: View {
     }
 
     /// 图标自然宽 = 可见数 × 22 + (可见数 − 1) × 5（模板 v2：每块 22×22、
-    /// 间距 5；全部勾选时 7×22 + 6×5 = 184；取消勾选后随可见数变小）。
+    /// 间距 5；全部勾选时 6×22 + 5×5 = 157；取消勾选后随可见数变小）。
     private var iconsNaturalWidth: CGFloat {
         let n = CGFloat(max(visiblePlatforms.count, 1))
         return n * 22 + (n - 1) * 5

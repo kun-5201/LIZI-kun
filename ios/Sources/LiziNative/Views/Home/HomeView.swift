@@ -109,8 +109,8 @@ struct HomeView: View {
     var body: some View {
         GeometryReader { outer in
             // r20 顶栏修复：topBar 原来是 ScrollView 里的第一行，往下滚就滚出
-            // 屏幕——QQ/酷狗每日推荐有真内容可翻，用户一翻搜索/设置就不见了；
-            // 其它平台每日为空、没东西可翻，所以显得只有 QQ/酷狗出问题。
+            // 屏幕——QQ 每日推荐有真内容可翻，用户一翻搜索/设置就不见了；
+            // 其它平台每日为空、没东西可翻，所以显得只有 QQ 出问题。
             // 根因与平台切换逻辑无关（selectPlatform 对 7 家同一套），所以
             // 不修 ViewModel、不加平台分支：只把 topBar 固定在滚动区之外，
             // 7 个平台同一套固定顶栏。
@@ -145,7 +145,12 @@ struct HomeView: View {
             //   横屏 titleSize 46：40+30+57.5+8+17 = 152.5→153。
             //   封面是铺满的底图、无固定高，不占下限。
             let titleSize: CGFloat = isLandscape ? 46 : 42
-            let minHeroH = ceil(40 + 30 + titleSize * 1.25 + 8 + 17)
+            // r24 构建修（run 44646659508）：原来 `ceil(40 + 30 + titleSize * 1.25 + 8 + 17)`
+            // 一整串混着 Int 字面量 + Double 字面量 1.25，编译器报
+            // "unable to type-check this expression in reasonable time"。
+            // 拆成两步、每步只有一个 CGFloat 锚点，字面量跟着它推断。
+            let titleLineH: CGFloat = titleSize * 1.25
+            let minHeroH: CGFloat = ceil(40 + 30 + titleLineH + 8 + 17)
             // - 平面带一排封面卡宽（HomeCoverRingView 分档表：compact 188 /
             //   standard 202 / large 220，≈0.51vw），minPanelH 按 tier 走。
             let flatCard: CGFloat
@@ -167,14 +172,18 @@ struct HomeView: View {
             //   （flatCard/4，标准档 202/4 ≈ 50，封面露一角、能认出是封面带；
             //   模板默认露 70，标准档下限 20+42+8+50.5 = 120.5→121 < 140，
             //   默认值仍在合法区间里）。
+            // r24 构建修：同上，`flatCard / 4` 先单独算成 CGFloat，
+            // 再进 ceil，避免整串混字面量又让编译器超时。
+            let ringPeek: CGFloat = flatCard / 4
             let minPanelH: CGFloat
             if isLandscape {
-                minPanelH = ceil(20 + 42 + 8 + flatCard / 4)
+                minPanelH = ceil(20 + 42 + 8 + ringPeek)
             } else {
                 minPanelH = 20 + 42 + 8 + 32 + 8 + flatCard
             }
             // - maxHeroH = contentH − minPanelH。内容极矮时（横屏小屏，
-            //   如 667×375 档 contentH 265 < minHeroH 153 + minPanelH 117）
+            //   如 667×375 档 contentH 265 < minHeroH 153 + minPanelH 125，
+            //   667 宽走 large 档 flatCard 220，下限和是 278）
             //   两条下限打架：保 Hero 下限（歌名 + 播放钮必须完整），面板取
             //   剩下的（仍有条 + 一角封面），不让区间倒挂。
             let maxHeroH = max(minHeroH, contentH - minPanelH)
@@ -291,7 +300,9 @@ struct HomeView: View {
                         VStack(alignment: .leading, spacing: 24) {
                             if let kind = viewModel.selectedSource.railKind {
                                 // P2：四条 rails 各一行（标题 + 横向卡片 + 点开展开）。
-                                // 点卡片进详情（RailDetailView），不在行里直接播。
+                                // 点卡片按类型直达（r24 第 1 件）：曲目直接播，
+                                // 歌单进歌单详情页，电台频道进 rail 详情页再下钻；
+                                // 「展开」按钮仍开整条 rail 详情页。
                                 // 喜欢 rail 的标题按当前平台取真名（displayTitle），
                                 // 与来源 chip、空态文案、详情页标题同一份事实来源。
                                 RailRowView(
@@ -309,6 +320,37 @@ struct HomeView: View {
                                     },
                                     onRetry: {
                                         Task { await viewModel.loadRail(kind) }
+                                    },
+                                    onEntryTap: { entry in
+                                        switch entry {
+                                        case .track(let track):
+                                            // 曲目卡：整份曲目进队列，从点中的起播
+                                            // （与 RailDetailView 里点行一致）；
+                                            // 播歌不设登录墙（取链/会员编排在
+                                            // PlaybackStore 里）。
+                                            let tracks = viewModel.rails[kind]?.tracks ?? []
+                                            let idx = tracks.firstIndex(where: { $0.id == track.id && $0.platform == track.platform }) ?? 0
+                                            playback.setQueue(tracks, startAt: idx)
+                                        case .playlist(let playlist):
+                                            // 歌单卡：直达歌单详情页（P2 已有
+                                            // PlaylistDetailView）；收藏歌单
+                                            // rail 的登录墙与「展开」同一套。
+                                            if let p = LoginGate.prompt(forRail: kind, platform: viewModel.selectedPlatform) {
+                                                loginPrompt = p
+                                            } else {
+                                                nav.show(.playlist(platform: playlist.source, id: playlist.id, isRank: playlist.isRank))
+                                            }
+                                        case .station:
+                                            // 电台频道卡：没有单频道直达页，进整条
+                                            // rail 详情页再点频道下钻（与「展开」一致）。
+                                            if let p = LoginGate.prompt(forRail: kind, platform: viewModel.selectedPlatform) {
+                                                loginPrompt = p
+                                            } else {
+                                                viewModel.openRail(kind)
+                                            }
+                                        case .groupHeader:
+                                            break
+                                        }
                                     }
                                 )
                                 .padding(.horizontal, 16)
@@ -356,6 +398,15 @@ struct HomeView: View {
         .loginRequiredAlert(prompt: $loginPrompt, loginTarget: $loginTarget)
         .sheet(item: $loginTarget) { LoginSheetView(platform: $0.platform) }
         .task {
+            // r24 第 1 件：首页启动就刷一次登录态（fire-and-forget，
+            // 不等它回来再 initialLoad——7 个 status 并行刷，各自失败
+            // 互不影响）。不刷的后果：LoginStore.states 初始全是未登录，
+            // 冷启动后 LoginGate 会把已登录用户的歌单/喜欢 rail 也拦在
+            // 「需要登录」提示外，直到用户进一次设置页才恢复
+            // （用户 08:35「歌单都无法调取」的另一根因）。
+            // 节流在 LoginStore.refresh() 里（60 秒内只刷一次），
+            // 回首页重建 HomeView 不会每次都并行打 7 个 status。
+            LoginStore.shared.refresh()
             await viewModel.initialLoad()
             // r22j 平台管理：当前选中平台被取消勾选时，自动切到第一个勾选
             // 的平台（走 selectPlatform 五步，不另写切台；选中平台被隐藏是
@@ -637,7 +688,14 @@ private struct BrandWordView: View {
 /// - 标题行：rail 名 + 右侧「展开」按钮（有内容时才显示）。
 /// - 卡片：曲目卡（封面 + 歌名 + 歌手）/ 歌单卡 / 电台频道卡
 ///   （封面 + 名字 + 副标题）；分组说明卡（groupHeader）只在详情页出现，
-///   行里跳过。点任意卡片都进详情页（RailDetailView），不在行里直接播。
+///   行里跳过。点卡片按类型直达（r24 第 1 件；原来不管点哪张卡都只调
+///   onExpand 开整条 rail 列表，点歌单看不到那张歌单——用户 08:36
+///   「歌单点了都没反应」的其中一根因）：
+///   曲目卡 → 直接整份进队列从点中的起播；歌单卡 → 歌单详情页
+///   （PlaylistDetailView，经 AppNavigation.playlist）；电台频道卡 →
+///   整条 rail 详情页（频道下钻在 RailDetailView 里，没有单频道直达页）。
+///   歌单 / 电台的登录墙在调用方（HomeView）的 onEntryTap 里判，
+///   与「展开」按钮同一套 LoginGate，不在这里另起判定。
 /// - 空态：请求失败显示失败原因 + 重试；内容为空显示诚实原因
 ///   （未登录 / 接口缺失 / 本地星标为空三种原因分开写，不都写「暂无内容」）。
 /// - 封面无图用白色底 + 音符占位（CoverImageView）；禁缩放（不加任何
@@ -651,6 +709,8 @@ private struct RailRowView: View {
     let isLoading: Bool
     let onExpand: () -> Void
     let onRetry: () -> Void
+    /// 点卡片的直达回调（r24 第 1 件）：曲目 → 播，歌单 → 歌单详情页，
+    /// 电台频道 → rail 详情页；与「展开」按钮的 onExpand 分开。
 
     /// 行标题（喜欢 rail 按平台取真名，其余 rail 固定名）。
     private var displayTitle: String { kind.displayTitle(platform: platform) }
@@ -715,7 +775,7 @@ private struct RailRowView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(alignment: .top, spacing: 12) {
                             ForEach(cards) { entry in
-                                Button(action: onExpand) {
+                                Button(action: { onEntryTap(entry) }) {
                                     railCard(entry)
                                 }
                                 .buttonStyle(.plain)

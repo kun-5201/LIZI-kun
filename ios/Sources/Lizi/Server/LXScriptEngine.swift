@@ -633,7 +633,7 @@ final class LXScriptInstance {
     }
 
     /// 脚本 inited 上报的全部平台（不论有没有 musicUrl 动作）：校验失败时
-    /// 拿来告诉用户脚本到底上报了什么（如只上报了 [git]，那 wy/tx/kg/kw
+    /// 拿来告诉用户脚本到底上报了什么（如只上报了 [git]，那 wy/tx/kw
     /// 的歌永远走不到它），而不是一句笼统的「没有可用的 musicUrl 音源」。
     var reportedPlatforms: [String] {
         sink.initedSources.map(\.key).sorted()
@@ -784,7 +784,7 @@ final class LXScriptInstance {
     private func callScriptMusicUrlOnce(source: String, songId: String, quality: String, songName: String = "") async throws -> String {
         // 第 15 轮第 4 件：continuation 改可取消桥接。旧代码用裸
         // withCheckedThrowingContinuation，脚本 Promise 永远不 settle 就
-        // 永远不恢复，TaskGroup 超时取消也停不掉它（酷狗 LX 累计 4 次
+        // 永远不恢复，TaskGroup 超时取消也停不掉它（LX 累计 4 次
         // start 无结果就是这么挂死的）。现在取消时经 LXContinuationBox
         // 恢复一个 CancellationError；jsQueue 块见取消旗标就不再调脚本。
         Self.noteCallStarted()
@@ -814,9 +814,9 @@ final class LXScriptInstance {
                     // 没有就 throw「需要歌曲名」——酷我每首歌都走不到源，这就是
                     // 「有的音源无法识别」的一半原因）。Router 只传了一个 songId
                     // 进来（Router.swift 只读，不能改）：按平台把这个 songId
-                    // 别名到脚本要读的字段上——Router 给 kw 传的就是歌名、给 kg
-                    // 传的是 hash 或「歌名 歌手」、给 tx 传 mid、给 wy 传数字 id，
-                    // 正好就是各平台脚本要的东西。只补别名，不改 songmid 本身；
+                    // 别名到脚本要读的字段上——Router 给 kw 传的就是歌名、给 tx
+                    // 传 mid、给 wy 传数字 id，正好就是各平台脚本要的东西。
+                    // 只补别名，不改 songmid 本身；
                     // singer/albumName 上游没传进来，留空（脚本里都是 `|| ''`）。
                     var musicInfo: [String: Any] = ["songmid": songId, "songId": songId, "source": source]
                     switch source {
@@ -825,12 +825,6 @@ final class LXScriptInstance {
                         // 只要 rid，传歌名回 parameter error），name 仍填真歌名，
                         // 旧脚本读 name 不受影响；没传歌名时回退到 songId（原行为）。
                         musicInfo["name"] = songName.isEmpty ? songId : songName
-                    case "kg":
-                        if songId.count == 32 && songId.allSatisfy({ $0.isHexDigit }) {
-                            musicInfo["hash"] = songId
-                        } else {
-                            musicInfo["name"] = songId
-                        }
                     case "tx":
                         musicInfo["mid"] = songId
                     case "wy":

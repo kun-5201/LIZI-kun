@@ -22,12 +22,11 @@ cairosvg.svg2png(url='public/assets/platforms/netease.svg',
 | --- | --- |
 | PlatformNetease | netease.svg |
 | PlatformQQ | qq.svg |
-| PlatformKugou | kugou.svg（自含蓝底，勿用 kugou-mark.svg——它是纯白镂空，白底看不见） |
+| PlatformKugou | kugou.svg |
 | PlatformQishui | qishui.svg |
 | PlatformBodian | bodian.svg |
 | PlatformKuwo | kuwo.svg |
 | PlatformAppleMusic | applemusic.svg |
 
-像素抽查（VM 上 PIL 实测）：酷狗 144 图蓝像素 14,357/20,736（69%，
-中间透明带是白 K 字的镂空，显示时透出底色，与网页版一致）；网易红
-16,410、QQ 黄 9,990；7 张不透明占比 70–98%，无空白图。
+像素抽查（VM 上 PIL 实测）：网易红 16,410、QQ 黄 9,990；酷狗主色
+(61,139,250)=0x3D8BFA，三档不透明占比 77.6%/75.2%/72.2%；7 张不透明占比 70–98%，无空白图。

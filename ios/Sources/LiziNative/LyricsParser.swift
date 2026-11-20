@@ -5,7 +5,7 @@ import Foundation
 ///
 /// 规则：
 /// - YRC 优先（逐字）：行首 `[起点ms,行时长ms]`，字 `(字起点ms,字时长ms,0)字`；
-///   另认酷狗新接口的尖括号变体 `<mm:ss.xxx>字`（r22a，见文件底注释）。
+///   另认新接口的尖括号变体 `<mm:ss.xxx>字`（r22a，见文件底注释）。
 /// - 没有 YRC 时退回 LRC：`[mm:ss.xx]文本`，一行可带多个时间戳。
 /// - 无词时返回空（`format == "none"`，lines 为空）；调用方显示歌名，绝不用 ♪ 作假歌词。
 enum LyricsParser {
@@ -24,7 +24,7 @@ enum LyricsParser {
             }
         }
         if !lyric.isEmpty {
-            // 尖括号 YRC 可能装在 lyric 字段里（酷狗新接口）；先按 YRC 试一次，
+            // 尖括号 YRC 可能装在 lyric 字段里（新接口）；先按 YRC 试一次，
             // 再退回 LRC。普通 LRC 文本没有 `[起点,时长]` 行首也没有尖括号戳，
             // parseYRC 会返回空，不会误判。
             let yrcLines = parseYRC(lyric)
@@ -50,7 +50,7 @@ enum LyricsParser {
     // MARK: - YRC（逐字）
 
     /// 解析 YRC 全文 → 行数组（时间毫秒）。QQ 式 `[起点,时长]` 与尖括号式
-    /// `<mm:ss.xxx>字` 两种都认（r22a：酷狗新接口返回尖括号式，见文件底注释）。
+    /// `<mm:ss.xxx>字` 两种都认（r22a：新接口返回尖括号式，见文件底注释）。
     static func parseYRC(_ yrc: String) -> [LyricLine] {
         yrc.components(separatedBy: "\n").compactMap { parseYRCLine($0) ?? parseAngleYRCLine($0) }
     }
@@ -82,7 +82,7 @@ enum LyricsParser {
         return LyricLine(startMs: lineStartMs, text: text, words: words)
     }
 
-    /// 解析尖括号 YRC 一行 → LyricLine（r22a 新增；酷狗新接口格式）。
+    /// 解析尖括号 YRC 一行 → LyricLine（r22a 新增；新接口格式）。
     /// 行格式：`<00:00.000>青<00:00.366>花<00:00.732>爱…`，或前面再带一个
     /// LRC 式行首 `[00:00.00]<00:00.000>青…`（混合式）。第一个尖括号时间戳
     /// 是行起点，之后每段 `<时间>字` 是一个逐字；字结束 = 下一字起点
@@ -134,7 +134,7 @@ enum LyricsParser {
             var text = stampRegex.stringByReplacingMatches(
                 in: raw, range: NSRange(location: 0, length: ns.length), withTemplate: ""
             ).trimmingCharacters(in: .whitespacesAndNewlines)
-            // 防御：尖括号时间戳（酷狗 YRC 变体）若残留在这里，一并剥掉，
+            // 防御：尖括号时间戳（YRC 变体）若残留在这里，一并剥掉，
             // 行文本永不含原始时间戳（r22a 横屏实测：红字里出现 <00:00.000> 原文）。
             text = text.replacingOccurrences(of: #"<\d+:\d+(?:\.\d+)?>"#, with: "", options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -229,7 +229,7 @@ enum LyricsParser {
 //   （wordByWordText），否则原样 Text(line.text)。代码里不存在第二条横屏
 //   渲染路径；「横屏走了另一条路径」是误判。
 // - 真正的差异是曲目歌词格式不同：竖屏《发如雪》是普通 LRC，可解析；
-//   横屏《青花瓷》是酷狗新接口返回的尖括号 YRC 变体
+//   横屏《青花瓷》是新接口返回的尖括号 YRC 变体
 //   `<mm:ss.xxx>字`（与 QQ 式 `[起点ms,行时长ms](起点,时长,0)字` 不同）。
 //   旧 parseYRCLine 只认 QQ 式行首，尖括号行返回 nil → parseYRC 返回 []
 //   → 回落 parseLRC；parseLRC 只剥 `[...]` 时间戳，`<...>` 完整留在
@@ -244,8 +244,7 @@ enum LyricsParser {
 //   (3) parseLRC 防御性剥掉残留的 `<...>` 时间戳：行文本永不含原始时间戳。
 // - 7 平台歌词格式（NativeBridge.lyrics(for:)；取词是各平台自己的 lyric
 //   接口，解析是同一条 LyricsParser.parse，与平台无关）：
-//   酷狗 /api/kugou/lyric 返回 yrc（QQ 式 + 尖括号变体，逐字）；网易 /api/lyric、
-//   QQ /api/qq/lyric、酷我 /api/kuwo/lyric、汽水 /api/qishui/lyric、
+//   网易 /api/lyric、QQ /api/qq/lyric、酷我 /api/kuwo/lyric、汽水 /api/qishui/lyric、
 //   波点 /api/bodian/lyric、Apple Music /api/applemusic/lyric 返回 LRC
 //   （lyric + tlyric）。任一平台官方与解析都空时，统一走 Lrclib.fetch
 //   兜底（按歌名/歌手/专辑/时长查，返回的 lyric/yrc 同样进同一解析器）；

@@ -4,17 +4,20 @@ import SwiftUI
 /// 首页状态（P1-B）：平台选择、来源选择、每日推荐拉取、上次播放持久化。
 ///
 /// 数据来源只认 NativeBridge 的已定接口；没有接口的来源一律空态，不编假数据：
-/// - 每日推荐：`NativeBridge.dailyRecommend(platform:)`——netease 需登录，
-///   qq / kugou / kuwo / applemusic 走公开推荐，qishui / bodian 没有官方接口 → 空。
+/// - 每日推荐：`NativeBridge.dailyRecommend(platform:)`——netease 登录后
+///   真每日推荐、未登录退到推荐新歌（personalized）；qq 登录后每日推荐、
+///   未登录退到雷达推荐；qishui 走推荐流、bodian 走潮趣日推、kuwo /
+///   kugou / applemusic 走各家公开推荐（r24 第 1 件逐平台核对，见
+///   NativeBridge.dailyRecommend 注释；7 家都有每日内容，没有空接口）。
 /// - 精选 / 喜欢 / 我收藏的歌单 / 电台（P2）：`NativeBridge.railFeatured /
 ///   railLiked / railMyPlaylists / railRadio`（见 Views/Home/RailsBridge.swift），
 ///   逐平台映射照抄壳版 rail* 函数；喜欢 rail 的标题按平台取真名
 ///   （`RailKind.likedTitle(for:)`：网易 / 汽水「我喜欢的音乐」、
 ///   QQ「我喜欢」、波点未核实到保持「我的喜欢」、
-///   酷狗 / 酷我 / Apple Music 无接口叫「本地星标收藏」）；
+///   酷我 / 酷狗 / Apple Music 无接口叫「本地星标收藏」）；
 ///   需要登录的 rail 在未登录态显示诚实空态
 ///   （登录迁移是 P4），没有接口的平台显示接口缺失原因，本地星标兜底的
-///   平台（kugou / kuwo / applemusic 的喜欢）读 PlaybackStore.likedTracks()。
+///   平台（kuwo / kugou / applemusic 的喜欢）读 PlaybackStore.likedTracks()。
 /// - 喜欢 rail：P2 起 PlaybackStore 同时持久化完整 Track
 ///   （键 "lizi.native.likedTracks"）；P2 之前点的星标只有 id，恢复不出来。
 @MainActor
@@ -92,7 +95,7 @@ final class HomeViewModel: ObservableObject {
 
     // MARK: - 状态
 
-    /// 当前平台（netease / qq / kugou / qishui / bodian / kuwo / applemusic）。
+    /// 当前平台（netease / qq / qishui / bodian / kuwo / applemusic）。
     ///
     /// r23h：不要写死 "netease"——RootView 按 nav.current 切页，进播放页
     /// 就销毁 HomeView、回首页新建一个 HomeViewModel；写死默认值会让每次
@@ -311,11 +314,7 @@ final class HomeViewModel: ObservableObject {
     private func emptyReason(for platform: String) -> String {
         switch platform {
         case "netease":
-            return "网易云每日推荐需要登录（登录流程在 P4），未登录时这里是空的。"
-        case "qishui":
-            return "汽水没有每日推荐官方接口，这里是空的，不编假数据。"
-        case "bodian":
-            return "波点没有每日推荐官方接口，这里是空的，不编假数据。"
+            return "网易云每日推荐和推荐新歌都没返回内容（登录后是真每日推荐，未登录退到推荐新歌），请检查网络后重试。"
         default:
             return "该平台今日没有返回推荐内容。"
         }
@@ -350,11 +349,10 @@ final class HomeViewModel: ObservableObject {
     }
 }
 
-/// 七家平台清单（顺序与壳版 hall/accounts.js 注册表一致）。
+/// 六家平台清单（顺序与壳版 hall/accounts.js 注册表一致）。
 /// 图标方案见 PlatformStripView：真 logo（`Assets.xcassets` 里的
 /// `Platform<Name>` imageset，由 `public/assets/platforms/*.svg` 渲染成
-/// 48/96/144 PNG；酷狗用自含蓝底的 `kugou.svg`，不用纯白的
-/// `kugou-mark.svg`）。`monogram` / `brandHex` 保留作兜底与平台管理文案，
+/// 48/96/144 PNG）。`monogram` / `brandHex` 保留作兜底与平台管理文案，
 /// 图标渲染本身不再用它们。
 enum LiziPlatforms {
     struct Info {
@@ -373,7 +371,6 @@ enum LiziPlatforms {
     static let all: [Info] = [
         Info(id: "netease", name: "网易云", assetName: "PlatformNetease", monogram: "网", brandHex: 0xEA3E3C, onBrandLight: false),
         Info(id: "qq", name: "QQ 音乐", assetName: "PlatformQQ", monogram: "Q", brandHex: 0xF8C913, onBrandLight: true),
-        // r22j：酷狗品牌色照抄壳版 PLAT_BG #3D8BFA（原来 0x2CA2F9 是旧值）。
         Info(id: "kugou", name: "酷狗", assetName: "PlatformKugou", monogram: "K", brandHex: 0x3D8BFA, onBrandLight: false),
         Info(id: "qishui", name: "汽水", assetName: "PlatformQishui", monogram: "汽", brandHex: 0x111111, onBrandLight: false),
         Info(id: "bodian", name: "波点", assetName: "PlatformBodian", monogram: "波", brandHex: 0x04E3B4, onBrandLight: true),

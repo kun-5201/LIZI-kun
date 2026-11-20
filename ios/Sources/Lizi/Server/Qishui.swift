@@ -396,7 +396,7 @@ final class QishuiService {
     ]
 
     /// 上游 qrcode 是裸 base64 PNG（无 data: 前缀）；前端 img.src 要求 data:image/png;base64,...，
-    /// 其余三家（酷狗/网易/QQ）回的都是带前缀的 data URL。已带前缀时不重复加。
+    /// 其余两家（网易/QQ）回的都是带前缀的 data URL。已带前缀时不重复加。
     private static func qsQRDataURL(_ raw: String) -> String {
         raw.hasPrefix("data:") ? raw : "data:image/png;base64,\(raw)"
     }

@@ -34,7 +34,8 @@ import Foundation
 /// - playlists（我收藏的歌单）：netease → /api/user/playlist，分我创建
 ///   （subscribed==false）/ 我收藏（subscribed==true），未登录 → 诚实空态；
 ///   qq / qishui / bodian / kugou → 各自 /api/<platform>/user/playlists
-///   （汽水滤掉 isLikedPlaylist 那张；酷狗未登录回 401，LoginGate 先拦）；kuwo → 无用户歌单接口，诚实空态；
+///   （汽水滤掉 isLikedPlaylist 那张；酷狗未登录回 401，调用方按失败/空态
+///   处理——首页登录墙（`LoginGate`）已随来源 chips 删掉）；kuwo → 无用户歌单接口，诚实空态；
 ///   applemusic → /api/applemusic/playlists 兜底，前面插说明卡
 ///   「官方热门歌单（非本人收藏）」。
 /// - radio（电台）：netease → /api/netease/dj/recommend（8）；

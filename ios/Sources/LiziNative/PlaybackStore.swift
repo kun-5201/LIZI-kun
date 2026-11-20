@@ -9,7 +9,10 @@ import Foundation
 /// - 没会员（没登录 / 登录了但没会员 / 状态取不到）→ LX 先 → 平台 → 云盘 → 演示音
 ///   （LX 先是为了拿整首：没会员时官方常只给 30 秒试听；LX 拿不到再回官方，
 ///   但 VIP 歌的试听地址直接拒掉，不放试听片段）
-/// - 波点 / Apple Music：LX 不支持它们，永远走老顺序；本地文件直接播文件 URL。
+/// - 波点：r26 起走 LX（bd 映射已开；但赞助源与 LX 官方源今天都不声明
+///   bd，所以波点 LX 目前仍无可用源——有声明 bd 的自定义源加入后才真通，
+///   见 LX.swift）。Apple Music：LX 生态里没有它的源，永远走老顺序
+///   （公开 API 30 秒试听）；本地文件直接播文件 URL。
 ///
 /// 第 16 轮教训：崩溃点在取到资源之后、播放启动那一段——播放启动路径
 /// **不要留强制解包**，每一步调 `DiagLog.recordPlaybackStep`（文件落盘）。
@@ -115,6 +118,8 @@ final class PlaybackStore: ObservableObject {
     private var lastFetchReason: String = ""
     private var proxyTried = false
     private var fallbackRetried = false
+    /// r26：LX 死链降档重试只做一次（见 handlePlaybackFailure 2a）。
+    private var lxDowngradeRetried = false
     private var demoTried = false
     private var currentAssetURL: URL?
     private var audioSessionActivated = false
@@ -595,6 +600,7 @@ final class PlaybackStore: ObservableObject {
         currentPlayGeneration = gen
         proxyTried = false
         fallbackRetried = false
+        lxDowngradeRetried = false
         demoTried = false
         // 第 22 轮第 5 件：入口第一步就记 "play start"（带 gen）——之前它
         // 记在 @Published 赋值之后，tap→entry 之间是黑洞；现在分两步：
@@ -751,7 +757,10 @@ final class PlaybackStore: ObservableObject {
     /// 地址进了播放器才发现是死的（代理 502/403、解码失败）时的重试链
     /// （照抄 player.js tryProxyFallback + retryWithFallback + 演示音兜底）：
     /// 1) 同一条地址走音频代理再试一次（每首只一次）；
-    /// 2) 按优先级往下一档重试一次（platform → cloud/LX）；
+    /// 2a：LX 死链降一档再试 LX（r26：QQ 的 flac24bit 链实测 403、320k
+    ///   是活的；旧代码重跑同档只会拿到同一条死链，再直接掉演示音）；
+    /// 2b：按优先级往下一档重试一次（platform → cloud/LX；LX 死链且无档
+    ///   可降时走平台腿——lx-first 时平台腿还没跑过，只跳 LX 不跳平台）；
     /// 3) 再失败放演示音（界面照常走完，角标 reason 说清真正原因）。
     private func handlePlaybackFailure(gen: Int) async {
         guard gen == currentPlayGeneration, let track = currentTrack else { return }
@@ -763,12 +772,32 @@ final class PlaybackStore: ObservableObject {
             await startItem(url: proxyURL, track: track, gen: gen)
             return
         }
-        // 2) 往下一档重试一次（已证实是死的那一档直接跳过）。
-        if !fallbackRetried, (lastFetchVia == "platform" || lastFetchVia == "cloud") {
+        // 2a：LX 死链降档重试（每首只一次）：实际回档往下降一档再取 LX，
+        //   降档后 LX 仍是第一档（平台腿还没跑过，跳过平台/云盘，只跑 LX）。
+        if lastFetchVia == "lx", !lxDowngradeRetried,
+           let degraded = Self.degradedLXQuality(below: actualQuality) {
+            lxDowngradeRetried = true
+            let skips = SkipSet(skipPlatform: true, skipCloud: true, skipLX: false)
+            DiagLog.shared.recordPlaybackStep("play FAIL, retry lx one tier down source=\(track.platform) id=\(track.id) from=\(actualQuality?.rawValue ?? "-") to=\(degraded.rawValue)")
+            if let result = await resolveURL(for: track, gen: gen, skips: skips, quality: degraded),
+               let url = result.url, gen == currentPlayGeneration {
+                lastFetchVia = result.via
+                lastFetchReason = result.reason
+                actualQuality = result.actualQuality
+                await startItem(url: url, track: track, gen: gen)
+                return
+            }
+        }
+        // 2b：往下一档重试一次（已证实是死的那一档直接跳过）。
+        if !fallbackRetried, (lastFetchVia == "platform" || lastFetchVia == "cloud" || lastFetchVia == "lx") {
             fallbackRetried = true
-            let skips = SkipSet(skipPlatform: true,
-                                skipCloud: lastFetchVia == "cloud",
-                                skipLX: false)
+            // LX 死链时走平台腿（lx-first 时平台腿还没跑过）；平台/云盘
+            // 死链时走老路（跳平台、留 LX）。
+            let skips = lastFetchVia == "lx"
+                ? SkipSet(skipPlatform: false, skipCloud: false, skipLX: true)
+                : SkipSet(skipPlatform: true,
+                          skipCloud: lastFetchVia == "cloud",
+                          skipLX: false)
             DiagLog.shared.recordPlaybackStep("play FAIL, retry next tier source=\(track.platform) id=\(track.id) via=\(lastFetchVia)")
             if let result = await resolveURL(for: track, gen: gen, skips: skips),
                let url = result.url, gen == currentPlayGeneration {
@@ -804,13 +833,30 @@ final class PlaybackStore: ObservableObject {
         var skipLX = false
     }
 
+    /// LX 死链降档（r26）：实际回档往下降一档（LX 档位顺序 master →
+    /// atmos → hires → flac24bit → 320k → 128k，按 canon 回的档位映射，
+    /// 不是通用 rank——surround/spatial 在 lx canon 里不会出现）。
+    /// 已是最低档（128k）/ 回档未知时回 nil，不降档，直接走平台腿。
+    private static func degradedLXQuality(below actual: AudioQuality?) -> AudioQuality? {
+        switch actual {
+        case .master: return .spatial     // lx: master → atmos
+        case .dolby: return .hires       // lx: atmos → hires
+        case .hires: return .lossless     // lx: hires → flac24bit
+        case .lossless: return .exhigh    // lx: flac24bit → 320k
+        case .exhigh: return .standard    // lx: 320k → 128k
+        default: return nil
+        }
+    }
+
     /// 取链编排（player.js fetchTrackUrl 的顺序；每一档只在上一档明确拿不到
     /// 地址时才跑）。返回 nil = 各档都拿不到（调用方按 reason 报错，不编地址）。
     /// 第 22 轮第 5 件：每腿 await 之后都查代际（Moumusic 同款守卫）——
     /// 新一代已来 / 任务已取消时立刻回 nil，不再往下烧平台请求、不把旧地址
     /// 交给新一代；7 个平台都走这同一条编排（平台腿在 NativeBridge.songURL
-    /// 里按平台分，LX 腿只覆盖 5 家有 LX 解析的平台，见 lxSupported）。
-    private func resolveURL(for track: Track, gen: Int, skips: SkipSet = SkipSet()) async -> NativeBridge.SongURLResult? {
+    /// 里按平台分，LX 腿只覆盖有 LX 解析的平台，见 lxSupported）。
+    /// `quality`（r26）：只给 LX 死链降档重试用（handlePlaybackFailure
+    /// 2a）；不传时 LX 腿用 preferredQuality，平台腿永远用 preferredQuality。
+    private func resolveURL(for track: Track, gen: Int, skips: SkipSet = SkipSet(), quality: AudioQuality? = nil) async -> NativeBridge.SongURLResult? {
         DiagLog.shared.recordPlaybackStep("resolve start source=\(track.platform) id=\(track.id) gen=\(gen)")
         // 本地文件：地址就是文件 URL，不走 LX、不走平台接口。
         if track.platform == "local" {
@@ -819,16 +865,18 @@ final class PlaybackStore: ObservableObject {
             }
             return NativeBridge.SongURLResult(reason: "unavailable", via: "local")
         }
-        let lxSupported = ["netease", "qq", "kuwo", "qishui", "kugou"].contains(track.platform)
+        let lxSupported = ["netease", "qq", "kuwo", "qishui", "kugou", "bodian"].contains(track.platform)
         let member = await NativeBridge.isMember(platform: track.platform)
         guard gen == resolveGeneration, !Task.isCancelled else {
             DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=member source=\(track.platform) id=\(track.id)")
             return nil
         }
         // 没会员 → LX 先（拿整首）；有会员 → 平台先。
+        // r26：LX 腿用 quality（降档重试传进来的档位）或 preferredQuality。
+        let lxQuality = quality ?? preferredQuality
         let lxFirst = !skips.skipLX && lxSupported && !member
         var lastReason = ""
-        if lxFirst, let lx = await NativeBridge.lxSongURL(track: track, quality: preferredQuality) {
+        if lxFirst, let lx = await NativeBridge.lxSongURL(track: track, quality: lxQuality) {
             guard gen == resolveGeneration, !Task.isCancelled else {
                 DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=lx-first source=\(track.platform) id=\(track.id)")
                 return nil
@@ -872,7 +920,7 @@ final class PlaybackStore: ObservableObject {
             return nil
         }
         if !lxFirst, !skips.skipLX, lxSupported,
-           let lx = await NativeBridge.lxSongURL(track: track, quality: preferredQuality) {
+           let lx = await NativeBridge.lxSongURL(track: track, quality: lxQuality) {
             guard gen == resolveGeneration, !Task.isCancelled else {
                 DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=lx-fallback source=\(track.platform) id=\(track.id)")
                 return nil

@@ -10,7 +10,7 @@ import Foundation
 /// `ios/Sources/Lizi/Server/SessionStore.swift` 与各平台 `logout` 分支）；
 /// 本类只做内存态 + 启动 / 出现时重查，不自己另写一套持久化。
 ///
-/// 接口约定（r23f `LoginPromptView.swift` 文件头 + r23b–r23e 各 flow 已写好的调用点）：
+/// 接口约定（r23f `LoginSheetTarget.swift` 文件头 + r23b–r23e 各 flow 已写好的调用点）：
 /// 调用形式定稿只留一种（r23a 定稿，2026-11-20）：
 /// - 平台级刷新 / 登出只用静态式：`LoginStore.refresh(platform:) async -> Bool`、
 ///   `LoginStore.logout(platform:) async -> Bool`。7 个 flow 视图已全部统一成

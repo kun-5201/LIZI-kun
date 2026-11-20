@@ -324,7 +324,11 @@ return ca.isEmpty || ca.contains(artistKey) || artistKey.contains(ca)
 // MARK: - 取链：LX（只做取链 fallback，绝不做搜索）
 
 /// LX 取链（/api/lx/song/url，25 秒硬超时；没有 LX 解析的平台返回 nil）。
-/// 支持：netease / qq / kuwo / qishui；bodian / applemusic / spotify 没有 LX 解析。
+/// 支持：netease / qq / kuwo / qishui / kugou / bodian（r26 接回波点，
+/// bd 映射见 LXResolver.sourceMap——但今天没有任何已注册源声明 bd，
+/// 波点 LX 仍走不到真取链，缺的是源不是映射，见 LX.swift）。
+/// Apple Music / Spotify 没有 LX 解析：LX 生态的源 id 只有 kw/kg/tx/wy/mg
+///（赞助源另扩展了 qs），不存在 Apple Music 的源 id，不编假映射。
 static func lxSongURL(track: Track, quality: AudioQuality) async -> SongURLResult? {
 guard let lxSource = LXResolver.sourceMap[track.platform],!lxSource.isEmpty else { return nil}
 var query: [String: String] = ["source": track.platform,

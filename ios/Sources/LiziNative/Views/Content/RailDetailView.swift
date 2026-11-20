@@ -1,6 +1,9 @@
 import SwiftUI
 
-/// rail 详情页（P2 工人 D）：首页 rail 行点「展开」/ 点卡片后打开的整页。
+/// rail 详情页（P2 工人 D）：4 个来源的整页（点「展开」/ 点卡片后打开）。
+/// r26（用户 2026-11-20 22:39–22:40）：首页来源 chips 已删，本页目前
+/// 没有首页入口——取数层与本页保留，等图纸批了接新入口时复用，
+/// 不在这里重写或删掉。
 ///
 /// 内容按 rail 形态分三种，点行行为各不相同：
 /// - 曲目型（喜欢、波点 FM、精选新歌 feed）：TrackRowView 列表，点行走
@@ -16,12 +19,10 @@ import SwiftUI
 ///   切 feed 重新拉取；首页行只放默认 feed（见 RailsBridge）。
 ///
 /// 导航缝合（工人 A 的活，本页不碰 AppNavigation.swift）：
-/// - 本页现在由 HomeView 以 sheet 呈现（`viewModel.selectedRail`），
+/// - 本页由 RootView 的 `.rail(kind:platform:)` case 分支呈现，
 ///   初始化器 `init(kind:platform:)` 的字段名已按约定取
 ///   （`nav.show(.rail(kind: String, platform: String))`，kind 取
-///   "featured" / "liked" / "playlists" / "radio"）；
-///   工人 A 落地 `.rail` case 后，HomeView 把 sheet 改成 nav 调用，
-///   本页改为 RootView 的 case 分支，初始化器不用改。
+///   "featured" / "liked" / "playlists" / "radio"）。
 /// - 歌单卡片点按：约定走 `nav.show(.playlist(...))`（工人 A / 歌单详情工人
 ///   落地后）；当前歌单详情页还没接线，这里先用本页内下钻展示曲目，
 ///   行为等价（点歌单 → 看到它的曲目 → 点行播放），接线后把
@@ -52,7 +53,7 @@ struct RailDetailView: View {
         LiziPlatforms.all.first(where: { $0.id == platform })?.name ?? platform
     }
 
-    /// 本页标题（喜欢 rail 按平台取真名，与首页行标题、来源 chip、
+    /// 本页标题（喜欢 rail 按平台取真名，与来源 chip、
     /// 空态文案同一份事实来源 `RailKind.likedTitle(for:)`）。
     private var displayTitle: String { kind.displayTitle(platform: platform) }
 

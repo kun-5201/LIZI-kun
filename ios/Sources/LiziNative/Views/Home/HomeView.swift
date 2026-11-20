@@ -1,6 +1,12 @@
 import SwiftUI
 
-/// 首页（大厅）：顶栏 + Hero 大卡 + 铺色面板（平台条 + 来源 chips + 跑马带/环）+ rails + 本地音乐。
+/// 首页（大厅）：顶栏 + Hero 大卡 + 铺色面板（平台条 + 跑马带/环）+ 本地音乐。
+/// r26（用户 2026-11-20 22:39–22:40 决定）：首页 5 个来源 chips
+/// （每日推荐 / 精选 / 我的喜欢 / 我收藏的歌单 / 电台）全删，只留每日推荐；
+/// 来源切换逻辑、首屏之下的 rail 行、rail 登录墙随 chips 一起删掉。
+/// 删掉的 4 个来源的新显示方法等图纸批了再接线，不在这里先占位置。
+/// 每日推荐本身不动：数据链（`NativeBridge.dailyRecommend`）与面板里的
+/// 环/跑马带渲染（`HomeCoverRingView`）原样保留。
 ///
 /// r24 首页两卡拖动改尺寸：Hero 底边 / 面板顶边接缝处一条 28pt 高分界手柄
 /// （上下各压 14pt，中间一条 36×4 圆角胶囊），竖直拖动改两块高度分配，
@@ -9,7 +15,7 @@ import SwiftUI
 /// heroFractionPortraitKey / heroFractionLandscapeKey（竖屏默认 0.5、
 /// 横屏默认 9/16）；拖动中只改 @State、不写 UserDefaults，松手才写当前
 /// 方向的 key。上下限见 body 里 minHeroH / minPanelH 的注释（数都从
-/// HeroCardView / PlatformStripView / SourceChipsView / HomeCoverRingView
+/// HeroCardView / PlatformStripView / HomeCoverRingView
 /// 的代码量出来，不是拍脑袋）。拖动时外层 ScrollView 用
 /// `.scrollDisabled(dragging)` 停滚；手柄 28pt 高只盖住 Hero 底边 14pt
 /// 与面板顶边 14pt——Hero 播放钮底边在 Hero 底边之上 20pt、平台条从面板
@@ -34,33 +40,23 @@ import SwiftUI
 ///    （932×430 档：顶栏 64 + 间距 26 + Hero 180 + 间距 20 + 面板 140 = 430）。
 ///    Hero 高由模板公式算（竖屏 (屏高−110)/2，横屏 (屏高−110)×9/16），
 ///    面板取剩下那份（竖屏一半，横屏 (屏高−110)×7/16）。
-///    面板内容（条 42 + chips 52 + 环带 273/291）比面板高，面板是定高窗、
-///    只有环在里面竖滑（r23h：条 + 竖屏 chips 钉在面板顶，不进 ScrollView，
-///    放歌后 / 手指竖滑都顶不走它们；横屏只钉条，chips 仍在环下竖滑区）。
-///    横屏面板矮，里面顺序是条 → 环 → chips（先让封面露出来，chips 在
-///    下面滑下去才见），竖屏是条 → chips → 环。
-/// 3. 首屏之外（下滑才看到，本地音乐一个像素都不许露首屏）：rails 行，
-///    再下面是本地音乐区（文件夹卡片 + 导入按钮，见 LocalMusicView.swift）。
+///    面板内容（条 42 + 环带 273/291）比面板高，面板是定高窗、
+///    只有环在里面竖滑（r23h：条钉在面板顶，不进 ScrollView，
+///    放歌后 / 手指竖滑都顶不走它）。
+/// 3. 首屏之外（下滑才看到，本地音乐一个像素都不许露首屏）：本地音乐区
+///    （文件夹卡片 + 导入按钮，见 LocalMusicView.swift）。
 ///    段间距 24；底部留白 50（16 净空 + 34 Home Indicator，底部安全区已忽略）。
 /// 4. 铺色面板（壳版 `#hall-plat`，圆角 22，内边距 10）：
-///    平台条（模板 v2：左列当前来源标题 24pt 粗体 + 7 图标 22pt 间距 5，
-///    高 42，右端搜索）→ 来源 chips（P1 stand-in，壳版是悬停来源滚轮，
-///    P3 才换；5 个来源一排 pills，点哪个切哪个；长按上下滑切换已在 r23
-///    删掉——它和 ScrollView、3D 带子的 UIKit pan 抢触摸会卡死，见
-///    SourceRailView.swift 文件头）
+///    平台条（模板 v2：左列「每日推荐」标题 24pt 粗体 + 7 图标 22pt 间距 5，
+///    高 42，右端搜索）
 ///    → 3D 封面环（HomeCoverRingView，平面跑马带常态；环的位置在面板里、
 ///    面板底色是当前平台品牌色 10% 淡 tint（壳版是平台色 Grainient 满铺；
 ///    原生浅色卡片 + 墨字要留着，只能淡 tint 近似，不做满铺深色）。
 ///    壳版面板 min-height 298 = bar 42 + gap 8 + marq 228 + 内边距 20；
-///    原生面板内容要再加 chips 一行（chip 32 + 间距 6 + 提示 14 = 52）
-///    与视频尺寸环卡（平面带高 card+49，标准档 251，比壳版 marq 228 高 23，
-///    另加提示行 6+16），标准档内容约 403，比模板竖屏面板 382 高 21、
+///    原生面板内容是视频尺寸环卡（平面带高 card+49，标准档 251，
+///    比壳版 marq 228 高 23，另加提示行 6+16），标准档内容约 351，
 ///    比横屏面板 140 高得多——差额由面板内竖滑消化，不硬凑。
-/// 5. 内容区：非每日来源 = rail 行（P2：标题 + 横向卡片 + 点开展开）。
-///    壳版里 rail 内容就是跑马带本身（切来源换带内内容）；原生 P2 把
-///    rail 行放在面板下方，是已定结构，本轮只保顺序（面板 → rail 行），
-///    不把 rail 行并进跑马带（那要动 ViewModel 逻辑，别的工人）。
-/// 6. 本地音乐区在最末（模板 v2）：文件夹卡片（点开是文件列表，点文件播放）
+/// 5. 本地音乐区在最末（模板 v2）：文件夹卡片（点开是文件列表，点文件播放）
 ///    + 「导入本地音乐」按钮；没歌时空态，不编假文件。
 ///    封面只用真数据：Hero 封面 = 正在播那首歌的封面，面板封面 = 当前平台
 ///    每日推荐的真封面；模板图里的示例封面不进包、不当数据。
@@ -73,32 +69,10 @@ struct HomeView: View {
     @StateObject private var viewModel = HomeViewModel()
     /// 首页环状态机（r21）：平面带与全屏环覆盖层共用（见 HomeCoverRingView 文件头）。
     @StateObject private var ringModel = HomeCoverRingModel()
-    /// 登录提示（r23 集成）：rail 展开需要登录时弹提示，不进详情。
-    @State private var loginPrompt: LoginPrompt?
-    @State private var loginTarget: LoginSheetTarget?
     /// 本地音乐区块显示开关（#48：键与 `SettingsStore.localMusicShown`
     /// 同键 `lizi.local.show`，默认开；@AppStorage 直接监听 UserDefaults
     /// 变化，设置页拨开关后回首页即生效，不依赖 SettingsStore 实例）。
     @AppStorage("lizi.local.show") private var localMusicShown = true
-    /// U4：sheet 关后刷新用的进行中任务（onDone 与 onChange 可能先后各
-    /// 触发一次，先取消上一单、只留最新一单）。
-    @State private var loginRefreshTask: Task<Void, Never>?
-
-    /// sheet 关后刷新首页（U4）：先刷登录态（`LoginStore.refresh`，
-    /// 60 秒节流），再重拉每日推荐 + 当前来源的 rail。登录完成前
-    /// daily/rails 还是未登录空态，不刷就一直停在空态——这就是 U4 的 bug。
-    /// loadDaily/loadRail 本身有代际守卫与 Task.isCancelled 检查，
-    /// 被取消的一单写不进状态。
-    private func refreshAfterLoginSheetClosed() {
-        loginRefreshTask?.cancel()
-        loginRefreshTask = Task {
-            LoginStore.shared.refresh()
-            await viewModel.loadDaily()
-            if let kind = viewModel.selectedSource.railKind {
-                await viewModel.loadRail(kind)
-            }
-        }
-    }
 
     // MARK: - r24 首页两卡拖动改尺寸（分界手柄 + 持久化）
 
@@ -183,14 +157,12 @@ struct HomeView: View {
     let flatCard: CGFloat = tier == .compact ? 188 : tier == .standard ? 202 : 220
             // - minPanelH：面板内边距上下 10+10（dailyPanel `.padding(10)`）
             //   + 平台条 42（PlatformStripView `.frame(height: 42)`）
-            //   + 面板 VStack 间距 8（条与下一行之间）。
-            //   竖屏再加 chips 行 32（SourceChipsView：13pt 字行高约 16 +
-            //   上下内边距 8+8；文件头旧账「chip 32」同值）+ 间距 8
+            //   + 面板 VStack 间距 8（条与下一行之间）
             //   + 至少一排环封面 flatCard（歌名/歌手行与「展开 3D 环」提示行
             //   都在面板内竖滑区里，面板是定高窗、裁断是模板原意，不计入下限；
-            //   标准档：20+42+8+32+8+202 = 312）。
-            //   横屏面板默认只有约 140 高、chips 在环下面滑下去才见（见 dailyPanel
-            //   注释），不计 chips；只要求条之外再露约 1/4 张封面
+            //   标准档：20+42+8+202 = 272）。
+            //   r26：chips 行已删，竖屏下限不再加 chips 32 + 间距 8。
+            //   横屏面板默认只有约 140 高，只要求条之外再露约 1/4 张封面
             //   （flatCard/4，标准档 202/4 ≈ 50，封面露一角、能认出是封面带；
             //   模板默认露 70，标准档下限 20+42+8+50.5 = 120.5→121 < 140，
             //   默认值仍在合法区间里）。
@@ -198,7 +170,7 @@ struct HomeView: View {
             let ringPeek: CGFloat = flatCard / 4
             let minPanelH: CGFloat = isLandscape
                 ? ceil(20 + 42 + 8 + ringPeek)
-                : 20 + 42 + 8 + 32 + 8 + flatCard
+                : 20 + 42 + 8 + flatCard
             // - maxHeroH = contentH − minPanelH。内容极矮时（横屏小屏，
             //   如 667×375 档 contentH 265 < minHeroH 153 + minPanelH 125，
             //   667 宽走 large 档 flatCard 220，下限和是 278）
@@ -313,71 +285,11 @@ struct HomeView: View {
                                 }
                         }
 
-                        // 首屏之下（下滑才看到）：rails 行 + 本地音乐区。
+                        // 首屏之下（下滑才看到）：本地音乐区。
                         // 本地音乐排在最末；段间距 24 与上面同档。
+                        // r26：首屏之下的 rail 行随来源 chips 一起删掉
+                        // （RailRowView + 「我的专辑」入口卡），只剩本地音乐。
                         VStack(alignment: .leading, spacing: 24) {
-                            if let kind = viewModel.selectedSource.railKind {
-                                // P2：四条 rails 各一行（标题 + 横向卡片 + 点开展开）。
-                                // 点卡片按类型直达（r24 第 1 件）：曲目直接播，
-                                // 歌单进歌单详情页，电台频道进 rail 详情页再下钻；
-                                // 「展开」按钮仍开整条 rail 详情页。
-                                // 喜欢 rail 的标题按当前平台取真名（displayTitle），
-                                // 与来源 chip、空态文案、详情页标题同一份事实来源。
-                                RailRowView(
-                                    kind: kind,
-                                    platform: viewModel.selectedPlatform,
-                                    result: viewModel.rails[kind],
-                                    isLoading: viewModel.railLoading[kind] ?? false,
-                                    onExpand: {
-                                        // r23 集成：需要登录的 rail 未登录时弹提示，不进详情。
-                                        if let p = LoginGate.prompt(forRail: kind, platform: viewModel.selectedPlatform) {
-                                            loginPrompt = p
-                                        } else {
-                                            viewModel.openRail(kind)
-                                        }
-                                    },
-                                    onRetry: {
-                                        Task { await viewModel.loadRail(kind) }
-                                    },
-                                    onEntryTap: { entry in
-                                        switch entry {
-                                        case .track(let track):
-                                            // 曲目卡：整份曲目进队列，从点中的起播
-                                            // （与 RailDetailView 里点行一致）；
-                                            // 播歌不设登录墙（取链/会员编排在
-                                            // PlaybackStore 里）。
-                                            let tracks = viewModel.rails[kind]?.tracks ?? []
-                                            let idx = tracks.firstIndex(where: { $0.id == track.id && $0.platform == track.platform }) ?? 0
-                                            playback.setQueue(tracks, startAt: idx)
-                                        case .playlist(let playlist):
-                                            // 歌单卡：直达歌单详情页（P2 已有
-                                            // PlaylistDetailView）；收藏歌单
-                                            // rail 的登录墙与「展开」同一套。
-                                            if let p = LoginGate.prompt(forRail: kind, platform: viewModel.selectedPlatform) {
-                                                loginPrompt = p
-                                            } else {
-                                                nav.show(.playlist(platform: playlist.source, id: playlist.id, isRank: playlist.isRank))
-                                            }
-                                        case .station:
-                                            // 电台频道卡：没有单频道直达页，进整条
-                                            // rail 详情页再点频道下钻（与「展开」一致）。
-                                            if let p = LoginGate.prompt(forRail: kind, platform: viewModel.selectedPlatform) {
-                                                loginPrompt = p
-                                            } else {
-                                                viewModel.openRail(kind)
-                                            }
-                                        case .groupHeader:
-                                            break
-                                        }
-                                    }
-                                )
-                                .padding(.horizontal, 16)
-                                if viewModel.selectedSource == .playlists {
-                                    MyAlbumsEntryView()
-                                        .padding(.horizontal, 16)
-                                }
-                            }
-
                             // #48：按「在首页显示」开关（`lizi.local.show`，
                             // 默认开）显示/隐藏本地音乐区块；关了整块消失、
                             // 不留占位，导入功能不受影响。
@@ -417,32 +329,10 @@ struct HomeView: View {
         // 底部留白由内容自己留 50（16 净空 + 34 Home Indicator），
         // 不靠系统安全区（否则首屏底边对不上模板的屏底线）。
         .ignoresSafeArea(edges: [.top, .bottom])
-        // r23 集成：登录提示 alert + 「去登录」 sheet（rail 展开用）。
-        .loginRequiredAlert(prompt: $loginPrompt, loginTarget: $loginTarget)
-        // U4：传 onDone，登录完成时刷新首页 daily + rails。
-        // 注意 onDone 只在 LoginSheetView.close() 路径触发——取消按钮与
-        // 汽水/波点/酷狗的 onClose 走它；网易/QQ/酷我/Apple Music 各 flow
-        // 用自己的 @Environment(\.dismiss) 直接关弹窗，onDone 不触发。
-        // 所以关后刷新不能只靠 onDone：下面 onChange(of: loginTarget)
-        // 在 sheet 已关（回 nil，不论哪条关闭路径）时再刷一次，两处共用
-        // 同一个 refreshAfterLoginSheetClosed()，里面先取消上一单，
-        // 先后触发也只落一单有效加载。
-        .sheet(item: $loginTarget) { target in
-            LoginSheetView(platform: target.platform, onDone: { refreshAfterLoginSheetClosed() })
-        }
-        .onChange(of: loginTarget?.platform) { platform in
-            if platform == nil { refreshAfterLoginSheetClosed() }
-        }
         .task {
-            // r24 第 1 件：首页启动就刷一次登录态（fire-and-forget，
-            // 不等它回来再 initialLoad——7 个 status 并行刷，各自失败
-            // 互不影响）。不刷的后果：LoginStore.states 初始全是未登录，
-            // 冷启动后 LoginGate 会把已登录用户的歌单/喜欢 rail 也拦在
-            // 「需要登录」提示外，直到用户进一次设置页才恢复
-            // （用户 08:35「歌单都无法调取」的另一根因）。
-            // 节流在 LoginStore.refresh() 里（60 秒内只刷一次），
-            // 回首页重建 HomeView 不会每次都并行打 7 个 status。
-            LoginStore.shared.refresh()
+            // r26：首页启动只拉每日推荐。原来这里还刷一次登录态
+            // （`LoginStore.refresh`），是给 rail 登录墙（`LoginGate`）
+            // 备的——chips 与 rail 行已删，登录墙一并删掉，不再刷。
             await viewModel.initialLoad()
             // r22j 平台管理：当前选中平台被取消勾选时，自动切到第一个勾选
             // 的平台（走 selectPlatform 五步，不另写切台；选中平台被隐藏是
@@ -454,24 +344,9 @@ struct HomeView: View {
                 viewModel.selectPlatform(first.id, playbackStore: playback)
             }
         }
-        .onChange(of: viewModel.selectedRail) { selection in
-            // P2 集成缝合：rail 详情不再用 sheet，改走 AppNavigation（工人 A 已落地
-            // .rail(kind:platform:)），与其它详情页同一套导航；选完即清掉触发态。
-            if let selection {
-                nav.show(.rail(kind: selection.kind.rawValue, platform: selection.platform))
-                viewModel.selectedRail = nil
-            }
-        }
         .onChange(of: playback.currentTrack) { track in
             if let track = track {
                 Task { @MainActor in viewModel.notePlayed(track) }
-            }
-        }
-        .onChange(of: playback.isLiked) { _ in
-            // 星标变了：正在看喜欢 rail 时刷新该 rail（本地星标兜底的平台
-            // 靠这一刷把新点的星标列进来）。
-            if viewModel.selectedSource == .liked {
-                Task { await viewModel.loadRail(.liked) }
             }
         }
     }
@@ -487,16 +362,14 @@ struct HomeView: View {
 
     /// 每日推荐铺色面板（模板 v2 定高窗，壳版 `#hall-plat` 内容）：
     /// 圆角 22、内边距 10、底色 platTint；只有环在窗内竖滑（标准档内容
-    /// 约 403，高于竖屏面板 382、更高于横屏 140；模板里面板封面本来
-    /// 就是齐底边裁断的）。竖屏顺序：条 → chips → 环；横屏顺序：条 →
-    /// 环 → chips（横屏面板只有约 140 高，先让封面露出来、与模板一致；
-    /// chips 在下面，滑下去才见）。
-    /// r23h：平台条 +（竖屏）chips 行钉在面板顶、不进竖滑 ScrollView——
+    /// 约 351，高于横屏面板 140；模板里面板封面本来
+    /// 就是齐底边裁断的）。顺序：条 → 环（r26：来源 chips 已删，
+    /// 面板里只剩平台条 + 每日推荐环/跑马带）。
+    /// r23h：平台条钉在面板顶、不进竖滑 ScrollView——
     /// 面板是定高窗、内容比窗高，放歌后环内容一换（每日 → 队列）或手指
-    /// 在面板里竖滑，ScrollView 的偏移会把条和 chips 顶出窗外、再也滑
+    /// 在面板里竖滑，ScrollView 的偏移会把条顶出窗外、再也滑
     /// 不回来（07:09 真机：条 + chips 全没了、环还在）；钉在外面后偏移
-    /// 再怎么变也顶不走它们。横屏面板只有约 140 高、模板要求先露封面，
-    /// chips 仍放环下面的竖滑区里（模板原意：滑下去才见），只钉平台条。
+    /// 再怎么变也顶不走它。
     /// 真机风险：面板内竖滑与环的上滑展开手势竞争——环的展开用 UIKit
     /// pan recognizer（见 HomeCoverRingView，r21 教训后不再用 SwiftUI
     /// DragGesture），它与外层 ScrollView 竖滑共存；现在多了一层面板内
@@ -510,27 +383,23 @@ struct HomeView: View {
         isLandscape: Bool,
         tier: PlayerTokens.PlayerSizeTier
     ) -> some View {
-        // r23h：条 +（竖屏）chips 钉在面板顶，见本函数头注释。
+        // r23h：条钉在面板顶，见本函数头注释。
         VStack(spacing: 8) {
             PlatformStripView(viewModel: viewModel)
             if isLandscape {
-                // 横屏先环后 chips：封面先露出来（模板 v2 横屏面板里
-                // 一排封面卡在第一屏；chips 在下面，滑下去才见）。
+                // 横屏面板只有约 140 高，先让封面露出来（模板 v2 横屏面板里
+                // 一排封面卡在第一屏）。
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: 8) {
-                        HomeCoverRingView(
-                            model: ringModel,
-                            dailyTracks: viewModel.daily.map { $0.track },
-                            isLoadingDaily: viewModel.isLoadingDaily,
-                            dailyEmptyReason: viewModel.dailyEmptyReason,
-                            marqueeSpeed: viewModel.marqSpeedPxPerSecond,
-                            tier: tier
-                        )
-                        SourceChipsView(viewModel: viewModel)
-                    }
+                    HomeCoverRingView(
+                        model: ringModel,
+                        dailyTracks: viewModel.daily.map { $0.track },
+                        isLoadingDaily: viewModel.isLoadingDaily,
+                        dailyEmptyReason: viewModel.dailyEmptyReason,
+                        marqueeSpeed: viewModel.marqSpeedPxPerSecond,
+                        tier: tier
+                    )
                 }
             } else {
-                SourceChipsView(viewModel: viewModel)
                 // r21：首页 3D 封面环（平面跑马带常态 + 上滑展开全屏圆环；
                 // 见 HomeCoverRingView 文件头视频逐帧规格）。
                 // 内容是播放队列（非空时）或每日推荐（队列为空时），
@@ -718,177 +587,3 @@ private struct BrandWordView: View {
         .frame(width: 34, height: 15)
     }
 }
-
-/// 一条 rail 的行（P2）：标题 + 横向卡片 + 点开展开。
-///
-/// - 标题行：rail 名 + 右侧「展开」按钮（有内容时才显示）。
-/// - 卡片：曲目卡（封面 + 歌名 + 歌手）/ 歌单卡 / 电台频道卡
-///   （封面 + 名字 + 副标题）；分组说明卡（groupHeader）只在详情页出现，
-///   行里跳过。点卡片按类型直达（r24 第 1 件；原来不管点哪张卡都只调
-///   onExpand 开整条 rail 列表，点歌单看不到那张歌单——用户 08:36
-///   「歌单点了都没反应」的其中一根因）：
-///   曲目卡 → 直接整份进队列从点中的起播；歌单卡 → 歌单详情页
-///   （PlaylistDetailView，经 AppNavigation.playlist）；电台频道卡 →
-///   整条 rail 详情页（频道下钻在 RailDetailView 里，没有单频道直达页）。
-///   歌单 / 电台的登录墙在调用方（HomeView）的 onEntryTap 里判，
-///   与「展开」按钮同一套 LoginGate，不在这里另起判定。
-/// - 空态：请求失败显示失败原因 + 重试；内容为空显示诚实原因
-///   （未登录 / 接口缺失 / 本地星标为空三种原因分开写，不都写「暂无内容」）。
-/// - 封面无图用白色底 + 音符占位（CoverImageView）；禁缩放（不加任何
-///   magnification 手势）。
-private struct RailRowView: View {
-    let kind: RailKind
-    /// 当前平台：喜欢 rail 的标题按平台取真名（`displayTitle`），
-    /// 不能只凭 kind 定。
-    let platform: String
-    let result: RailResult?
-    let isLoading: Bool
-    let onExpand: () -> Void
-    let onRetry: () -> Void
-    /// 点卡片的直达回调（r24 第 1 件）：曲目 → 播，歌单 → 歌单详情页，
-    /// 电台频道 → rail 详情页；与「展开」按钮的 onExpand 分开。
-    /// r24 构建修（run 44656645107）：第 1 件工人只写了上面这段注释与
-    /// 下面的调用点，漏声明了本属性，编译器报 "cannot find 'onEntryTap'
-    /// in scope"；这里补上声明，调用方 HomeView.body 已传实参。
-    let onEntryTap: (RailEntry) -> Void
-
-    /// 行标题（喜欢 rail 按平台取真名，其余 rail 固定名）。
-    private var displayTitle: String { kind.displayTitle(platform: platform) }
-
-    /// 行里只放可点的卡片，分组说明卡跳过（只在详情页出现）。
-    private var cards: [RailEntry] {
-        (result?.entries ?? []).filter {
-            if case .groupHeader = $0 { return false }
-            return true
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center) {
-                Text(displayTitle)
-                    .font(.liziDisplay(size: LiziTokens.size20))
-                    .foregroundColor(LiziTokens.ink)
-                Spacer()
-                if !cards.isEmpty {
-                    Button(action: onExpand) {
-                        HStack(spacing: 4) {
-                            Text("展开")
-                                .font(.liziBody(size: LiziTokens.size13, weight: .medium))
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 11, weight: .semibold))
-                        }
-                        .foregroundColor(LiziTokens.ink2)
-                    }
-                    .accessibilityLabel("展开\(displayTitle)")
-                }
-            }
-            Group {
-                if isLoading {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                        Text("正在拉取\(displayTitle)…")
-                            .font(.liziBody(size: LiziTokens.size13))
-                            .foregroundColor(LiziTokens.ink3)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 120, alignment: .center)
-                } else if let error = result?.error {
-                    VStack(spacing: 8) {
-                        Text(error)
-                            .font(.liziBody(size: LiziTokens.size13))
-                            .foregroundColor(LiziTokens.accent)
-                            .multilineTextAlignment(.center)
-                        Button("重试", action: onRetry)
-                            .font(.liziBody(size: LiziTokens.size13, weight: .medium))
-                            .foregroundColor(LiziTokens.ink2)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 120, alignment: .center)
-                    .padding(.horizontal, 24)
-                } else if cards.isEmpty {
-                    Text(result?.emptyReason ?? "暂无内容。")
-                        .font(.liziBody(size: LiziTokens.size13))
-                        .foregroundColor(LiziTokens.ink3)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity, minHeight: 120, alignment: .center)
-                        .padding(.horizontal, 24)
-                } else {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(alignment: .top, spacing: 12) {
-                            ForEach(cards) { entry in
-                                Button(action: { onEntryTap(entry) }) {
-                                    railCard(entry)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(railCardLabel(entry))
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func railCard(_ entry: RailEntry) -> some View {
-        switch entry {
-        case .track(let track):
-            VStack(alignment: .leading, spacing: 7) {
-                CoverImageView(url: track.coverURL, placeholderIconSize: 28)
-                    .frame(width: 120, height: 120)
-                    .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
-                Text(track.title)
-                    .font(.liziBody(size: LiziTokens.size14, weight: .medium))
-                    .foregroundColor(LiziTokens.ink)
-                    .lineLimit(1)
-                Text(track.artist)
-                    .font(.liziBody(size: LiziTokens.size13))
-                    .foregroundColor(LiziTokens.ink3)
-                    .lineLimit(1)
-            }
-            .frame(width: 120, alignment: .leading)
-        case .playlist(let playlist):
-            VStack(alignment: .leading, spacing: 7) {
-                CoverImageView(url: playlist.coverURL, placeholderIconSize: 28)
-                    .frame(width: 120, height: 120)
-                    .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
-                Text(playlist.title)
-                    .font(.liziBody(size: LiziTokens.size14, weight: .medium))
-                    .foregroundColor(LiziTokens.ink)
-                    .lineLimit(1)
-                Text(playlist.trackCount > 0 ? "\(playlist.trackCount) 首" : (playlist.creator.isEmpty ? "歌单" : playlist.creator))
-                    .font(.liziBody(size: LiziTokens.size13))
-                    .foregroundColor(LiziTokens.ink3)
-                    .lineLimit(1)
-            }
-            .frame(width: 120, alignment: .leading)
-        case .station(let station):
-            VStack(alignment: .leading, spacing: 7) {
-                CoverImageView(url: station.coverURL, placeholderIconSize: 28)
-                    .frame(width: 120, height: 120)
-                    .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
-                Text(station.name)
-                    .font(.liziBody(size: LiziTokens.size14, weight: .medium))
-                    .foregroundColor(LiziTokens.ink)
-                    .lineLimit(1)
-                Text(station.creator.isEmpty ? "电台" : station.creator)
-                    .font(.liziBody(size: LiziTokens.size13))
-                    .foregroundColor(LiziTokens.ink3)
-                    .lineLimit(1)
-            }
-            .frame(width: 120, alignment: .leading)
-        case .groupHeader:
-            EmptyView()
-        }
-    }
-
-    private func railCardLabel(_ entry: RailEntry) -> String {
-        switch entry {
-        case .track(let track): return "打开\(displayTitle)：\(track.title)"
-        case .playlist(let playlist): return "打开\(displayTitle)：\(playlist.title)"
-        case .station(let station): return "打开\(displayTitle)：\(station.name)"
-        case .groupHeader: return displayTitle
-        }
-    }
-}
-
-/// 「我的专辑」入口已由工人 C 的 MyAlbumsEntryView 接管（见 HomeView 收藏歌单 rail 区）。

@@ -37,6 +37,9 @@ final class LXScriptSink {
     var requestHandler: JSValue?
     /// source -> actions（inited 事件上报的 musicSources）。
     var initedSources: [String: [String]] = [:]
+    /// source -> 声明的档位（inited 事件上报的 musicSources 里的 qualitys；
+    /// r26：引擎只试源声明过的档位，见 LXScriptInstance.effectiveTiers）。
+    var initedQualitys: [String: [String]] = [:]
 }
 
 enum LXScriptRuntime {
@@ -167,6 +170,7 @@ enum LXScriptRuntime {
             case "inited":
                 if let sources = dataValue?.forProperty("sources")?.toDictionary() {
                     var parsed: [String: [String]] = [:]
+                    var parsedQualitys: [String: [String]] = [:]
                     for (key, value) in sources {
                         guard let name = key as? String,
                               let entry = value as? [String: Any] else { continue }
@@ -175,8 +179,16 @@ enum LXScriptRuntime {
                         } else if let actions = entry["actions"] as? [Any] {
                             parsed[name] = actions.map { "\($0)" }
                         }
+                        // r26：连档位一起记下来（qualitys 是 [String]；混淆脚本
+                        // 可能给 [Any]，同款归一化），档位过滤用。
+                        if let qs = entry["qualitys"] as? [String] {
+                            parsedQualitys[name] = qs
+                        } else if let qs = entry["qualitys"] as? [Any] {
+                            parsedQualitys[name] = qs.map { "\($0)" }
+                        }
                     }
                     sink.initedSources = parsed
+                    sink.initedQualitys = parsedQualitys
                 }
             case "updateAlert":
                 print("[lx] updateAlert（脚本有更新，不自动处理）")
@@ -639,6 +651,14 @@ final class LXScriptInstance {
         sink.initedSources.map(\.key).sorted()
     }
 
+    /// 脚本 inited 声明的各源档位（source -> qualitys；r26 档位过滤用）。
+    /// 只在 jsQueue 上读/写（与 platforms 同款：load() 的检查在
+    /// jsQueue.sync 里做；resolveMusicUrl 从 jsQueue 外读这里——
+    /// inited 之后该表不再变，读到的是 load 完成后的快照）。
+    var declaredQualitys: [String: [String]] {
+        sink.initedQualitys
+    }
+
     /// 是否已注册 request 处理（只在 jsQueue 上读，见 waitForRequestHandler）。
     private var hasRequestHandlerOnQueue: Bool { sink.requestHandler != nil }
 
@@ -721,7 +741,12 @@ final class LXScriptInstance {
         return try await withThrowingTaskGroup(of: (String, String).self) { group in
             group.addTask {
                 var lastError: Error?
-                for tier in Self.tiersFrom(quality) {
+                // r26：只试源声明过的档位（effectiveTiers）：聆澜赞助源对
+                // kw 不声明 master/atmos、对 qs 只声明 32k/64k/128k/256k/
+                // 320k/flac——旧代码全档硬试，服务端每次都回「当前卡密不
+                // 支持该平台或音质」（kw 白烧 2 次、qs 白烧 4 次），白白
+                // 吃掉 25 秒总预算；qs 默认无损档也要先烧 1 次才到 320k。
+                for tier in Self.effectiveTiers(from: quality, declared: self.declaredQualitys[source]) {
                     // 第 21 轮第 1 件：每档开始/失败/取消都落盘——02:54 诊断只
                     // 有“lx song/url start”，分不清是卡在 flac24bit 这一档、
                     // 还是档位循环本身没跑。取消单独记（见 NativeBridge 的
@@ -762,6 +787,21 @@ final class LXScriptInstance {
         if q == "flac" { q = "flac24bit" }
         let idx = scriptTiers.firstIndex(of: q) ?? 0
         return Array(scriptTiers[idx...])
+    }
+
+    /// 档位过滤（r26）：只试源 inited 声明过的档位（LX 桌面端本身也只
+    /// 提供脚本声明过的档位）。没声明档位信息的源（老脚本 / qualitys
+    /// 为空）保持旧行为全档试；过滤后为空（声明的档位与引擎档位表完全
+    /// 对不上）时同样回落全档试——宁可多试一次，不直接判死。
+    /// 注意不做 flac24bit→flac 换名：汽水声明里有 flac 但服务端实测
+    /// 两次都拒（「汽水音乐未返回可直接播放的 flac 音质」），换名只会
+    /// 把 0.5 秒的 flac24bit 拒答换成 3 秒的 flac 拒答；声明≠服务端
+    /// 真能出链，过滤只删档位、不改档位名。
+    static func effectiveTiers(from quality: String, declared: [String]?) -> [String] {
+        let all = tiersFrom(quality)
+        guard let declared, !declared.isEmpty else { return all }
+        let out = all.filter { declared.contains($0) }
+        return out.isEmpty ? all : out
     }
 
     // MARK: - 调脚本（带单档位 20 秒上限）

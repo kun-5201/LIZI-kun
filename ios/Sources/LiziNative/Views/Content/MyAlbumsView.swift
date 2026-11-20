@@ -645,66 +645,6 @@ private struct SpineBookView: View {
     }
 }
 
-// MARK: - 首页入口卡（工人 D 放进 HomeView；本文件只提供组件，不改 HomeView）
-
-/// 「我的专辑」入口卡：显示收藏数量，点按走 `nav.show(.myAlbums)`。
-/// 有收藏时缩略图用第一张收藏专辑的封面；没有收藏时用书架图标 + 空态文案。
-struct MyAlbumsEntryView: View {
-    @EnvironmentObject private var nav: AppNavigation
-    @State private var count: Int = 0
-    @State private var firstCoverURL: URL?
-
-    var body: some View {
-        Button(action: { nav.show(.myAlbums) }) {
-            HStack(spacing: 12) {
-                thumbnail
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("我的专辑")
-                        .font(.liziBody(size: LiziTokens.size16, weight: .semibold))
-                        .foregroundColor(LiziTokens.ink)
-                    Text(count == 0 ? "还没有收藏专辑" : "已收藏 \(count) 张专辑")
-                        .font(.liziBody(size: LiziTokens.size13))
-                        .foregroundColor(LiziTokens.ink2)
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(LiziTokens.ink3)
-            }
-            .padding(16)
-            .background(LiziTokens.paper2)
-            .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius14))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(count == 0 ? "我的专辑，还没有收藏专辑" : "我的专辑，已收藏 \(count) 张专辑")
-        .onAppear { refresh() }
-    }
-
-    @ViewBuilder
-    private var thumbnail: some View {
-        if count > 0 {
-            CoverImageView(url: firstCoverURL, placeholderIconSize: 20)
-                .frame(width: 44, height: 44)
-                .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
-        } else {
-            ZStack {
-                Color.white
-                Image(systemName: "books.vertical")
-                    .font(.system(size: 20, weight: .regular))
-                    .foregroundColor(LiziTokens.ink3)
-            }
-            .frame(width: 44, height: 44)
-            .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
-        }
-    }
-
-    private func refresh() {
-        let albums = AlbumShelfStore.load()
-        count = albums.count
-        firstCoverURL = albums.first?.coverURL
-    }
-}
-
 // MARK: - 架子触摸层（r24，第 4 件，新写）
 
 /// 架子的触摸层：一个透明 UIView，盖在书脊 / 封面卡上方，接管架子上的

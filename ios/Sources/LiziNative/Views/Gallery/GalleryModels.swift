@@ -8,8 +8,8 @@ import UIKit
 /// - `StageForm`：formId / name / desc / fileName / isCamera / isClassic。
 /// - `StageCatalog.menuList(includeClassic:releaseOnly:)`：展示顺序照抄壳版
 ///   stageDisplayOrder（504、519 置顶，其余整体倒序）。
-/// - `StageCatalog.isAvailable`：文件在 bundle 里（69 个发行版形态全有；
-///   其余 590 个只有目录条目、没有文件，壳版同样 404）。
+/// - `StageCatalog.isAvailable`：文件在 bundle 里（r26：85 个发行版形态全有；
+///   其余 590 个无文件条目已删，目录里不再有无文件形态）。
 /// - 选中形态的持久化走 `StageCatalog.saveFormId` / `savedFormId`，键
 ///   `lizi.native.playerMode`（P3-A 定死；不要再写壳版的 `lizi.playerMode`，
 ///   两处各写各的会串）。

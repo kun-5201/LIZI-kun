@@ -671,7 +671,7 @@ final class LXSourceRegistry {
             }
             throw fail("validate-no-musicUrl", reason)
         }
-        let alias: [String: String] = ["kuwo": "kw", "netease": "wy", "qq": "tx", "migu": "mg", "kugou": "kg"]
+        let alias: [String: String] = ["kuwo": "kw", "netease": "wy", "qq": "tx", "migu": "mg", "kugou": "kg", "bodian": "bd", "qishui": "qs"]
         let platforms = Array(Set(rawPlatforms.map { alias[$0] ?? $0 })).sorted()
         let name = LXSourceStore.headerValue(script, "name").map(LXSourceStore.displayName)
         let version = LXSourceStore.headerValue(script, "version") ?? ""

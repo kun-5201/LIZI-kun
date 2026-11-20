@@ -10,6 +10,13 @@ import SwiftUI
 /// - large    窄边 ≥ 415：Pro Max（428/430）
 ///
 /// 顶部一律走 safeAreaInsets，不写死数值：顶行 y = safeArea.top + topGap。
+/// r26 修正：StageView 的根 GeometryReader 与内层 VStack 都挂了
+/// `.ignoresSafeArea()`（StageView.swift:90/93），运行时
+/// `geo.safeAreaInsets.top` 是 0——公式退化为「顶行 y = topGap」，
+/// 这就是 2026-11-20 22:25 截图里顶栏压住状态栏时间的根因
+/// （59 → 91pt 或 124 → 156pt 都落不到时间行上，只有 0 → 32pt
+///  对得上截图）。r26 不改公式（改 key window 口径会一下冲到约 91pt，
+///  违背「只下移一点」），只把竖屏 topGap 每档 +7。
 /// 横屏左右边距不用 safeArea.leading/trailing：横屏灵动岛在左右边中段
 /// （约中点上下 ±20pt），顶行在屏幕顶部（y 约 20–70pt），纵向不相交；
 /// 圆角清让由 28–36pt 的边距保证（16 Pro 圆角半径约 55pt，y=20 处屏边
@@ -20,7 +27,9 @@ import SwiftUI
 /// | 项目               | P-c | P-s | P-l | L-c | L-s | L-l |
 /// |--------------------|-----|-----|-----|-----|-----|-----|
 /// | sideMargin         |  12 |  16 |  16 |  28 |  32 |  36 |
-/// | topGap（安全区下） |  28 |  32 |  36 |  16 |  20 |  24 |
+/// | topGap（屏顶起算，见上） |  35 |  39 |  43 |  16 |  20 |  24 |
+///   （r26：竖屏 28/32/36 → 35/39/43，每档 +7；标准档顶边 39pt，
+///   对齐播放页竖屏顶栏 39pt；横屏 16/20/24 一字不动。）
 /// | topRowGap          |   8 |  10 |  10 |  12 |  14 |  16 |
 /// | 圆按钮直径（竖屏） |  40 |  44 |  46 |   – |   – |   – |
 /// | 返回胶囊宽（横屏） |   – |   – |   – |  80 |  84 |  88 |
@@ -150,21 +159,21 @@ struct StageTokens {
             idealCapsuleWidthLandscape = 0
             switch tier {
             case .compact:
-                sideMargin = 12; topGap = 28; topRowGap = 8
+                sideMargin = 12; topGap = 35; topRowGap = 8
                 roundButtonDiameter = 40
                 capsuleHPadding = 10; capsuleVPadding = 8
                 coverSize = 48; titleFont = 15; artistFont = 11
                 skipButtonFrame = 20; playButtonFrame = 24
                 skipIconSize = 16; playIconSize = 20; transportSpacing = 4
             case .standard:
-                sideMargin = 16; topGap = 32; topRowGap = 10
+                sideMargin = 16; topGap = 39; topRowGap = 10
                 roundButtonDiameter = 44
                 capsuleHPadding = 12; capsuleVPadding = 8
                 coverSize = 56; titleFont = 16; artistFont = 12
                 skipButtonFrame = 22; playButtonFrame = 26
                 skipIconSize = 18; playIconSize = 22; transportSpacing = 4
             case .large:
-                sideMargin = 16; topGap = 36; topRowGap = 10
+                sideMargin = 16; topGap = 43; topRowGap = 10
                 roundButtonDiameter = 46
                 capsuleHPadding = 12; capsuleVPadding = 8
                 coverSize = 60; titleFont = 17; artistFont = 12

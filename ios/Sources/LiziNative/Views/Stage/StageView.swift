@@ -25,8 +25,9 @@ import SwiftUI
 /// 分档尺寸见 `StageTokens`（窄边 = min(宽, 高)，三档 × 横竖屏）。
 ///
 /// 保留的行为：
-/// - 返回一律回首页；设置齿轮开形态设置 sheet（只有形态声明了
-///   `__stagePanel` 才显示）；九宫格开形态选择器 sheet。
+/// - 返回一律回首页；设置齿轮开本形态设置浮层（只有形态声明了
+///   `__stagePanel` 才显示）；九宫格开形态下拉浮层（r26：两个都是盖在
+///   当前舞台画面上的就地浮层，不跳页、不停歌，点外面收起，互斥）。
 /// - HUD 闲置 2.6 秒自动藏起（桥里 `startHudTimer`），藏起后剩「显示控制」
 ///   小按钮唤醒；相机形态不盖全屏点按唤醒层，拖动镜头不受影响。
 /// - 相机形态（552 烟雨江南）：播放胶囊默认收起成封面 + 播放键，点封面展开
@@ -58,6 +59,65 @@ struct StageView: View {
         _bridge = StateObject(wrappedValue: StageBridge(initialFormId: initialFormId))
     }
 
+    /// 收起两个就地浮层（点外面 / 选完形态 / 关设置都走这里）。
+    private func closePanels() {
+        showPicker = false
+        showSettings = false
+    }
+
+    /// 形态下拉与齿轮面板互斥：开一个就关另一个；再点一次收起。
+    private func togglePicker() {
+        bridge.wakeHUD()
+        showSettings = false
+        showPicker.toggle()
+    }
+
+    private func toggleSettings() {
+        bridge.wakeHUD()
+        showPicker = false
+        showSettings.toggle()
+    }
+
+    /// 就地浮层本体（r26）：形态下拉 / 齿轮面板二选一，右上锚定、
+    /// 顶行下方 10pt（壳版 `.smenu` / `.spnl` 的 `top: calc(100% + 10px)`）。
+    /// 宽：下拉 min(560, 可用宽)，设置 min(340, 可用宽)（壳版 402 / 320，
+    /// 设计图下拉更宽）；高：下拉 min(58% 屏高, 520)，设置 min(62% 屏高, 560)，
+    /// 超出可滚。歌不停：浮层只盖画面，不动播放状态。
+    @ViewBuilder
+    private func floatingPanel(tokens: StageTokens, geo: GeometryProxy) -> some View {
+        let topRowHeight: CGFloat = tokens.isLandscape ? 40 : tokens.roundButtonDiameter
+        let panelTop = geo.safeAreaInsets.top + tokens.topGap + topRowHeight + 10
+        let horizontalSpace = geo.size.width
+            - geo.safeAreaInsets.leading - geo.safeAreaInsets.trailing
+            - tokens.sideMargin * 2
+        if showPicker {
+            StageFloatPanel(width: min(560, horizontalSpace),
+                            maxHeight: min(geo.size.height * 0.58, 520)) {
+                StagePickerView(bridge: bridge) { form in
+                    closePanels()
+                    if form.isClassic {
+                        navigation.show(.player)
+                    } else {
+                        bridge.load(form: form)
+                    }
+                }
+            }
+            .transition(.scale(scale: 0.98, anchor: .topTrailing).combined(with: .opacity))
+            .padding(.top, panelTop)
+            .padding(.trailing, geo.safeAreaInsets.trailing + tokens.sideMargin)
+        } else if let spec = bridge.panelSpec {
+            StageFloatPanel(width: min(340, horizontalSpace),
+                            maxHeight: min(geo.size.height * 0.62, 560)) {
+                StageSettingsView(bridge: bridge, spec: spec) {
+                    closePanels()
+                }
+            }
+            .transition(.scale(scale: 0.98, anchor: .topTrailing).combined(with: .opacity))
+            .padding(.top, panelTop)
+            .padding(.trailing, geo.safeAreaInsets.trailing + tokens.sideMargin)
+        }
+    }
+
     var body: some View {
         GeometryReader { geo in
             let tokens = StageTokens.for(size: geo.size)
@@ -71,6 +131,15 @@ struct StageView: View {
                     Color.clear
                         .contentShape(Rectangle())
                         .onTapGesture { bridge.wakeHUD() }
+                }
+
+                // 浮层点按捕捉层（r26）：面板开着时盖住舞台画面（在 HUD
+                // VStack 之下，所以顶行按钮仍可点、两个浮层可直接互切），
+                // 面板外的任何一点都收起两个浮层；歌不停。
+                if showPicker || showSettings {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { closePanels() }
                 }
 
                 VStack(spacing: 0) {
@@ -89,6 +158,15 @@ struct StageView: View {
                 }
                 .ignoresSafeArea()
             }
+            // 两个就地浮层（r26，用户 22:35 设计图 + 22:36 齿轮同款）：
+            // 挂在 ZStack 上才能拿到 geo；本体见 floatingPanel。
+            .overlay(alignment: .topTrailing) {
+                if showPicker || showSettings {
+                    floatingPanel(tokens: tokens, geo: geo)
+                }
+            }
+            .animation(.easeOut(duration: 0.18), value: showPicker)
+            .animation(.easeOut(duration: 0.18), value: showSettings)
         }
         .ignoresSafeArea()
         .background(Color.black)
@@ -111,26 +189,6 @@ struct StageView: View {
         .onChange(of: showSettings) { open in
             bridge.hudSuspended = open || showPicker
             if open { bridge.wakeHUD() }
-        }
-        .sheet(isPresented: $showPicker) {
-            StagePickerView(bridge: bridge) { form in
-                showPicker = false
-                if form.isClassic {
-                    navigation.show(.player)
-                } else {
-                    bridge.load(form: form)
-                }
-            }
-        }
-        .sheet(isPresented: $showSettings) {
-            if let spec = bridge.panelSpec {
-                StageSettingsView(bridge: bridge, spec: spec)
-            } else {
-                Text("该形态没有可调参数")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .padding()
-            }
         }
     }
 
@@ -168,10 +226,7 @@ struct StageView: View {
             // 设置按钮：只有形态声明了 __stagePanel 才显示（壳版同款显隐规则；
             // 85 个已收录形态全有声明，所以实际常驻）。
             if bridge.panelSpec != nil {
-                Button(action: {
-                    bridge.wakeHUD()
-                    showSettings = true
-                }) {
+                Button(action: { toggleSettings() }) {
                     Image(systemName: "gearshape")
                         .font(.system(size: 17, weight: .medium))
                         .foregroundStyle(.white)
@@ -182,10 +237,7 @@ struct StageView: View {
                 .accessibilityLabel("本形态设置")
             }
 
-            Button(action: {
-                bridge.wakeHUD()
-                showPicker = true
-            }) {
+            Button(action: { togglePicker() }) {
                 Image(systemName: "square.grid.2x2")
                     .font(.system(size: 17, weight: .medium))
                     .foregroundStyle(.white)
@@ -197,6 +249,10 @@ struct StageView: View {
         }
         .padding(.leading, geo.safeAreaInsets.leading + tokens.sideMargin)
         .padding(.trailing, geo.safeAreaInsets.trailing + tokens.sideMargin)
+        // r26：竖屏顶边 = geo.safeAreaInsets.top + topGap；本页根 GeometryReader
+        // 与 VStack 都 .ignoresSafeArea()，运行时 geo.safeAreaInsets.top 是 0，
+        // 所以有效顶边就是 topGap（竖屏 35/39/43，标准档 39pt 对齐播放页）。
+        // 别把这一项换成 key window 安全区——那会一下冲到约 91pt。
         .padding(.top, geo.safeAreaInsets.top + tokens.topGap)
     }
 
@@ -250,10 +306,7 @@ struct StageView: View {
             Spacer(minLength: 0)
 
             if bridge.panelSpec != nil {
-                Button(action: {
-                    bridge.wakeHUD()
-                    showSettings = true
-                }) {
+                Button(action: { toggleSettings() }) {
                     HStack(spacing: 6) {
                         Image(systemName: "gearshape")
                             .font(.system(size: 15, weight: .medium))
@@ -270,10 +323,7 @@ struct StageView: View {
                 Color.clear.frame(width: tokens.topRowGap, height: 1)
             }
 
-            Button(action: {
-                bridge.wakeHUD()
-                showPicker = true
-            }) {
+            Button(action: { togglePicker() }) {
                 HStack(spacing: 6) {
                     Image(systemName: "square.grid.2x2")
                         .font(.system(size: 15, weight: .medium))

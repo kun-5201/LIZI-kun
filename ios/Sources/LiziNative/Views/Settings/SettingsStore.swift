@@ -418,6 +418,7 @@ final class SettingsStore: ObservableObject {
         case "kg": return "酷狗"
         case "qs": return "汽水"
         case "mg": return "咪咕"
+        case "bd": return "波点"
         case "local": return "本地"
         default: return code
         }

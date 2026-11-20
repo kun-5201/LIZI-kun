@@ -282,13 +282,16 @@ struct PlayerView: View {
                     .frame(width: contentWidth)
                 PlayerControlRow(tier: tier)
                     .frame(width: contentWidth)
-                // r25-B5：音量行（B2 #4 遗留接线）：紧跟控制行，行高 28 +
-                // 上间隙 8，从弹性歌词区扣 36pt；横屏总高已满，不放。
-                // compact 档不渲染（B4 实测接上后歌词区只剩 126 < 最小高
-                // 150，见文件底 r25-B4/B5 总账）：该档音量走系统音量键，
-                // 与 r25 之前一致，不另开入口；其余档保持现状。
+                // r26 第二行（22:45 用户纠正）：原来底部音量条的位置改放
+                // 4 个小图标（随机 / 爱心 / 循环 / 音量，见 PlayerSecondRow；
+                // 主控行只留上一首/播放/下一首后，随机/爱心/循环改放这里，
+                // 音量点开小滑杆就地调）。行高 28 + 上间隙 8 = 36pt，与
+                // 被替掉的音量行同一槽位，总账一字不动（见文件底 r26 总账）。
+                // compact 档不渲染（r25-B5 同款守卫：该档 375×667 接上 36pt
+                // 后歌词区只剩 126 < 最小高 150，进度条会被顶出屏底；该档
+                // 音量走系统音量键，见 verification/r26-player-volume-check.md）。
                 if tier != .compact {
-                    PlayerVolumeRow(tier: tier)
+                    PlayerSecondRow(tier: tier)
                         .frame(width: contentWidth)
                         .padding(.top, 8)
                 }
@@ -342,10 +345,11 @@ struct PlayerView: View {
                 PlayerControlRow(tier: tier, showsQueueButton: true, onOpenQueue: { showQueue.toggle() })
                     .frame(width: contentWidth)
                     .padding(.top, 8)
-                // r25-B4：音量行（B2 #4 遗留接线）：紧跟控制行（02 里控制行在
-                // 歌词区之上，音量行也随之在歌词区之上；总高不变，只是位置），
-                // 行高 28 + 上间隙 8，从弹性歌词区扣 36pt。
-                PlayerVolumeRow(tier: tier)
+                // r26 第二行（22:45 用户纠正）：原来底部音量条的位置改放
+                // 4 个小图标（随机 / 爱心 / 循环 / 音量，见 PlayerSecondRow）。
+                // 02 里控制行在歌词区之上，第二行也随之在歌词区之上；
+                // 行高 28 + 上间隙 8 = 36pt，与音量行同一槽位，总账不动。
+                PlayerSecondRow(tier: tier)
                     .frame(width: contentWidth)
                     .padding(.top, 8)
                 lyricsZone(tier: tier, width: contentWidth)
@@ -376,14 +380,13 @@ struct PlayerView: View {
                     .frame(width: contentWidth)
                 PlayerControlRow(tier: tier)
                     .frame(width: contentWidth)
-                // r25-B5：音量行（B2 #4 遗留接线）：紧跟控制行（04 里控制行在
-                // 歌词区之上，音量行也随之在歌词区之上；总高不变，只是位置），
-                // 行高 28 + 上间隙 8，从弹性歌词区扣 36pt。
-                // compact 档不渲染（B4 实测接上后歌词区只剩 126 < 最小高
-                // 150，见文件底 r25-B4/B5 总账）：该档音量走系统音量键，
-                // 与 r25 之前一致，不另开入口；其余档保持现状。
+                // r26 第二行（22:45 用户纠正）：原来底部音量条的位置改放
+                // 4 个小图标（随机 / 爱心 / 循环 / 音量，见 PlayerSecondRow）。
+                // 04 里控制行在歌词区之上，第二行也随之在歌词区之上；
+                // 行高 28 + 上间隙 8 = 36pt，与音量行同一槽位，总账不动。
+                // compact 档不渲染（r25-B5 同款守卫，见默认变体处注释）。
                 if tier != .compact {
-                    PlayerVolumeRow(tier: tier)
+                    PlayerSecondRow(tier: tier)
                         .frame(width: contentWidth)
                         .padding(.top, 8)
                 }
@@ -413,9 +416,10 @@ struct PlayerView: View {
                 PlayerControlRow(tier: tier, showsQueueButton: true, onOpenQueue: { showQueue.toggle() })
                     .frame(width: contentWidth)
                     .padding(.top, 8)
-                // r25-B4：音量行（B2 #4 遗留接线）：紧跟控制行，行高 28 +
-                // 上间隙 8，从弹性歌词区扣 36pt。
-                PlayerVolumeRow(tier: tier)
+                // r26 第二行（22:45 用户纠正）：原来底部音量条的位置改放
+                // 4 个小图标（随机 / 爱心 / 循环 / 音量，见 PlayerSecondRow）。
+                // 行高 28 + 上间隙 8 = 36pt，与音量行同一槽位，总账不动。
+                PlayerSecondRow(tier: tier)
                     .frame(width: contentWidth)
                     .padding(.top, 8)
             }
@@ -863,8 +867,11 @@ struct PlayerView: View {
     private func titleBlock(tier: PlayerTokens.PlayerSizeTier) -> some View {
         titleTexts(tier: tier)
         // 段间距与工人 C 总账对齐：歌词区 → 歌名块 8，歌名块 → 控制行 10。
-        .padding(.top, 8)
-        .padding(.bottom, 10)
+        // r26：compact 档有状态行（角标/失败原因）时收紧到 4/4（见下
+        // titleBlockTopPadding/titleBlockBottomPadding 与文件底 r26 总账），
+        // 与角标行压缩合计省约 15pt；无角标态仍是 8/10，一字不动；其余档不动。
+        .padding(.top, titleBlockTopPadding(tier: tier))
+        .padding(.bottom, titleBlockBottomPadding(tier: tier))
         // r22k：点歌名块打开队列（控制行按审计图改成星标/上一首/播放/
         // 下一首/AirPlay 后，队列列表按钮没位置了；队列入口改到这里，
         // 面板仍只盖住歌词区，见 lyricsZone）。
@@ -873,10 +880,37 @@ struct PlayerView: View {
         .accessibilityHint("点按打开播放队列")
     }
 
+    /// 状态行是否真的占高（r26）：失败原因文案，或至少一个角标（实际音质 /
+    /// 试听 / 演示音）时为真。只按可见内容判定——有曲目但三个角标条件全不
+    /// 成立时 HStack 为空，不计入（该瞬态仍走旧 8/10 间距，不溢出，见文件底
+    /// r26 总账注）。
+    private var hasStatusRow: Bool {
+        if store.errorMessage != nil { return true }
+        guard store.currentTrack != nil else { return false }
+        return store.actualQuality != nil
+            || store.currentTrack?.isTrial == true
+            || store.isDemo
+    }
+
+    /// r26：titleBlock 上间距。compact + 有状态行时 8 → 4（省 4pt）；
+    /// 其余情况一律 8（无角标态、各档、横屏不用 titleBlock，均不动）。
+    private func titleBlockTopPadding(tier: PlayerTokens.PlayerSizeTier) -> CGFloat {
+        (tier == .compact && hasStatusRow) ? 4 : 8
+    }
+
+    /// r26：titleBlock 下间距。compact + 有状态行时 10 → 4（省 6pt）；
+    /// 其余情况一律 10。
+    private func titleBlockBottomPadding(tier: PlayerTokens.PlayerSizeTier) -> CGFloat {
+        (tier == .compact && hasStatusRow) ? 4 : 10
+    }
+
     /// 歌名 / 歌手 + 状态角标（无段间距的本体）：竖屏 titleBlock 在外面加
     /// 8/10 段间距；横屏左列总高账紧张（见 landscapeLayout），直接用本体、
     /// 段间距由调用方另给 4。内容高：compact 档歌名 28×1.25 + 2 + 副标题
     /// 13×1.3 = 54，状态角标行有内容时再 +22 = 76。
+    /// r26：compact 竖屏有状态行时角标行压缩（compactStyle，见
+    /// statusCapsules），本体高 76 → 约 71（只省角标行 5pt；titleBlock
+    /// 间距省的 10pt 在本体之外）；横屏传 false，一字不动。
     private func titleTexts(tier: PlayerTokens.PlayerSizeTier) -> some View {
         VStack(spacing: 2) {
             Text(store.currentTrack?.title ?? "未在播放")
@@ -894,7 +928,7 @@ struct PlayerView: View {
                 .foregroundStyle(PlayerTokens.playerSub)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .center)
-            statusCapsules
+            statusCapsules(compactStyle: tier == .compact)
         }
     }
 
@@ -908,35 +942,39 @@ struct PlayerView: View {
     /// 状态角标：只在有内容时出现 —— 实际音质（显示 = 实际返回档位，绝不显示
     /// 请求档位）、试听、演示音。取链失败的原因由下面的 error 行明示，不静默。
     /// 无曲目时什么都不显示（空态只有「未在播放」+ 副标题）。
+    /// r26：compactStyle 只由竖屏 titleTexts 在 compact 档传 true（角标行
+    /// 压缩：胶囊字 11→10、纵向 padding 2→1，行上间距 4→2；角标行总增量
+    /// 22 → 约 17，省约 5pt，见文件底 r26 总账）。横屏 landscapeTitleTexts
+    /// 传 false，横屏一字不动；其余档传 false。
     @ViewBuilder
-    private var statusCapsules: some View {
+    private func statusCapsules(compactStyle: Bool) -> some View {
         if let message = store.errorMessage {
             Text(playFailureText(for: message))
                 .font(.system(size: PlayerTokens.textXs))
                 .foregroundStyle(Color.red.opacity(0.85))
-                .padding(.top, 4)
+                .padding(.top, compactStyle ? 2 : 4)
         } else if store.currentTrack != nil {
             HStack(spacing: 6) {
                 if let quality = store.actualQuality {
-                    statusCapsule(quality.displayName)
+                    statusCapsule(quality.displayName, compactStyle: compactStyle)
                 }
                 if store.currentTrack?.isTrial == true {
-                    statusCapsule("试听")
+                    statusCapsule("试听", compactStyle: compactStyle)
                 }
                 if store.isDemo {
-                    statusCapsule("演示音")
+                    statusCapsule("演示音", compactStyle: compactStyle)
                 }
             }
-            .padding(.top, 4)
+            .padding(.top, compactStyle ? 2 : 4)
         }
     }
 
-    private func statusCapsule(_ text: String) -> some View {
+    private func statusCapsule(_ text: String, compactStyle: Bool = false) -> some View {
         Text(text)
-            .font(.system(size: 11, weight: .medium))
+            .font(.system(size: compactStyle ? 10 : 11, weight: .medium))
             .foregroundStyle(PlayerTokens.playerForeground)
             .padding(.horizontal, 7)
-            .padding(.vertical, 2)
+            .padding(.vertical, compactStyle ? 1 : 2)
             .background(Color.white.opacity(0.16))
             .clipShape(Capsule())
     }
@@ -959,7 +997,8 @@ struct PlayerView: View {
                 .foregroundStyle(PlayerTokens.playerSub)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            statusCapsules
+            // r26：横屏 compactStyle 恒为 false（角标行不压缩，横屏一字不动）。
+            statusCapsules(compactStyle: false)
         }
     }
 
@@ -1000,7 +1039,8 @@ struct PlayerView: View {
 // 音量行，r25-B5 又只在 compact 默认/04 撤掉：该两档无角标歌词区实得 162、
 // 角标 140（B4 口径重算，见下段），其余档/变体以下面 r25-B4/B5 的数为准）。
 //
-// r25-B4/B5 音量行总账（B2 #4 遗留接线）：竖屏四变体都在控制行后加
+// r25-B4/B5 音量行总账（B2 #4 遗留接线；r26：该行已由 PlayerSecondRow
+// 原槽位替掉，见下段 r26 第二行总账）：竖屏四变体都在控制行后加
 // PlayerVolumeRow（行高 28 + 上间隙 8 = 36pt，从弹性歌词区扣；横屏总高
 // 402 已满，不放）；r25-B5 只在 compact 档默认/04 不渲染（02/06 与其余档
 // 保持现状；compact 上音量走系统音量键，与 r25 之前一致，不另开入口）。
@@ -1028,6 +1068,53 @@ struct PlayerView: View {
 //   有状态角标时实得 140 < 150，整列超高 10pt，进度条仍会被顶出屏底
 //   10pt（B4 时超高 24/46pt，B5 只治了无角标态，角标态如实记录，
 //   不硬塞）；歌词展开时封面 ×0.55 腾出约 104pt（compact），展开态不压破。
+//
+// r26 compact 角标溢出修复（只动竖屏默认/04 的 compact 档有角标态；
+// 详见 verification/r26-compact-check.md，四变体 × 有/无角标逐项算式）：
+// 旧算式（r25）：角标行增量 +22 = 间距 2 + 行上间距 4 + 胶囊 16
+//   （11pt 字行约 12 + 纵向 padding 2+2）；titleBlock 间距 8/10；
+//   固定段 505 + 22 = 527，歌词区实得 667 − 527 = 140 < 150，超高 10pt。
+// 新算式（r26，compact + 有状态行才生效）：
+//   (1) 角标行压缩（statusCapsules/statusCapsule 的 compactStyle）：
+//       胶囊字 11→10、纵向 padding 2→1（胶囊 16 → 约 13，省 3），
+//       行上间距 4→2（省 2）→ 角标行增量 22 → 约 17（省 5）；
+//   (2) titleBlock 间距收紧（titleBlockTopPadding / BottomPadding）：
+//       上 8→4（省 4）、下 10→4（省 6），合计省 10；
+//   (3) 合计省约 15pt：固定段 527 − 15 = 512，歌词区实得 667 − 512
+//       = 155 ≥ 150，整列 512 + 150 = 662 ≤ 667，余 5pt，进度条完整可见。
+//   失败原因行同款：行增量约 20（间距 2 + 上间距 4 + 12pt 字行约 14）
+//       → 约 18（上间距 4→2，省 2），加间距省 10 → 固定段约 513，
+//       歌词区实得约 154，余约 4pt，同样不溢出。
+//   无角标态：hasStatusRow 为假，全部走旧值（titleBlock 8/10、角标行
+//   不渲染），固定段仍是 505、歌词区实得 162，一字不动。
+//   02/06 compact：角标在小封面行里（landscapeTitleTexts，compactStyle
+//   恒 false，不压缩）——02 有角标固定段 321、歌词区 346；06 固定段 341、
+//   歌词区 326；r25 已过，本轮不动。
+//   横屏：landscapeTitleTexts 传 compactStyle: false，titleBlock 只在
+//   竖屏用，横屏总账与胶囊顶边 10pt 一字不动。
+//   注：有曲目但三个角标条件全不成立时 HStack 为空，仍有上间距 4 + 间距
+//   2 = 6pt 幽灵高（旧代码即如此），固定段 511、歌词区 156 ≥ 150，不
+//   溢出；本轮不碰（瞬态，曲目质量一到即有角标）。
+//
+// r26 第二行小图标（22:45 用户纠正，顶栏齿轮留着不动）：竖屏四变体里
+//   原来底部音量条的位置改放 PlayerSecondRow（随机 / 爱心 / 循环 /
+//   音量；主控行只留上一首/播放/下一首后，随机/爱心/循环改放这里；
+//   音量点开小滑杆就地调，复用 PlayerVolumeRow；顶栏返回 + 搜索 +
+//   齿轮原样保留，齿轮照旧进舞台/调舞台；横屏不放第二行，总高 402
+//   已满，横屏音量仍走系统音量键，与 r25 一致）。
+//   槽位账：第二行行高 28 + 上间隙 8 = 36pt，与被替掉的音量行完全
+//   同一槽位——standard / large / 02 / 06 各档总账一字不动（这些档
+//   原来就渲染音量行）；compact 默认/04 原来就不渲染音量行（r25-B5
+//   守卫），第二行沿用同一守卫，仍不渲染，总账仍是 r26 角标 fix 后的
+//   固定段 512、歌词区实得 155（有角标）/ 162（无角标），一字不动。
+//   守卫的代价（未遮掩，需定夺）：compact 默认/04（375×667）在主控行
+//   只留三键之后没有第二行，随机/爱心/循环/音量四键在该档无处可点
+//   （音量仍有系统音量键；其余三键无入口）。若在该档也加上第二行，
+//   固定段 512 + 36 = 548，歌词区实得 667 − 548 = 119 < 最小高 150，
+//   整列超高 31pt，进度条会被顶出屏底——r26 角标 fix 刚治好的问题
+//   会回来。定夺选项：(a) 接受该档无第二行（现状）；(b) 该档放宽
+//   歌词区最小高（动 PlayerTokens.lyricsZoneHeight，不在本轮）；
+//   (c) 该档另做 compact 方案。见 verification/r26-player-volume-check.md。
 //
 // 横屏总账（r22 重排；874×402，top 0；灵动岛在左/在右只扣 leading/trailing，
 // 不占高）：顶区 158.4（封面轨道 254×198/254×0.8；胶囊 44、歌名块 ≤80，

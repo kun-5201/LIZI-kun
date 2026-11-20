@@ -4,19 +4,18 @@ import UIKit
 /// 平台条：模板 v2（~/workspace/lizi-home-template-portrait.png /
 /// lizi-home-template-landscape.png）+ 壳版铺色面板顶部的 `.hall-plat__bar`。
 ///
-/// - 模板 v2 头行（一行三列，左→右）：当前来源标题（「每日推荐」，
+/// - 模板 v2 头行（一行三列，左→右）：标题（「每日推荐」，
 ///   24pt 粗体——模板量：4 字占 92pt；壳版 `.pstrip__name` 是 13px，
 ///   模板把面板标题放大了，按已确认的模板做；要改回 13pt 改一行。
-///   文本取 `Source.title(for:)`：每日推荐 / 精选 / 喜欢（按平台取真名）
-///   / 我收藏的歌单 / 电台——壳版里左列根段默认就是「每日推荐」
-///   （app.js `paintPlatBar` 注释 + `.pstrip__name.is-src`），
-///   模板与壳版根段 precedent 一致）→ 7 个平台图标（22pt、间距 5，
+///   r26（用户 2026-11-20 22:39–22:40）：首页 5 个来源 chips 全删、
+///   只留每日推荐，标题不再跟来源切换走，固定就是「每日推荐」）
+///   → 7 个平台图标（22pt、间距 5，
 ///   模板量：每块 22×22、间距 5；壳版 `.pstrip__i` 是 32px，
 ///   模板把图标收小了才放得下大标题 + 搜索）→ 搜索
 ///   （壳版 `.pstrip__search` 在长条右列；模板右端也有放大镜）。
 /// - 图标 22pt、圆角 28%（≈6pt），选中描 2pt 墨色圈（壳版
 ///   `0 0 0 2px currentColor`；原生浅色面板上 currentColor 就是墨色）。
-///   图标下不再挂名字（名字只在左列出现一次——现在是来源标题）。
+///   图标下不再挂名字（名字只在左列出现一次——现在是「每日推荐」标题）。
 /// - 不横向滚动：图标太宽时只收图标（壳版 `fitPlatBar`，缩放下限 0.55，
 ///   标题不动）；标题宽用 PreferenceKey 实测，初值按最长标题
 ///   「我喜欢的音乐」估 144，避免第一帧按 0 算出满宽溢出。
@@ -29,8 +28,8 @@ import UIKit
 ///   未登录图标壳版是 opacity .45（`.pstrip__i.is-off`）；原生首页
 ///   平台条图标仍一律全亮度、不按登录态明暗区分（r22j 驱动 3h 的原决定，
 ///   现状仍如此）。登录本身已不是 P4：登录底座 r23 已落地
-///   （`LoginStore` / `LoginSheetView`），登录态由 HomeView 的登录提示
-///   与设置页账号行消费，不由平台条图标表达。
+///   （`LoginStore` / `LoginSheetView`），登录态由设置页账号行消费，
+///   不由平台条图标表达。
 /// - 图标渲染：真 logo（`Assets.xcassets` 里的 `Platform<Name>` imageset，
 ///   由 `public/assets/platforms/*.svg` 渲染成 48/96/144 PNG）。图标本身自带圆角
 ///   底色与字形，这里只按 22pt 框定、描选中圈；不联网拉图。品牌色 +
@@ -46,16 +45,10 @@ struct PlatformStripView: View {
     /// 右端搜索钮用（模板 v2 + 壳版 `.pstrip__search`）。
     @EnvironmentObject private var nav: AppNavigation
 
-    /// 当前来源标题实测宽（PreferenceKey 回写；初值 144 = 最长标题
-    /// 「我喜欢的音乐」6 字 × 24pt 预估）。
-    @State private var nameWidth: CGFloat = 144
+    /// 标题实测宽（PreferenceKey 回写；初值 100 = 「每日推荐」4 字 × 24pt 预估）。
+    @State private var nameWidth: CGFloat = 100
 
-    /// 当前来源标题（模板 v2 头行左列；喜欢按平台取真名）。
-    /// r22j 原来是当前平台名；模板 v2 左列是「每日推荐」（来源标题），
-    /// 平台名改由选中圈 + 面板底色表示（见 HomeView 文件头）。
-    private var sourceTitle: String {
-        viewModel.selectedSource.title(for: viewModel.selectedPlatform)
-    }
+    /// 面板标题：固定「每日推荐」（r26：来源 chips 已删，不再跟来源切换走）。
 
     /// r22j 平台管理：平台条只显示设置 → 平台管理勾选的平台（顺序不变，
     /// 仍是 `LiziPlatforms.all` 的顺序）；不勾选的不显示。没存 = 全部
@@ -83,7 +76,7 @@ struct PlatformStripView: View {
         GeometryReader { geo in
             let scale = barScale(totalWidth: geo.size.width)
             HStack(spacing: 12) {
-                Text(sourceTitle)
+                Text("每日推荐")
                     .font(.liziBody(size: 24, weight: .bold))
                     .foregroundColor(LiziTokens.ink)
                     .lineLimit(1)
@@ -123,7 +116,7 @@ struct PlatformStripView: View {
 }
 
 private struct PlatBarNameWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 144
+    static var defaultValue: CGFloat = 100
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
     }

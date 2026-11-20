@@ -15,7 +15,7 @@ import UniformTypeIdentifiers
 ///    r23b–e 填）；已登录 → 进 `AccountDetailView`（昵称/头像/VIP 状态 +
 ///    「退出登录」，退出前二次确认，走 `LoginStore.logout`）。
 ///    登录态以 `LoginStore` 为准（与 `platformAccounts()` 同源，见
-///    `LoginPromptView.swift` 文件头的 r23a 接口约定）；设置页出现时
+///    `LoginSheetTarget.swift` 文件头的 r23a 接口约定）；设置页出现时
 ///    调 `LoginStore.refresh()`，登录/登出成功后底座发布变化、账号行
 ///    立即重绘。切台不碰登录态（`selectPlatform` 五步原样，一个字不动）。
 /// 2. 自定义源管理：LXSourceRegistry 已有存储，列表/添加（URL + 本地文件）
@@ -50,7 +50,7 @@ struct SettingsView: View {
     @EnvironmentObject var playback: PlaybackStore
     @StateObject private var settings = SettingsStore()
     /// r23f：登录底座（r23a，`Views/Login/`）——设置页只消费它的接口
-    /// （约定见 `LoginPromptView.swift` 文件头）；登录/登出成功后它发布
+    /// （约定见 `LoginSheetTarget.swift` 文件头）；登录/登出成功后它发布
     /// 变化，账号行随之重绘。未落地前本引用编译不过（见 r23f 驱动 GAP）。
     @ObservedObject private var loginStore = LoginStore.shared
 

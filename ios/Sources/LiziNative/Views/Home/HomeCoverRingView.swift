@@ -130,6 +130,72 @@ import UIKit
 ///   尺寸仍按视频实测（平面卡 0.51vw、环卡 0.39vw）。
 /// - 约束（用户长期规则）：全程不加任何捏合/双击缩放手势；只旋转与
 ///   展开/收回。横屏竖屏同一套（尺寸按 tier 分档，与朝向无关）。
+///
+/// r26（2026-11-20，首页自动滚动修复：22:29 真机截图，正在播《半岛铁盒》，
+/// 首页没有任何一处在自己动）：
+/// - 断点（两处，都是跑马带驱动，不是速度值——默认速度验算 21.84pt/s，
+///   约等于 22pt/s 定稿，没错）：
+///   1. 驱动是 View 结构体的 `Timer.publish(...).autoconnect()` +
+///      `.onReceive`：每次 body 重算（跑马带自己每 1/30s 改一次
+///      flatOffsetX、播放进度每 0.25s 推一次）都造一个新 publisher
+///      并重新订阅，33ms 倒计时反复重启，计时器可能永远等不到触发。
+///      截图里带子只走了约 1s 的量（约 19–35pt，首卡「半岛铁盒」被
+///      截成「铁盒」）就冻住，与这条对得上。
+///   2. r24 把 `flatDragging = true` 从「横向判向后」提前到
+///      `stripTouchBegan`（pan .began，任何一根移动的手指都停带）：
+///      停带的入口变多了，清掉的出口却只有 stripTouchEnded——识别器
+///      走 `.failed`、触摸被系统取消、触摸层中途被拆（数据重载切分支、
+///      旋转换竖横分支）时，ended 到不了模型，旗子永远卡住，带子
+///      永远停；没有任何别的写点能清它。
+/// - 修法（只动本文件）：驱动改成模型自持的 30Hz Timer（一次创建、
+///   `.common` 模式，页面滚动时也走），不随 body 重建；`flatDragging`
+///   的出口补齐（pan `.failed`、touchesCancelled、触摸层被移除），
+///   再加 10s 看门狗兜底；模型释放时 deinit 停表（RunLoop 强持 Timer，
+///   切页重建 HomeView 会漏 Timer，不停每回首页漏一个 30Hz 空转 Timer）；
+///   tickFlat 的步进、回卷、初画 2.5s、松手 1.0s、收回 0.22s、速度公式
+///   一律不动；环本身不加自动转。
+///
+/// r26-3D（2026-11-20，3D 显示修复：22:29 截图 + 用户 22:31/22:33）：
+/// 逐帧对照 02:53 视频 + 壳版 ring.js/ring.css/m.css 之后改的三处（另两处
+/// 是核对结论，只写文档不改代码；详见 verification/r26-3d-check.md）：
+/// 1. 内容跟来源走（壳版行为）：环/跑马带不再队列优先——内容永远是当前
+///    平台的每日推荐（`tracks == dailyTracks`）。r20 的队列优先让切平台后
+///    首屏看不到变化（22:29 截图：精选 chip 选中，面板里仍是队列的两张卡；
+///    r26 来源删除工人的旧排查结论同款结构问题）：壳版 `ringItems()` 永远
+///    是当前来源 S.items，`applyResult` 每次切平台/切来源都 `setItems`；
+///    Hero 永远是当前播放那首（`applyResult` 注释原话），与带子无关。
+///    点环卡/平面卡 = `setQueue(daily, startAt:)`（壳版 `activate(i)` 同款，
+///    按下标播，重复曲目也不会播成第一张；r25 U6e 的环内 queueId 分支随
+///    队列模式一起退役，见 verification/r25.cjs 的 U6e 更新说明；
+///    U6a–U6d 的 play(queueItem:) 应用点——播放器队列行、封面流——不动）。
+///    每日为空时诚实空态（壳版 ringMsg「这一层没有内容」同款），不拿队列顶。
+/// 2. 当前播的歌在环中间（用户 22:33 原话）：开环锚点 = 在播曲目在当前
+///    列表里的下标（在才用；不在——比如从搜索播的歌不在每日里——回落手指
+///    卡/正中卡，即壳版/视频的锚点规则）。壳版与视频的锚点是手指卡
+///    （nearestFlatIdx），本条按用户最新指令改了锚点规则；拖动连续性不变
+///    （开环角仍从 0 起、ringStartX 仍是手指 x，继续拖就是转环）。
+/// 3. 相机 -5° 下坠 + 环中心上下限（ring.js openRing / renderRing）：
+///    原生之前把环卡排在 z=0 的平面上、容器 rotateX(-5°) 实际不产生下坠；
+///    壳版相机 `translateZ(-R) rotateX(-5°)` 让正前方卡片下坠 R·sin5°
+///    （标准档约 20pt；视频实测环中心比带中心低约 28–33pt，公式值 20pt，
+///    残差在量取误差内）。本轮按槽位逐卡加下坠 `R·cos(world)·sin5°`，
+///    点按命中同步用同一纵坐标。环中心另按 ring.js 上下限夹取
+///    （顶栏底 + 卡高×0.55 + 12 / 屏底 − 卡高×0.55 − 52 − 下坠），
+///    带子被滚到屏顶附近时环不再顶到顶栏/灵动岛底下；平时不触发。
+/// 核对结论（不改代码）：① 22:29 截图里环不是没渲染——平面带在、环是
+/// 默认收起态；看不见的是唯一可见入口（提示行 +「展开 3D 环」按钮），
+/// r25 时 chips 占 40pt 把它顶出屏底，chips 删除后（当前树）竖屏默认
+/// 面板 382、竖滑区 312 > 内容 285，入口可见（2–27pt 余量，见驱动）；
+/// ② 视频逐帧几何（平面卡 0.51vw、环卡 0.39vw、槽距 40°、无倒影、左对齐
+/// 歌名+歌手、提示原字、变暗 0.59/0.38 倍）与原生实现逐项对得上，不改；
+/// ③ 视频是平圆柱——各卡顶边齐平（±15px 量取噪声），不是 Android 包里
+/// 2026-11-13 的螺旋版（相邻槽抬 1/3 卡高）；当前壳版 ring.js 也是平圆柱，
+/// 原生不做螺旋。④ 壳版与视频的卡尺寸互不一致：视频环卡 0.39vw、
+/// 手机 ring.js 公式 0.24vw（96.5pt）、手机 m.css 平面卡 16vw（64pt，
+/// 环视口最高 196pt）——原生跟视频（r21 已定），见核对文档。
+/// ⑤ 平面带在外层 ScrollView 的内容流里（面板 → 外层竖滑），竖滑页面时
+/// 跟着走、不滞留；展开态环是全屏固定覆盖层（壳版 .mring position:fixed
+/// 同款，按 stripCenter 锚到带子原位置），环本身不自动转。
 
 // MARK: - 状态机
 
@@ -145,7 +211,9 @@ final class HomeCoverRingModel: ObservableObject {
     // MARK: 输入（HomeCoverRingView 从调用方同步进来）
 
     @Published var dailyTracks: [Track] = []
-    @Published var queueTracks: [Track] = []
+    /// 在播曲目的身份键（`platform:id`；r26-3D 开环锚点用，不驱动渲染，
+    /// 故不用 @Published；调用方经 syncInputs 同步 playback.currentTrack）。
+    var playingKey: String?
     @Published var isLoadingDaily = false
     @Published var dailyEmptyReason: String?
     @Published var marqueeSpeed: CGFloat = 24
@@ -157,6 +225,20 @@ final class HomeCoverRingModel: ObservableObject {
     @Published var flatSetWidth: CGFloat = 0
     @Published var flatDragging = false
     @Published var flatDwellUntil = Date().addingTimeInterval(2.5)
+    /// 平面带按压开始的时间（非 Published：只给 tickFlat 的看门狗读）。
+    var flatDraggingSince: Date?
+    /// 平面跑马带驱动（r26，见文件头）：模型自持的 30Hz Timer，一次创建、
+    /// `.common` 模式；block 只持 weak self。模型释放时 deinit 停表——
+    /// Timer 经 RunLoop.main.add 后由 RunLoop 强持有，模型走了它不会跟着
+    /// 走；HomeView 每次切页回来都重建（RootView `.home` 分支新建
+    /// HomeView → 新 HomeCoverRingModel），不停表就会每回首页漏一个
+    /// 30Hz 空转 Timer（每 33ms 空跑一个 Task）。
+    private var flatTimer: Timer?
+
+    /// 模型走时停掉自己的 Timer（r26 补，见上面 flatTimer 注释）：
+    /// 不停，RunLoop 会一直强持它空转；停了，下次回首页新模型重新
+    /// startFlatTimer，不影响跑马带恢复。
+    deinit { flatTimer?.invalidate() }
     /// 平面带上的按压判定（非 Published：只在手势闭包里读写，不驱动渲染）。
     var stripPress: StripPress?
 
@@ -214,20 +296,34 @@ final class HomeCoverRingModel: ObservableObject {
     static let closeResumeMs: Double = 220       // 收回后多久恢复自动走
     static let swipeDownExit: CGFloat = 90       // 环里下滑超 90px 退出
 
-    // MARK: 内容（队列优先、每日兜底）
+    // MARK: 内容（r26-3D：永远是当前平台的每日推荐；队列优先已删）
 
-    var useQueue: Bool { !queueTracks.isEmpty }
+    /// r26-3D：环/跑马带的内容 = 当前平台的每日推荐（壳版 `ringItems()` =
+    /// 当前来源 S.items，`applyResult` 每次切平台/切来源都 `setItems`）。
+    /// r20 的「队列优先、每日兜底」已删：它让切平台后首屏看不到变化
+    /// （播过歌后每日在面板里让位给队列，22:29 截图的结构问题；面板标题
+    /// 就是「每日推荐」，带子却不是每日内容）。切平台 → daily 变 →
+    /// syncInputs 换内容；播歌不改变带子内容（Hero 才是当前播放那首，
+    /// 壳版 `applyResult` 注释原话）；点卡播歌整份每日进队列（见 playTrack）。
+    var tracks: [Track] { dailyTracks }
 
-    var tracks: [Track] { useQueue ? queueTracks : dailyTracks }
+    /// 在播曲目在当前列表里的下标（开环锚点用；不在列表里回 nil，
+    /// 开环回落手指卡/正中卡）。
+    var playingIndex: Int? {
+        guard let key = playingKey else { return nil }
+        return tracks.firstIndex { $0.platform + ":" + $0.id == key }
+    }
 
-    /// 调用方数据同步进来；曲目 id 集合变了（切台/重拉）才重置，
-    /// 点歌进队列不改变 id 集合，不重置（壳版 setItems 同款语义）。
-    func syncInputs(daily: [Track], queue: [Track], isLoading: Bool,
-                    emptyReason: String?, speed: CGFloat,
+    /// 调用方数据同步进来；曲目 id 集合变了（切平台/重拉）才重置
+    /// （壳版 setItems 同款语义）。
+    func syncInputs(daily: [Track], isLoading: Bool,
+                    emptyReason: String?, playing: Track?,
+                    speed: CGFloat,
                     tier: PlayerTokens.PlayerSizeTier) {
+        startFlatTimer()
         let oldIDs = tracks.map(\.id)
         dailyTracks = daily
-        queueTracks = queue
+        playingKey = playing.map { $0.platform + ":" + $0.id }
         isLoadingDaily = isLoading
         dailyEmptyReason = emptyReason
         marqueeSpeed = speed
@@ -287,7 +383,35 @@ final class HomeCoverRingModel: ObservableObject {
 
     // MARK: 平面跑马带
 
+    /// 驱动只建一次（幂等；syncInputs 首行即调，首个 sync 就是 onAppear）。
+    /// r26：不用 View 结构体的 `Timer.publish(...).autoconnect()`——它每次
+    /// body 重算都重建 publisher 并重新订阅，33ms 倒计时反复重启，计时器
+    /// 可能永远等不到触发（r25 的断点 1，见文件头）。模型自持 Timer 不随
+    /// body 重建；`.common` 模式：页面滚动（tracking mode）时也照走，
+    /// 与旧 publisher 的 `.common` 同款。`Task { @MainActor in }` 跳主
+    /// 线程调 tickFlat（与 closeRing / scheduleHoldClose 同款写法）。
+    func startFlatTimer() {
+        guard flatTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tickFlat() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        flatTimer = timer
+    }
+
     func tickFlat() {
+        // r26 看门狗：flatDragging 只由 stripTouchBegan 置起、只由
+        // stripTouchEnded 清掉；一旦某次触摸的 ended 没走到模型（识别器
+        // .failed、触摸被系统取消、触摸层中途被拆掉），旗子就永远卡住、
+        // 跑马带永远停——22:29 截图就是这副样子（走了约 1s 的量后冻住）。
+        // 手指按住不动 10s 不是真实拖动，超时直接清掉、让带子恢复；
+        // 环开着时本函数仍被 ringPhase 挡住，不会误走。
+        if flatDragging, let since = flatDraggingSince,
+           Date().timeIntervalSince(since) > 10 {
+            flatDragging = false
+            flatDraggingSince = nil
+            stripPress = nil
+        }
         guard !tracks.isEmpty, flatSetWidth > 0, !flatDragging,
               ringPhase == .closed, Date() >= flatDwellUntil else { return }
         flatOffsetX = normalizedFlat(flatOffsetX - marqueeSpeed / 30)
@@ -334,6 +458,7 @@ final class HomeCoverRingModel: ObservableObject {
     func stripTouchBegan(x: CGFloat, y: CGFloat) {
         guard ringPhase == .closed else { return }
         flatDragging = true
+        flatDraggingSince = Date()
         stripPress = StripPress(
             startX: x, startY: y, decided: .undecided
         )
@@ -397,6 +522,7 @@ final class HomeCoverRingModel: ObservableObject {
     func stripTouchEnded() {
         defer { stripPress = nil }
         flatDragging = false
+        flatDraggingSince = nil
         if ringPhase == .open {
             ringDragEnded()
             return
@@ -415,9 +541,13 @@ final class HomeCoverRingModel: ObservableObject {
     /// - `beginDrag: false`（入口按钮点按）：只展开、不接管手指；下一根
     ///   手指落在覆盖层上时由覆盖层手势重新 `ringDragStart`（liziHome 坐标，
     ///   与本轮的 `ringStartX` 不混用——一根拖动内的 x 必须同一坐标系）。
+    /// - 锚点（r26-3D，用户 22:33「当前播的歌在环中间」）：在播曲目在当前
+    ///   列表里时锚点就是它（`playingIndex`），手指卡/`anchor` 参数只在
+    ///   在播曲目不在列表里时用（回落壳版/视频的手指卡规则）。拖动连续性
+    ///   不变：开环角仍从 0 起、ringStartX 仍是手指 x，继续拖就是转环。
     func openRing(anchor: Int, atX x: CGFloat, atY y: CGFloat = 0, beginDrag: Bool = true) {
         guard ringPhase == .closed, !tracks.isEmpty else { return }
-        anchorIndex = tracks.indices.contains(anchor) ? anchor : 0
+        anchorIndex = playingIndex ?? (tracks.indices.contains(anchor) ? anchor : 0)
         angle = 0
         entryT = 0
         closeT = 0
@@ -564,33 +694,17 @@ final class HomeCoverRingModel: ObservableObject {
 
     // MARK: 点播
 
-    /// 点卡片播歌：队列模式按 queueId 播（r25-B7 新写），每日模式整份
-    /// 进队列从点中的起播（壳版 playQueue(items, i, true) 同款）。
-    ///
-    /// 队列模式：模型只持 [Track]，queueTracks 由调用方从 store.queue
-    /// 按顺序 map 出 track 同步进来（HomeCoverRingView.sync 传
-    /// playback.queue.map { $0.track }），同下标一般就是同一项——先核对
-    /// store.queue[index] 与 tracks[index] 的身份（id + platform）一致
-    /// 就播该 queueItem；不一致（点按与队列变化之间的竞态）时退回在
-    /// store.queue 里找第一个 id+platform 匹配的 queueItem 播；都找不
-    /// 到再退回 store.play(tracks[index])。这样队列里同一首歌出现两次
-    /// 时，点第二张播的就是第二张，不再播成第一张。
+    /// 点卡片播歌（r26-3D）：整份每日进队列、从点中的起播
+    /// （壳版 `activate(i)` / `playQueue(items, i, true)` 同款）。
+    /// 按下标播：`setQueue` 整队 map 成 QueueItem、currentIndex = index，
+    /// 同一首歌在每日里出现两次时点第二张播的就是第二张（r25 U6 的
+    /// 按下标/按 queueId 定位，在这里由 setQueue 的下标保证；环内
+    /// queueId 分支随队列模式一起退役——环不再显示队列，见文件头 r26-3D；
+    /// U6a–U6d 的 play(queueItem:) 应用点——播放器队列行、封面流——不动，
+    /// 见 verification/r25.cjs 的 U6e 更新说明）。
     func playTrack(at index: Int, store: PlaybackStore) {
         guard tracks.indices.contains(index) else { return }
-        if useQueue {
-            let wanted = tracks[index]
-            if store.queue.indices.contains(index),
-               store.queue[index].track.id == wanted.id,
-               store.queue[index].track.platform == wanted.platform {
-                store.play(queueItem: store.queue[index])
-            } else if let item = store.queue.first(where: { $0.track.id == wanted.id && $0.track.platform == wanted.platform }) {
-                store.play(queueItem: item)
-            } else {
-                store.play(tracks[index])
-            }
-        } else {
-            store.setQueue(tracks, startAt: index)
-        }
+        store.setQueue(tracks, startAt: index)
     }
 
     /// 点环卡：播歌 + 收回环（壳版 selectItem 同款）。
@@ -664,21 +778,53 @@ final class HomeCoverRingModel: ObservableObject {
         3.2 / (3.2 + (1 - facing))
     }
 
+    /// 相机 -5° 下坠（r26-3D，壳版 camera `translateZ(-R) rotateX(-5°)`）：
+    /// 正前方卡片的 z = R，绕 X 轴 -5° 后纵向掉 R·sin5°（标准档约 20pt；
+    /// 视频实测环中心比带中心低约 28–33pt，公式值 20pt，残差在量取误差内）。
+    /// 某槽位的 z = R·cos(world) = R·facing，下坠跟着 facing 走；
+    /// 原生之前把环卡排在 z=0 的平面上、容器 rotateX(-5°) 实际不产生下坠，
+    /// 环整体比视频高约 20pt。展开/收回中跟有效半径走（R 收缩时下坠同缩）。
+    func tiltDrop(facing: CGFloat) -> CGFloat {
+        effectiveRadius() * facing * sin(5 * .pi / 180)
+    }
+
+    /// 环中心纵坐标（r26-3D，壳版 openRing 的 cy 上下限，原样照搬）：
+    /// 默认带子中心（stripCenter 还没量到时回落屏高 ×0.62，r24 同款）；
+    /// 上限 = 顶栏底 + 卡高×0.55 + 12，下限 = 屏底 − 卡高×0.55 − 52 − 下坠
+    /// （下坠取满半径 R·sin5°，与壳版 tiltDrop 同值）。
+    /// 平时带子在屏中部不触发；带子被滚到屏顶附近才把环往下夹，不再顶到
+    /// 顶栏/灵动岛底下。`topEdge` = 顶栏底边（HomeView 顶栏：竖屏 31+64、
+    /// 横屏 0+64，调用方传）。
+    func ringCenterY(screenHeight: CGFloat, topEdge: CGFloat) -> CGFloat {
+        var cy = stripCenter.y > 0 ? stripCenter.y : screenHeight * 0.62
+        let minCy = topEdge + ringCardHeight * 0.55 + 12
+        let maxCy = screenHeight - ringCardHeight * 0.55 - 52
+            - ringRadius * sin(5 * .pi / 180)
+        cy = max(cy, minCy)
+        cy = min(cy, maxCy)
+        if cy < minCy { cy = minCy }
+        return cy
+    }
+
     /// 点按命中：取包含该点、离正前方最近的卡（ring.js onPressUp 点选同款，
     /// 用包围盒近似旋转后的卡）。
     /// r24：纵向锚点与 ringLayer 同款回落——stripCenter 还没量到时
     /// （如按钮在布局前被点到）用屏高 ×0.62，不再拿 y=0 去比（那会让
     /// 点卡永远判空）；screenHeight 不传时回落 0，即只信 stripCenter。
-    func hitTestRingCard(at point: CGPoint, screenWidth: CGFloat, screenHeight: CGFloat? = nil) -> Int? {
+    /// r26-3D：纵坐标与 ringLayer 用同一个 `ringCenterY`（含上下限夹取），
+    /// 再按槽位加各自的 `tiltDrop`（-5° 下坠，越靠两侧越小），命中盒与
+    /// 眼睛看到的卡片位置一致；不加下坠时前排卡的命中盒会比实物高 20pt。
+    func hitTestRingCard(at point: CGPoint, screenWidth: CGFloat, screenHeight: CGFloat? = nil, topEdge: CGFloat = 95) -> Int? {
         let cx = screenWidth / 2
-        let cy = stripCenter.y > 0 ? stripCenter.y : (screenHeight ?? 0) * 0.62
+        let cy = ringCenterY(screenHeight: screenHeight ?? 0, topEdge: topEdge)
         let r = effectiveRadius()
         var best: (index: Int, world: CGFloat)?
         for slot in visibleSlots() {
             let x = cx + r * sin(slot.world * .pi / 180)
+            let slotCy = cy + tiltDrop(facing: facing(forWorld: slot.world))
             let halfW = ringCard * 0.55
             let halfH = ringCardHeight / 2
-            if abs(point.x - x) <= halfW, abs(point.y - cy) <= halfH {
+            if abs(point.x - x) <= halfW, abs(point.y - slotCy) <= halfH {
                 if best == nil || abs(slot.world) < abs(best!.world) {
                     best = (slot.trackIndex, slot.world)
                 }
@@ -722,8 +868,6 @@ struct HomeCoverRingView: View {
     /// 尺寸档（调用方按实测屏宽经 `PlayerTokens.sizeTier(for:topInset:)` 传入）。
     var tier: PlayerTokens.PlayerSizeTier = .standard
 
-    private let timer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
-
     var body: some View {
         Group {
             if model.tracks.isEmpty {
@@ -743,21 +887,24 @@ struct HomeCoverRingView: View {
         }
         .onAppear { sync() }
         .onChange(of: dailyTracks.map(\.id)) { _ in sync() }
-        .onChange(of: playback.queue.map { $0.track.id }) { _ in sync() }
+        .onChange(of: playback.currentTrack) { _ in sync() }
         .onChange(of: isLoadingDaily) { _ in sync() }
         .onChange(of: dailyEmptyReason) { _ in sync() }
         .onChange(of: marqueeSpeed) { _ in sync() }
         .onChange(of: tier) { _ in sync() }
-        .onReceive(timer) { _ in model.tickFlat() }
         .accessibilityLabel("封面环")
     }
 
+    /// r26-3D：只同步每日推荐 + 在播曲目（开环锚点用）；队列不再同步
+    /// （环不再显示队列，播歌不改变带子内容；切平台 → daily 变 → sync
+    /// 换内容）。`playback.currentTrack` 变了才重算在播键——切歌不重置
+    /// 带子（id 集合没变，syncInputs 里不重置、不关环）。
     private func sync() {
         model.syncInputs(
             daily: dailyTracks,
-            queue: playback.queue.map { $0.track },
             isLoading: isLoadingDaily,
             emptyReason: dailyEmptyReason,
+            playing: playback.currentTrack,
             speed: marqueeSpeed,
             tier: tier
         )
@@ -957,7 +1104,9 @@ struct HomeRingOverlayView: View {
                 // 下滑退出（ring.js onOverlayDown + window pointer 监听同款）。
                 // 旧的 SwiftUI DragGesture + onTapGesture 已删（第 4 件根因：
                 // 两者叠在同一视图上，真机上拖动到不了模型）。
-                RingTouchView(model: model) { idx in
+                // r26-3D：topEdge 与 ringLayer 同值（顶栏底边），命中测试用
+                // 同一个 ringCenterY，点按盒与眼睛看到的卡片位置一致。
+                RingTouchView(model: model, topEdge: geo.size.width > geo.size.height ? 64 : 95) { idx in
                     model.tapRingCard(trackIndex: idx, store: playback)
                 } onTapBlank: {
                     model.closeRing(quick: true)
@@ -988,8 +1137,12 @@ struct HomeRingOverlayView: View {
 
     /// 圆柱环：容器框在环中心（平面带中心），卡按世界角排布；
     /// 容器整体 rotateX(-5°)（壳版 camera 同款），转轴就是环中心。
+    /// r26-3D：纵向锚点走 `ringCenterY`（ring.js 上下限夹取）；每张卡再
+    /// 下坠各自的 `tiltDrop`（相机 -5°，正前方约 20pt、两侧渐小）——
+    /// 原生之前 z=0 平面排布、容器旋转不产生下坠，环整体比视频高约 20pt。
     private func ringLayer(screenWidth: CGFloat, screenHeight: CGFloat) -> some View {
-        let cy = model.stripCenter.y > 0 ? model.stripCenter.y : screenHeight * 0.62
+        let topEdge: CGFloat = screenWidth > screenHeight ? 64 : 95
+        let cy = model.ringCenterY(screenHeight: screenHeight, topEdge: topEdge)
         let cx = screenWidth / 2
         let r = model.effectiveRadius()
         let cam = model.cameraScale()
@@ -1010,7 +1163,7 @@ struct HomeRingOverlayView: View {
                     perspective: 0.5
                 )
                 .opacity(model.facingOpacity(facing: facing))
-                .position(x: x, y: model.ringCardHeight / 2)
+                .position(x: x, y: model.ringCardHeight / 2 + model.tiltDrop(facing: facing))
                 .zIndex(Double(100 - abs(slot.world)))
                 .accessibilityLabel("播放：\(track.title)")
             }
@@ -1178,8 +1331,36 @@ final class StripTouchUIView: UIView, UIGestureRecognizerDelegate {
             }
         case .ended, .cancelled:
             model.stripTouchEnded()
+        case .failed:
+            // r26：识别器认出手势失败（began 之后极少见，但一旦发生，
+            // 之前 began 置起的 flatDragging 必须清掉，否则跑马带永远停；
+            // began 没走过时 flatDragging 是 false，不调 stripTouchEnded，
+            // 免得白白把 dwell 推后 1s）。
+            if model.flatDragging {
+                model.stripTouchEnded()
+            }
         default:
             break
+        }
+    }
+
+    /// r26：系统取消触摸（来电、锁屏、控制中心等）：识别器一般会跟着走
+    /// .cancelled，但万一没走到，原始取消也必须把 flatDragging 清掉，
+    /// 否则跑马带永远停。
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesCancelled(touches, with: event)
+        if model?.flatDragging == true {
+            model?.stripTouchEnded()
+        }
+    }
+
+    /// r26：触摸层被拆掉（数据重载切分支、旋转换竖横分支）时，正在进行的
+    /// 手势随视图一起死，ended 再也不会来；移除瞬间把 flatDragging 清掉，
+    /// 否则新挂上的带子继承一面永远卡住的旗子、跑马带永远停。
+    override func willMove(toSuperview newSuperview: UIView?) {
+        super.willMove(toSuperview: newSuperview)
+        if newSuperview == nil, model?.flatDragging == true {
+            model?.stripTouchEnded()
         }
     }
 
@@ -1209,6 +1390,9 @@ final class StripTouchUIView: UIView, UIGestureRecognizerDelegate {
 /// liziHome 坐标用（ringDragStart / hitTestRingCard 的入参）。
 struct RingTouchView: UIViewRepresentable {
     @ObservedObject var model: HomeCoverRingModel
+    /// 顶栏底边（r26-3D：命中测试与 ringLayer 用同一个 ringCenterY；
+    /// HomeRingOverlayView 按横竖屏传 64/95，与 ringLayer 同值）。
+    var topEdge: CGFloat = 95
     var onTapCard: (Int) -> Void
     var onTapBlank: () -> Void
 
@@ -1216,6 +1400,7 @@ struct RingTouchView: UIViewRepresentable {
     func makeUIView(context: Context) -> RingTouchUIView {
         let view = RingTouchUIView()
         view.model = model
+        view.topEdge = topEdge
         view.onTapCard = onTapCard
         view.onTapBlank = onTapBlank
         return view
@@ -1224,6 +1409,7 @@ struct RingTouchView: UIViewRepresentable {
     @MainActor
     func updateUIView(_ uiView: RingTouchUIView, context: Context) {
         uiView.model = model
+        uiView.topEdge = topEdge
         uiView.onTapCard = onTapCard
         uiView.onTapBlank = onTapBlank
     }
@@ -1233,6 +1419,7 @@ struct RingTouchView: UIViewRepresentable {
 @MainActor
 final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
     weak var model: HomeCoverRingModel?
+    var topEdge: CGFloat = 95
     var onTapCard: ((Int) -> Void)?
     var onTapBlank: (() -> Void)?
 
@@ -1327,7 +1514,7 @@ final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
         guard let model, recognizer.state == .ended else { return }
         guard model.ringPhase == .open else { return }
         let location = recognizer.location(in: self)
-        if let idx = model.hitTestRingCard(at: location, screenWidth: bounds.width, screenHeight: bounds.height) {
+        if let idx = model.hitTestRingCard(at: location, screenWidth: bounds.width, screenHeight: bounds.height, topEdge: topEdge) {
             onTapCard?(idx)
         } else {
             onTapBlank?()

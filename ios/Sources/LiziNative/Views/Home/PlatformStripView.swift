@@ -20,12 +20,17 @@ import UIKit
 /// - 不横向滚动：图标太宽时只收图标（壳版 `fitPlatBar`，缩放下限 0.55，
 ///   标题不动）；标题宽用 PreferenceKey 实测，初值按最长标题
 ///   「我喜欢的音乐」估 144，避免第一帧按 0 算出满宽溢出。
-/// - 顺序与壳版 hall/accounts.js 注册表一致：
-///   网易云 / QQ 音乐 / 汽水 / 波点 / 酷我音乐 / Apple Music。
+/// - 顺序与壳版 hall/accounts.js 注册表一致（7 个）：
+///   网易云 / QQ 音乐 / 酷狗 / 汽水 / 波点 / 酷我音乐 / Apple Music。
+///   酷狗走 Folia 实现：登录是 Folia 移植（`FoliaKugouLoginView`，
+///   `kugouProvider.ts` auth），取链 / 每日推荐走 `/api/kugou/*`
+///   Folia 接口（`NativeBridge` 里 kugou 分支）。
 /// - 切台只换数据、不拆音频（见 HomeViewModel.selectPlatform 注释）。
 ///   未登录图标壳版是 opacity .45（`.pstrip__i.is-off`）；原生首页
-///   没有接登录态（登录是 P4），不编假登录态——图标一律全亮度，
-///   登录态接进来之前不做明暗区分（见 r22j 驱动 3h）。
+///   平台条图标仍一律全亮度、不按登录态明暗区分（r22j 驱动 3h 的原决定，
+///   现状仍如此）。登录本身已不是 P4：登录底座 r23 已落地
+///   （`LoginStore` / `LoginSheetView`），登录态由 HomeView 的登录提示
+///   与设置页账号行消费，不由平台条图标表达。
 /// - 图标渲染：真 logo（`Assets.xcassets` 里的 `Platform<Name>` imageset，
 ///   由 `public/assets/platforms/*.svg` 渲染成 48/96/144 PNG）。图标本身自带圆角
 ///   底色与字形，这里只按 22pt 框定、描选中圈；不联网拉图。品牌色 +
@@ -60,7 +65,7 @@ struct PlatformStripView: View {
     }
 
     /// 图标自然宽 = 可见数 × 22 + (可见数 − 1) × 5（模板 v2：每块 22×22、
-    /// 间距 5；全部勾选时 6×22 + 5×5 = 157；取消勾选后随可见数变小）。
+    /// 间距 5；全部勾选时 7×22 + 6×5 = 184；取消勾选后随可见数变小）。
     private var iconsNaturalWidth: CGFloat {
         let n = CGFloat(max(visiblePlatforms.count, 1))
         return n * 22 + (n - 1) * 5

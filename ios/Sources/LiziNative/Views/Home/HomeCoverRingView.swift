@@ -564,12 +564,30 @@ final class HomeCoverRingModel: ObservableObject {
 
     // MARK: 点播
 
-    /// 点卡片播歌：队列模式只改下标（已在队列里不重建），每日模式整份
+    /// 点卡片播歌：队列模式按 queueId 播（r25-B7 新写），每日模式整份
     /// 进队列从点中的起播（壳版 playQueue(items, i, true) 同款）。
+    ///
+    /// 队列模式：模型只持 [Track]，queueTracks 由调用方从 store.queue
+    /// 按顺序 map 出 track 同步进来（HomeCoverRingView.sync 传
+    /// playback.queue.map { $0.track }），同下标一般就是同一项——先核对
+    /// store.queue[index] 与 tracks[index] 的身份（id + platform）一致
+    /// 就播该 queueItem；不一致（点按与队列变化之间的竞态）时退回在
+    /// store.queue 里找第一个 id+platform 匹配的 queueItem 播；都找不
+    /// 到再退回 store.play(tracks[index])。这样队列里同一首歌出现两次
+    /// 时，点第二张播的就是第二张，不再播成第一张。
     func playTrack(at index: Int, store: PlaybackStore) {
         guard tracks.indices.contains(index) else { return }
         if useQueue {
-            store.play(tracks[index])
+            let wanted = tracks[index]
+            if store.queue.indices.contains(index),
+               store.queue[index].track.id == wanted.id,
+               store.queue[index].track.platform == wanted.platform {
+                store.play(queueItem: store.queue[index])
+            } else if let item = store.queue.first(where: { $0.track.id == wanted.id && $0.track.platform == wanted.platform }) {
+                store.play(queueItem: item)
+            } else {
+                store.play(tracks[index])
+            }
         } else {
             store.setQueue(tracks, startAt: index)
         }

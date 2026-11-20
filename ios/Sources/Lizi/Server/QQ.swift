@@ -1,4 +1,5 @@
 import Foundation
+import WebKit // U9：登出时清 WKWebsiteDataStore 里的 QQ 域 cookie
 
 /// QQ 音乐：@yakult-green-tea/qq-music-api@3.3.5 的 Swift 移植。
 ///
@@ -2345,8 +2346,11 @@ extension QQService {
     /// 网页登录导入（第 12 轮第 10 件）：原生 WKWebView 里用户已在 y.qq.com
     /// 登完，点「同步登录状态」把整罐 cookie 发过来（或前端「粘贴 Cookie」
     /// 面板直接贴）。流程只照 Moumusic QQMusicSessionStore 的形状，不搬代码：
-    ///  - uin 从 uin / p_uin / pt2gguin / qqmusic_uin / loginUin 派生，
+    ///  - uin 从 uin / p_uin / wxuin / pt2gguin / qqmusic_uin / loginUin 派生，
     ///    p_uin 开头的 "o" 去掉（Moumusic normalizedAccountID 同款规则）；
+    ///    wxuin 是微信登录 QQ 音乐的账号 id（r25 U1：这类用户 cookie 里只有
+    ///    wxuin、没有 uin，不认它网页登录永远报缺号、扫码又要 QQ App，等
+    ///    于没有任何登录路径）；
     ///  - 凭证取第一个非空的 qqmusic_key / qm_keyst / musickey / music_key /
     ///    p_skey / skey / psrf_access_token / psrf_qq_access_token；
     ///  - 两样缺一不可，缺了就回中文原因（不要只报 400）；
@@ -2371,7 +2375,7 @@ extension QQService {
             if !k.isEmpty && !v.isEmpty { fields[k] = v }
         }
         var uin = ""
-        for key in ["uin", "p_uin", "pt2gguin", "qqmusic_uin", "loginuin"] {
+        for key in ["uin", "p_uin", "wxuin", "pt2gguin", "qqmusic_uin", "loginuin"] {
             guard let v = fields[key], !v.isEmpty else { continue }
             let norm = v.hasPrefix("o") ? String(v.dropFirst()) : v
             if norm != "0" && norm.lowercased() != "null" && !norm.isEmpty { uin = norm; break }
@@ -2384,7 +2388,7 @@ extension QQService {
         guard !uin.isEmpty else {
             DiagLog.shared.recordLog(category: "qq", message: "网页登录导入失败：无可用 QQ 号",
                                      fields: ["reason": "web-login-no-uin", "cookieKeys": fields.keys.sorted().joined(separator: ",")])
-            return .json(200, ["code": 400, "loggedIn": false, "error": "网页登录没拿到 QQ 号（缺 uin / p_uin）：请确认已在网页里登录，再点一次「同步登录状态」"])
+            return .json(200, ["code": 400, "loggedIn": false, "error": "网页登录没拿到 QQ 号（缺 uin / p_uin / wxuin）：请确认已在网页里登录，再点一次「同步登录状态」"])
         }
         guard !credential.isEmpty else {
             DiagLog.shared.recordLog(category: "qq", message: "网页登录导入失败：无登录票据",
@@ -2975,6 +2979,24 @@ extension QQService {
         }
     }
 
+    /// U9：QQ 登出时清掉网页登录留在默认 WKWebsiteDataStore 里的 QQ 域 cookie。
+    /// 只清网页登录读 cookie 的那张域表（qq.com / ptlogin2.qq.com / graph.qq.com /
+    /// y.qq.com，与 `QQWebLoginSheet.mergedCookieString` 的 order 一致；qq.com
+    /// 的后缀匹配本来就覆盖后三者的子域，四域全列是显式对齐、不多清）——其它站
+    /// 的 cookie 一律不动。getAllCookies 回调里逐个删；异步执行，失败（包括
+    /// 读不到 cookie）不阻塞登出主流程、不改登出响应。
+    private static func clearQQWebCookies() {
+        let qqDomains = ["qq.com", "ptlogin2.qq.com", "graph.qq.com", "y.qq.com"]
+        let store = WKWebsiteDataStore.default().httpCookieStore
+        store.getAllCookies { cookies in
+            for c in cookies {
+                let d = c.domain.lowercased().trimmingCharacters(in: .init(charactersIn: "."))
+                guard qqDomains.contains(where: { d == $0 || d.hasSuffix("." + $0) }) else { continue }
+                store.delete(c)
+            }
+        }
+    }
+
     // MARK: - 分发
 
     func handle(_ req: HttpRequest) async -> HttpResponse {
@@ -3002,6 +3024,10 @@ extension QQService {
                 saveCredential(nil)
                 for s in qrSessions.values { s.wsTask?.cancel(); s.driverTask?.cancel() }
                 qrSessions.removeAll()
+                // U9：后端凭证清了，但网页登录留在 WKWebsiteDataStore 里的
+                // y.qq.com 会话还在；不清掉，再开网页登录点一次同步就原样
+                // 登回去。清 cookie 是异步回调，不等它、不阻塞登出响应。
+                Self.clearQQWebCookies()
                 return .json(200, ["code": 200, "loggedIn": false])
             case "search":
                 return await search(req: req)

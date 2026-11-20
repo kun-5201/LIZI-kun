@@ -59,6 +59,12 @@ final class PlaybackStore: ObservableObject {
     @Published private(set) var repeatMode: RepeatMode = .off
     /// 随机播放开关。
     @Published private(set) var isShuffled: Bool = false
+    /// 应用内音量（0…1；只对本 App 的 AVPlayer 生效，不动系统音量；
+    ///   当次会话有效，不持久化，重启回 1.0）。静音时 player.volume 为 0，
+    ///   `volume` 本身保留静音前的档位，取消静音即恢复。
+    @Published private(set) var volume: Double = 1.0
+    /// 是否静音（单独的 UserDefaults 键持久化，不走 SettingsStore）。
+    @Published private(set) var isMuted: Bool = false
     /// 用户选的请求档位（默认无损；EQ 页 P4 负责改这里）。
     @Published private(set) var preferredQuality: AudioQuality = .lossless
 
@@ -118,6 +124,14 @@ final class PlaybackStore: ObservableObject {
     private var didRecordFirstTimeUpdate = false
 
     private static let likedKey = "lizi.native.likedTrackIds"
+    /// 喜欢身份 = id + platform 复合键（r25-B2：单用曲目 id 时跨平台数字 id
+    /// 撞号，爱心与 liked rail 各说各话）。UserDefaults 里存
+    /// "platform\u{1f}id" 字符串（\u{1f} 是控制字符，平台名与曲目 id 里
+    /// 不会出现；键名仍是 lizi.native.likedTrackIds，HomeViewModel
+    /// refreshLikedCount 只数条数，条数语义不变）。
+    /// 旧单键数据见 init 里的 migrateLegacyLikedKeys()：likedTracks 里有
+    /// 同一 id 的完整曲目就认它的 platform 补键，认不出就丢弃并记日志，不崩。
+    private static let mutedKey = "lizi.native.player.isMuted"
     /// P2：星标完整曲目（[Track] JSON；liked rail 用）。旧的 id 集合键不动，
     /// 保证兼容——P2 之前点的星标只有 id、没有曲目详情，恢复不出来，
     /// 不编假曲目；重新点一次星标（取消再点）后才有完整记录。
@@ -126,6 +140,8 @@ final class PlaybackStore: ObservableObject {
     /// r22：随机与循环重启后保留（与队列面板头部同一套状态，控制行两端按钮共用）。
     private static let repeatModeKey = "lizi.native.repeatMode"
     private static let shuffleKey = "lizi.native.isShuffled"
+    /// 喜欢复合键集合（存 "platform\u{1f}id"；读到旧单键格式时
+    /// migrateLegacyLikedKeys() 已在 init 里迁过，这里只认复合键）。
     private var likedIds: Set<String> {
         get {
             let arr = UserDefaults.standard.stringArray(forKey: Self.likedKey) ?? []
@@ -134,11 +150,58 @@ final class PlaybackStore: ObservableObject {
         set { UserDefaults.standard.set(Array(newValue), forKey: Self.likedKey) }
     }
 
+    /// 一首曲目的喜欢复合键。
+    static func likeKey(for track: Track) -> String {
+        "\(track.platform)\u{1f}\(track.id)"
+    }
+
+    /// 复合键是否合法（必须恰好含一个 \u{1f} 分隔符且两边非空）。
+    private static func isCompositeLikeKey(_ key: String) -> Bool {
+        let parts = key.components(separatedBy: "\u{1f}")
+        return parts.count == 2 && !parts[0].isEmpty && !parts[1].isEmpty
+    }
+
+    /// 旧单键喜欢数据迁移（init 里跑一次）：r25 之前 likedKey 存的是裸曲目 id，
+    /// 平台未知。逐条认：likedTracks（完整曲目，带 platform）里有同一 id 的，
+    /// 就按它的 platform 补成复合键；没有的丢弃（平台猜不出来，不编），
+    /// 记一条 DiagLog（迁入数 / 丢弃数）。已是复合键的条目原样保留。
+    /// 迁移后 likedTracks 本身不动（rail 仍按 platform 过滤读它）。
+    private func migrateLegacyLikedKeys() {
+        let raw = UserDefaults.standard.stringArray(forKey: Self.likedKey) ?? []
+        guard raw.contains(where: { !Self.isCompositeLikeKey($0) }) else { return }
+        let known = Self.likedTracks()
+        var kept = Set<String>()
+        var migrated = 0
+        var dropped = 0
+        for entry in raw {
+            if Self.isCompositeLikeKey(entry) {
+                kept.insert(entry)
+                continue
+            }
+            if let track = known.first(where: { $0.id == entry }) {
+                kept.insert(Self.likeKey(for: track))
+                migrated += 1
+            } else {
+                dropped += 1
+            }
+        }
+        UserDefaults.standard.set(Array(kept), forKey: Self.likedKey)
+        DiagLog.shared.recordPlaybackStep(
+            "liked migrate legacy migrated=\(migrated) dropped=\(dropped) (dropped: old single-key ids with no matching liked track; platform unknown, not guessed)")
+    }
+
     init() {
         if let raw = UserDefaults.standard.string(forKey: Self.qualityKey),
            let q = AudioQuality(rawValue: raw) {
             preferredQuality = q
         }
+        // r25-B2：旧单键喜欢数据迁移（只认 likedTracks 里能对上 id 的，
+        // 认不出就丢弃并记日志，见 migrateLegacyLikedKeys）。
+        migrateLegacyLikedKeys()
+        // r25-B2 #4：静音状态恢复（自己的键，不走 SettingsStore）；
+        // 音量当次会话有效，不持久化，重启回 1.0。
+        isMuted = UserDefaults.standard.bool(forKey: Self.mutedKey)
+        player.volume = isMuted ? 0 : Float(volume)
         // r22：随机与循环重启后保留（缺省：顺序、不随机；旧值非法时同样回落缺省）。
         if let raw = UserDefaults.standard.string(forKey: Self.repeatModeKey),
            let mode = RepeatMode(rawValue: raw) {
@@ -214,8 +277,8 @@ final class PlaybackStore: ObservableObject {
     func setQueue(_ tracks: [Track], startAt index: Int) {
         queue = tracks.map { QueueItem(track: $0) }
         currentIndex = queue.indices.contains(index) ? index : (queue.isEmpty ? -1 : 0)
-        if let track = currentQueueTrack {
-            play(track)
+        if queue.indices.contains(currentIndex) {
+            play(queueItem: queue[currentIndex])
         }
     }
 
@@ -235,7 +298,8 @@ final class PlaybackStore: ObservableObject {
         }
         if wasCurrent {
             currentIndex = min(index, queue.count - 1)
-            if let track = currentQueueTrack { play(track) }
+            // r25-B2 U6：按 queueId 播（不用 play(track)，重复曲目会播错行）。
+            play(queueItem: queue[currentIndex])
         } else if index < currentIndex {
             currentIndex -= 1
         }
@@ -277,6 +341,9 @@ final class PlaybackStore: ObservableObject {
     }
 
     /// 播放指定曲目（不在队列里时先把它设为单首队列）。
+    /// 注意：只按 id+platform 找第一个匹配项；队列里同一首歌出现多次时
+    /// 点指定行请用 play(queueItem:)（按 queueId 定位），否则点第二行
+    /// 会播成第一行（r25-B2 U6）。
     func play(_ track: Track) {
         if let idx = queue.firstIndex(where: { $0.track.id == track.id && $0.track.platform == track.platform }) {
             currentIndex = idx
@@ -284,6 +351,27 @@ final class PlaybackStore: ObservableObject {
             queue = [QueueItem(track: track)]
             currentIndex = 0
         }
+        startCurrentTrackPlay()
+    }
+
+    /// 按队列项播放（r25-B2 U6）：按 queueId 定位，队列里有重复曲目时
+    /// 点第几行就播第几行。queueId 全程稳定（QueueItem 生成时一次定死，
+    /// setQueue / appendToQueue 都不改它；removeFromQueue / clearQueue
+    /// 只删项，不重排剩余项的 queueId）。该项已不在队列里（刚被删）时
+    /// 退回按曲目播，不静默失败。
+    func play(queueItem: QueueItem) {
+        guard let idx = queue.firstIndex(where: { $0.queueId == queueItem.queueId }) else {
+            play(queueItem.track)
+            return
+        }
+        currentIndex = idx
+        startCurrentTrackPlay()
+    }
+
+    /// 新点播的公共起播段（play(_:) / play(queueItem:) 共用；调用前
+    /// currentIndex 必须已定位好）。代际 + 看门狗 + 起 playCurrent 任务。
+    private func startCurrentTrackPlay() {
+        guard let track = currentQueueTrack else { return }
         // r20 集成 L① + 第 22 轮第 5 件（Moumusic startPlaying 同款）：
         // 新点播先 advanceGeneration()：代际 +1，取消旧的在飞任务
         // （旧 resolve 被取消后立刻向上抛 CancellationError，不再攒出
@@ -355,7 +443,7 @@ final class PlaybackStore: ObservableObject {
             pause()
             return
         }
-        if let track = currentQueueTrack { play(track) }
+        if queue.indices.contains(currentIndex) { play(queueItem: queue[currentIndex]) }
     }
 
     /// 上一首（进度超过 3 秒时先回到开头，照常见播放器做法；否则切上一首）。
@@ -377,19 +465,24 @@ final class PlaybackStore: ObservableObject {
             seek(to: 0)
             return
         }
-        if let track = currentQueueTrack { play(track) }
+        if queue.indices.contains(currentIndex) { play(queueItem: queue[currentIndex]) }
     }
 
     /// 喜欢/取消喜欢当前曲目（持久化到 UserDefaults；锁屏星标由 NowPlayingCoordinator 同步）。
     /// P2：id 集合之外，同时持久化完整 Track（liked rail 直接读，不用再反查）。
+    /// r25-B2：喜欢身份是 id+platform 复合键（likeKey(for:)），三处同步：
+    /// 这里、likedIds 存取、playCurrent 里的 isLiked 赋值；liked rail
+    /// （RailsBridge 读 likedTracks() 再按 platform 过滤）本身已是 Track
+    /// 全量 + platform，无需改。
     func toggleLike() {
         guard let track = currentTrack else { return }
+        let key = Self.likeKey(for: track)
         var ids = likedIds
-        if ids.contains(track.id) { ids.remove(track.id) } else { ids.insert(track.id) }
+        if ids.contains(key) { ids.remove(key) } else { ids.insert(key) }
         likedIds = ids
-        isLiked = ids.contains(track.id)
+        isLiked = ids.contains(key)
         var tracks = Self.likedTracks()
-        if ids.contains(track.id) {
+        if ids.contains(key) {
             if !tracks.contains(where: { $0.id == track.id && $0.platform == track.platform }) {
                 tracks.append(track)
             }
@@ -445,6 +538,33 @@ final class PlaybackStore: ObservableObject {
         UserDefaults.standard.set(q.rawValue, forKey: Self.qualityKey)
     }
 
+    // MARK: - 应用内音量 / 静音（r25-B2 #4）
+
+    /// 设应用内音量（0…1；只改本 App 的 AVPlayer 音量，不动系统音量；
+    /// 当次会话有效，不持久化）。拖动滑条到 >0 时自动取消静音（静音键
+    /// 仍是独立开关，见 setMuted）。
+    func setVolume(_ value: Double) {
+        volume = min(max(value, 0), 1)
+        if volume > 0, isMuted {
+            isMuted = false
+            UserDefaults.standard.set(false, forKey: Self.mutedKey)
+        }
+        player.volume = Float(volume)
+    }
+
+    /// 设静音（状态用自己的 UserDefaults 键持久化，不走 SettingsStore）。
+    /// 静音只把 player.volume 置 0，`volume` 本身保留，取消静音即恢复。
+    func setMuted(_ muted: Bool) {
+        isMuted = muted
+        UserDefaults.standard.set(muted, forKey: Self.mutedKey)
+        player.volume = muted ? 0 : Float(volume)
+    }
+
+    /// 静音开关。
+    func toggleMute() {
+        setMuted(!isMuted)
+    }
+
     /// 停止（播完 / 清空队列用；不 end 灵动岛，岛靠暂停态 + staleDate 自然消失）。
     /// 第 22 轮第 5 件：停播先 advanceGeneration()——在飞的取链若不作废，
     /// 它 resolve 回来还会调 startItem 把歌重新起播，停播等于没停。
@@ -488,7 +608,7 @@ final class PlaybackStore: ObservableObject {
         progress = 0
         duration = track.durationSeconds
         currentTrack = track
-        isLiked = likedIds.contains(track.id)
+        isLiked = likedIds.contains(Self.likeKey(for: track))
         lyrics = []
         currentLyricIndex = -1
         DiagLog.shared.recordPlaybackStep("play state set source=\(track.platform) id=\(track.id) gen=\(gen)")
@@ -563,6 +683,9 @@ final class PlaybackStore: ObservableObject {
         observe(item: item, gen: gen)
         DiagLog.shared.recordPlaybackStep("set src via=\(lastFetchVia) source=\(track.platform) id=\(track.id)")
         player.replaceCurrentItem(with: item)
+        // r25-B2 #4：换 item 不重置 AVPlayer.volume，但这里再应用一次
+        // 应用内音量/静音（静音时 0），防止任何外部复位把音量带跑。
+        player.volume = isMuted ? 0 : Float(volume)
         player.play()
         DiagLog.shared.recordPlaybackStep("play called source=\(track.platform) id=\(track.id)")
         // 真正起播的信号：锁屏动态封面只认它（见 startedTrackId 注释）。

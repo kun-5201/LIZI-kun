@@ -13,6 +13,18 @@ import SwiftUI
 ///   模式按钮（循环/随机）不在这一行——工人 A 把它放队列面板头部了。
 /// - `PlayerProgressBar`：最底部满宽细条，无时间数字，拖动 seek；播放头是
 ///   圆点（r22k：审计图里进度条上有圆点，旧代码只有 2pt 白线）。
+/// - `PlayerVolumeRow`（r25-B2 #4）：音量条 + 静音按钮。接
+///   `PlaybackStore.volume / isMuted`（`setVolume` / `toggleMute`）：
+///   只改本 App 的 AVPlayer 音量，不动系统音量、不动灵动岛/锁屏的音量；
+///   音量当次会话有效不持久化，静音状态用 PlaybackStore 自己的
+///   UserDefaults 键持久化（不走 SettingsStore）。
+///   本文件只提供组件；放进播放页布局要改 PlayerView.swift（不在本轮 B2
+///   文件内）：竖屏分支在 `PlayerControlRow(tier:)` 与 `PlayerProgressBar`
+///   之间加一行 `PlayerVolumeRow(tier: tier).frame(width: contentWidth)`，
+///   行高 28 + 上间隙 8，从弹性歌词区扣（compact 最短屏余量见 PlayerView
+///   总账注释）；横屏总高 402 已占满，不放这一行（横屏仍可用系统音量键）。
+
+// MARK: - 控制行
 ///
 /// 接线（r22：`PlayerControlRow(tier:)` 默认竖屏（爱心，不带 onOpenQueue）；
 /// 横屏调 `PlayerControlRow(tier:showsQueueButton:onOpenQueue:)`；
@@ -253,5 +265,49 @@ struct PlayerProgressBar: View {
 
     private func clamp(_ value: CGFloat) -> CGFloat {
         min(max(value, 0), 1)
+    }
+}
+
+// MARK: - 应用内音量行（r25-B2 #4）
+
+/// 音量条 + 静音按钮（行高 28；无曲目时整行 disabled）。
+///
+/// - 静音按钮：静音时 `speaker.slash.fill`，否则 `speaker.wave.2.fill`；
+///   点按调 `store.toggleMute()`（静音状态持久化，见 PlaybackStore）。
+/// - 音量条：`Slider`，0…1；拖动调 `store.setVolume(_:)`（只改本 App
+///   AVPlayer 音量，不动系统音量；当次会话有效，重启回 1.0；拖到 >0
+///   时自动取消静音）。滑条本身不显示百分比数字（与进度条一致：不显示
+///   时间/数字，只给控制）。
+/// - 尺寸档只用来对齐控制行（图标字号走 `controlIconSize(tier)`），
+///   行高固定 28，不随档变。
+struct PlayerVolumeRow: View {
+    @EnvironmentObject private var store: PlaybackStore
+
+    var tier: PlayerTokens.PlayerSizeTier = .standard
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: { store.toggleMute() }) {
+                Image(systemName: store.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.system(size: PlayerTokens.controlIconSize(tier), weight: .medium))
+                    .foregroundStyle(store.isMuted ? Color.red : PlayerTokens.playerForeground)
+                    .frame(width: 28, height: 28)
+            }
+            .accessibilityLabel(store.isMuted ? "取消静音" : "静音")
+
+            Slider(
+                value: Binding(
+                    get: { store.volume },
+                    set: { store.setVolume($0) }
+                ),
+                in: 0...1
+            )
+            .tint(PlayerTokens.playerForeground)
+            .accessibilityLabel("音量")
+            .accessibilityValue("\(Int(store.volume * 100))%")
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 28)
+        .disabled(store.currentTrack == nil)
     }
 }

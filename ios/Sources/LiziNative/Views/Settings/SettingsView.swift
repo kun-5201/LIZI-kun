@@ -2,7 +2,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// 设置页（P3-C，屏幕 11）：对照壳版 `public/index.html` 的 `#view-settings`
-/// 整页 + `app.js` 设置逻辑，7 分区全做，不漏分区、不自造不存在的开关。
+/// 整页 + `app.js` 设置逻辑，8 分区全做（r25 加形态歌词），不漏分区、
+/// 不自造不存在的开关。
 ///
 /// 对照表（壳版行 → 原生实现）：
 /// 1. 平台账号：7 行平铺（网易云/QQ/酷狗/汽水/波点/酷我/Apple Music），
@@ -20,13 +21,17 @@ import UniformTypeIdentifiers
 /// 2. 自定义源管理：LXSourceRegistry 已有存储，列表/添加（URL + 本地文件）
 ///    /删除/开关/刷新/补绑 URL/自动切换，全接真接口；不改 LX 取链逻辑。
 /// 3. 本地音乐：数量实读 LocalMusic 清单；在首页显示开关真持久化；
-///    导入流程是 P4，本轮导入按钮只弹空态提示。
+///    导入按钮接首页同款导入器（系统文件选择器，UTType.audio 多选，
+///    `LocalMusic.importFiles`），导入后数量当场刷新（r25 #47）。
 /// 4. 音效：9 档音质真选（调 PlaybackStore.setPreferredQuality，当场影响
 ///    取链档位）；均衡器细调（10 套预设 + 7 段 EQ）是 P4，本轮只做入口行
 ///    + 空态提示。壳版第 9 档 DTS:X 无上游流，原生不提供，不编。
 /// 5. 播放页排版：4 套版式（默认/左右对半/上下分屏/极小封面）真持久化
-///    `lizi.now.layout`；PlayerView 本轮尚未消费该键（P3 打磨项接线），
-///    行下有诚实说明。LRCLIB 兜底开关真生效（Lrclib.isEnabled 同键）。
+///    `lizi.now.layout`；PlayerView r25 已按版式重排（对照见 PlayerView
+///    文件头）。LRCLIB 兜底开关真生效（Lrclib.isEnabled 同键）。
+/// 5b. 形态歌词（r25 #31）：原文 / 双文 / 译文三档（壳版 `#set-stage-lyric`，
+///    键 `lizi.stage.lyricMode`，默认原文），只改形态里显示的字；
+///    StageBridge 按档出词。
 /// 6. 外观：平台头像/平台颜色/大厅内容轨/动画插图（默认开，`lizi.animatedArtwork`，
 ///    与 NowPlayingCoordinator 同键）/我的专辑展示/跑马带速度，全真持久化；
 ///    主页背景与大厅背景效果原生本轮做不了，只做诚实空态行 + 提示；
@@ -62,6 +67,12 @@ struct SettingsView: View {
     @State private var rebindURLInput = ""
     @State private var showDiagnostics = false
     @State private var diagnosticsText = ""
+    /// r25 #47：本地导入文件选择器 + 导入结果行（导入后数量显示当场刷新）。
+    @State private var showLocalImporter = false
+    @State private var localImportStatus: String? = nil
+    /// r25 #45：网易每日签到结果行 + 进行中态。
+    @State private var dailySigninStatus = ""
+    @State private var isSigningIn = false
 
     var body: some View {
         ScrollView {
@@ -71,6 +82,7 @@ struct SettingsView: View {
                 localMusicSection
                 audioSection
                 nowLayoutSection
+                stageLyricSection
                 appearanceSection
                 aboutSection
             }
@@ -159,7 +171,7 @@ struct SettingsView: View {
     // MARK: - 1. 平台账号
 
     private var accountSection: some View {
-        sectionCard(title: "平台账号", note: "六家平台平级，登录方式各不相同，限制都写在自己那一行里。") {
+        sectionCard(title: "平台账号", note: "七家平台平级，登录方式各不相同，限制都写在自己那一行里。") {
             ForEach(settings.platformAccounts()) { account in
                 // r23f：真入口（占位文案已删）。登录态取 platformAccounts()
                 // 的实读会话（与 LoginStore 同源）；昵称取自 LoginStore，
@@ -194,6 +206,42 @@ struct SettingsView: View {
                     ? "\(account.name)，已登录，查看账号详情"
                     : "\(account.name)，未登录，点此登录")
                 Divider()
+            }
+            // r25 #45：网易每日签到入口（后端路由已有：
+            // `Server/NetEase.swift` 的 `daily/signin`，weapi /point/dailyTask，
+            // type 0 安卓 + type 1 网页各一次）。未登录网易时走现有登录 sheet
+            // 去登录（本页已有的 loginTarget）；登录后点签到才调接口，
+            // 结果如实显示在下面这行，不编点数、不编成功。
+            HStack {
+                rowLabel("每日签到", hint: "网易云音乐每日任务（安卓端 + 网页端各一次）")
+                Spacer()
+                if isSigningIn {
+                    ProgressView()
+                } else {
+                    Button("签到") {
+                        if !loginStore.isLoggedIn(platform: "netease") {
+                            loginTarget = LoginSheetTarget(platform: "netease")
+                        } else {
+                            isSigningIn = true
+                            Task {
+                                dailySigninStatus = await settings.dailySignIn()
+                                isSigningIn = false
+                            }
+                        }
+                    }
+                    .font(.liziBody(size: LiziTokens.size13, weight: .medium))
+                    .foregroundColor(LiziTokens.ink2)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(LiziTokens.paper)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+            }
+            .accessibilityLabel("网易云音乐每日签到")
+            if !dailySigninStatus.isEmpty {
+                Text(dailySigninStatus)
+                    .font(.liziBody(size: LiziTokens.size13))
+                    .foregroundColor(LiziTokens.ink2)
             }
             Button(action: { showPlatformManager.toggle() }) {
                 HStack {
@@ -397,10 +445,14 @@ struct SettingsView: View {
                 Text(settings.localMusicSummary)
                     .font(.liziBody(size: LiziTokens.size13))
                     .foregroundColor(LiziTokens.ink2)
-                Button("导入") {
-                    notice = Notice(title: "本地音乐导入",
-                                    message: "文件导入流程 P4 上线，本轮只做开关与数量显示。")
-                }
+                // r25 #47：接首页同款导入器——系统文件选择器（UTType.audio，
+                // 多选）→ `LocalMusic.importFiles`，与首页 LocalMusicSectionView
+                // 的 `LocalMusicDocumentPicker` 同参数（UTType.audio / 多选 /
+                // asCopy）。`LocalFilesBridge` 本身是 WKWebView 的
+                // message handler（要 webView、回 JS 事件），设置页没有
+                // WebView，接不过来；这里用 SwiftUI `.fileImporter`（同样是
+                // 系统 UIDocumentPicker），后端与首页同一份 importFiles。
+                Button("导入") { showLocalImporter = true }
                 .font(.liziBody(size: LiziTokens.size13, weight: .medium))
                 .foregroundColor(LiziTokens.ink2)
                 .padding(.horizontal, 10)
@@ -408,9 +460,39 @@ struct SettingsView: View {
                 .background(LiziTokens.paper)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
+            if let localImportStatus {
+                Text(localImportStatus)
+                    .font(.liziBody(size: LiziTokens.size13))
+                    .foregroundColor(LiziTokens.ink2)
+            }
             toggleRow("在首页显示",
                       hint: "关闭后首页不再显示「本地音乐」区块；导入功能不受影响。",
                       isOn: $settings.localMusicShown)
+        }
+        .fileImporter(isPresented: $showLocalImporter,
+                      allowedContentTypes: [UTType.audio],
+                      allowsMultipleSelection: true) { result in
+            handleLocalFileImport(result)
+        }
+    }
+
+    /// r25 #47：导入结果处理（与首页 `LocalMusicView.importPicked` 同款：
+    /// 后台线程拷文件 + 写清单，主线程刷新状态行；设 localImportStatus
+    /// 会触发本页重绘，`localMusicSummary` 当场重读新数量）。
+    private func handleLocalFileImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard !urls.isEmpty else { return }
+            Task.detached {
+                let result = LocalMusic.importFiles(urls: urls)
+                await MainActor.run {
+                    localImportStatus = result.failed == 0
+                        ? "已导入 \(result.imported.count) 首"
+                        : "已导入 \(result.imported.count) 首，失败 \(result.failed) 个"
+                }
+            }
+        case .failure(let error):
+            localImportStatus = "导入失败：\(error.localizedDescription)"
         }
     }
 
@@ -486,12 +568,33 @@ struct SettingsView: View {
                 }
                 .buttonStyle(.plain)
             }
-            Text("选择已保存（lizi.now.layout）。播放页按版式重排的接线在 P3 打磨项，本轮设置页只做选择与持久化。")
+            Text("选择已保存（lizi.now.layout），进播放页即按版式重排（02/04/06 各改什么见播放页文件头对照表）。")
                 .font(.liziBody(size: LiziTokens.size13))
                 .foregroundColor(LiziTokens.ink3)
             toggleRow("LRCLIB 歌词兜底",
                       hint: "官方歌词优先；打开后官方没有歌词时才用 LRCLIB 歌词库兜底。",
                       isOn: $settings.lrclibEnabled)
+        }
+    }
+
+    // MARK: - 5b. 形态歌词（r25 #31）
+
+    /// 形态歌词三档（壳版 `#set-stage-lyric`，见 `SettingsStore`）：
+    /// 原文 / 双文 / 译文；只改形态里显示的字，播放页歌词不动。
+    /// 原生设置页没有单独的「形态」分区（壳版 `set-sec-stagelyric` 在
+    /// 播放页排版区与外观区之间），这里单立一节、放在同样的位置。
+    private var stageLyricSection: some View {
+        sectionCard(title: "形态歌词", note: "只改形态（可视化）里显示的字；播放页歌词不动。没有译文的歌照旧显示原文。") {
+            Picker("显示", selection: $settings.stageLyricMode) {
+                ForEach(SettingsStore.stageLyricModes, id: \.id) { mode in
+                    Text(mode.name).tag(mode.id)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityLabel("形态歌词显示")
+            Text("有译文时才有区别 · 默认原文")
+                .font(.liziBody(size: LiziTokens.size13))
+                .foregroundColor(LiziTokens.ink3)
         }
     }
 

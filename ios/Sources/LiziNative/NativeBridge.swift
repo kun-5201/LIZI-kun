@@ -535,46 +535,140 @@ return false
             .map { DailyTrack(track: $0) }
     }
 
-    /// 歌单详情（含曲目）。没有官方接口的平台返回空歌单（tracks 为空）。
-    /// - bodian: /api/bodian/playlist/tracks（api.js bodianPlaylistTracks，
-    ///   只回 { tracks, more }，没有歌单名/封面/创建者；playlistFrom 按 tracks-only
-    ///   解析，标题为空时详情页显示平台通用名、曲目数显示已加载数）。
-    /// - kuwo 榜单（isRank=true）: /api/kuwo/rank/tracks（api.js kuwoRankTracks，
-    ///   只回 { id, total, tracks }，没有歌单名/封面；同上按 tracks-only 解析）。
-    ///   榜单标记来自搜索/榜单字典的 rank 字段（见 Playlist.isRank）。
-    /// - applemusic 的 tracks 接口同样只回曲目（只有 tracks），标题/封面为空时
-    ///   详情页同样显示通用名 + 占位封面。
-    /// - kugou: /api/kugou/playlist/tracks（只回 { tracks }，没有歌单名/封面；
-    ///   歌单名/封面/曲数走 /api/kugou/playlist/detail，playlistFrom 按
-    ///   tracks-only 解析时曲数显示已加载数）。
-    /// - netease / qq / qishui 回完整歌单对象（name/cover/creator/tracks）。
-    static func playlistDetail(platform: String, id: String, isRank: Bool = false) async -> Playlist {
-        let path: String
-        var query: [String: String] = ["id": id]
+    /// 歌单详情（含曲目）。r25-B2：按平台分三档（逐家核对服务端路由后定，
+    ///   见下表；不编假数据，没有 detail 端点的平台保持 tracks-only 诚实空态）。
+    /// - detail 本身回全量（名/封面/曲数/曲目），一次就够：
+    ///   netease /api/playlist/detail（normalize 回 { playlist, tracks }）、
+    ///   qq /api/qq/playlist/detail（回 { name, cover, tracks, trackCount }）。
+    /// - detail 只回元信息（名/封面/曲数，无曲目）+ tracks 只回曲目，两步合并：
+    ///   bodian /api/bodian/playlist/detail（{ playlist: bodianPlaylist }）
+    ///     + /api/bodian/playlist/tracks（{ tracks, more }）；
+    ///   kugou /api/kugou/playlist/detail（{ playlist: kugouCollection }）
+    ///     + /api/kugou/playlist/tracks（{ tracks, songCount }）；
+    ///   qishui /api/qishui/playlist/detail（{ playlist: qishuiPlaylist }，
+    ///     注意它本身也是 playlistPage(limit:1) 的 collection，无曲目）
+    ///     + /api/qishui/playlist/tracks（{ tracks, more }）。
+    ///   两步里任何一步失败都不编：detail 失败则名/封面留空（通用名 + 占位封面），
+    ///   tracks 失败则曲目留空（详情页照常显示已拿到的头部）。
+    /// - 无 detail 端点，tracks-only（标题/封面无上游数据时详情页显示通用名 +
+    ///   占位封面，曲目数显示已加载数）：
+    ///   kuwo 非榜单 /api/kuwo/playlist/tracks（本身已回 name/cover/creator/total，
+    ///     无需另调 detail——服务端路由里没有 playlist/detail）；
+    ///   kuwo 榜单（isRank=true）/api/kuwo/rank/tracks（只回 { id, total, tracks }，
+    ///     无榜单名/封面端点）；applemusic /api/applemusic/playlist/tracks
+    ///     （回 { name, cover, tracks }：服务端 playlistTracks 已把 iTunes
+    ///     lookup results[0] 的歌单名/封面透出来，见 AppleMusic.swift；
+    ///     playlistFrom 认 name/cover 两个键，第二阶段直接显示真名真封面，
+    ///     链路见 playlistMeta 的注释与 PlaylistDetailViewModel.load）。
+    /// - `meta`：ViewModel 第一阶段已拿到的元信息（playlistMeta 的结果），
+    ///   有就直接复用，不再重复调一次 detail；没传时内部自己调。
+    static func playlistDetail(platform: String, id: String, isRank: Bool = false,
+                               meta: Playlist? = nil) async -> Playlist {
         switch platform {
-        case "netease": path = "/api/playlist/detail"
-        case "qq": path = "/api/qq/playlist/detail"
+        case "netease", "qq":
+            // detail 端点本身回全量，一次就够（meta 已带曲目时直接用它）。
+            if let meta, !meta.tracks.isEmpty { return meta }
+            let path = platform == "netease" ? "/api/playlist/detail" : "/api/qq/playlist/detail"
+            guard let d = await call(path: path, query: ["id": id]) else {
+                return meta ?? Playlist(id: id, source: platform)
+            }
+            return playlistFrom(dict: d, platform: platform, id: id)
+        case "qishui", "bodian", "kugou":
+            let detailPath: String
+            let tracksPath: String
+            switch platform {
+            case "qishui":
+                detailPath = "/api/qishui/playlist/detail"
+                tracksPath = "/api/qishui/playlist/tracks"
+            case "bodian":
+                detailPath = "/api/bodian/playlist/detail"
+                tracksPath = "/api/bodian/playlist/tracks"
+            default: // kugou
+                detailPath = "/api/kugou/playlist/detail"
+                tracksPath = "/api/kugou/playlist/tracks"
+            }
+            var pl = Playlist(id: id, source: platform)
+            if let meta, !meta.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                pl = meta
+            } else if let d = await call(path: detailPath, query: ["id": id]) {
+                pl = playlistFrom(dict: d, platform: platform, id: id)
+            }
+            if let t = await call(path: tracksPath, query: ["id": id, "limit": "50"]) {
+                let tp = playlistFrom(dict: t, platform: platform, id: id)
+                pl.tracks = tp.tracks
+                if pl.trackCount == 0 { pl.trackCount = tp.trackCount }
+                // tracks 回包若带了名/封面而 detail 没给，补上（只取上游给的，不编）。
+                if pl.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    pl.title = tp.title
+                }
+                if pl.coverURL == nil { pl.coverURL = tp.coverURL }
+            }
+            return pl
         case "kuwo":
+            let path: String
+            var query: [String: String] = ["id": id]
             if isRank {
                 path = "/api/kuwo/rank/tracks"
                 query["limit"] = "50"
             } else {
+                // 非榜单 tracks 接口本身已回 name/cover/creator/total，无需 detail。
                 path = "/api/kuwo/playlist/tracks"
             }
-        case "qishui": path = "/api/qishui/playlist/detail"
-        case "bodian":
-            path = "/api/bodian/playlist/tracks"
-            query["limit"] = "50"
-        case "kugou":
-            path = "/api/kugou/playlist/tracks"
-            query["limit"] = "50"
-        case "applemusic": path = "/api/applemusic/playlist/tracks"
-        default: return Playlist(id: id, source: platform)
-        }
-        guard let d = await call(path: path, query: query) else {
+            guard let d = await call(path: path, query: query) else {
+                return Playlist(id: id, source: platform)
+            }
+            return playlistFrom(dict: d, platform: platform, id: id)
+        case "applemusic":
+            guard let d = await call(path: "/api/applemusic/playlist/tracks",
+                                     query: ["id": id]) else {
+                return Playlist(id: id, source: platform)
+            }
+            return playlistFrom(dict: d, platform: platform, id: id)
+        default:
             return Playlist(id: id, source: platform)
         }
-        return playlistFrom(dict: d, platform: platform, id: id)
+    }
+
+    /// 歌单元信息（名/封面/曲数/创建者/简介），不含曲目（详情页第一阶段先显示头部用）。
+    /// - 有 detail 端点的平台走 detail 端点：netease / qq（它们的 detail 回包
+    ///   本身含曲目，返回的 Playlist 也带 tracks，调用方见 tracks 非空即知已全量，
+    ///   不再调第二阶段）；qishui / bodian / kugou（detail 只回元信息）。
+    /// - 无 detail 端点的平台（kuwo / applemusic）首阶段仍回空 Playlist，不编：
+    ///   kuwo 非榜单的名/封面在 tracks 回包里，第二阶段一起拿；Apple Music
+    ///   的名/封面也在 tracks 回包里（playlistTracks 透 { name, cover }），
+    ///   第二阶段 playlistDetail → playlistFrom 直接显示到详情页头部；
+    ///   只有 kuwo 榜单没有名/封面来源，保持 tracks-only 诚实空态。
+    static func playlistMeta(platform: String, id: String, isRank: Bool = false) async -> Playlist {
+        switch platform {
+        case "netease":
+            guard let d = await call(path: "/api/playlist/detail", query: ["id": id]) else {
+                return Playlist(id: id, source: platform)
+            }
+            return playlistFrom(dict: d, platform: platform, id: id)
+        case "qq":
+            guard let d = await call(path: "/api/qq/playlist/detail", query: ["id": id]) else {
+                return Playlist(id: id, source: platform)
+            }
+            return playlistFrom(dict: d, platform: platform, id: id)
+        case "qishui":
+            guard let d = await call(path: "/api/qishui/playlist/detail", query: ["id": id]) else {
+                return Playlist(id: id, source: platform)
+            }
+            return playlistFrom(dict: d, platform: platform, id: id)
+        case "bodian":
+            guard let d = await call(path: "/api/bodian/playlist/detail", query: ["id": id]) else {
+                return Playlist(id: id, source: platform)
+            }
+            return playlistFrom(dict: d, platform: platform, id: id)
+        case "kugou":
+            guard let d = await call(path: "/api/kugou/playlist/detail", query: ["id": id]) else {
+                return Playlist(id: id, source: platform)
+            }
+            return playlistFrom(dict: d, platform: platform, id: id)
+        default:
+            // kuwo / applemusic：服务端路由里没有 playlist/detail，不编元信息。
+            return Playlist(id: id, source: platform)
+        }
     }
 
     /// 歌手详情（热门曲目）。只有网易有官方接口；其它平台没有 → 空 Artist，不编。

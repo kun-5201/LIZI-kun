@@ -295,12 +295,18 @@ final class StageBridge: NSObject, ObservableObject {
 
     /// 歌词时间轴（壳版 `lyricSchedule`）：LRC 只有起点，这里补每句时长
     /// （下一句起点 = 本句结束；末句 6 秒）；YRC 逐字时间照原样带过去。
+    /// 形态歌词三档（壳版 `stageLyricMode`，键 `lizi.stage.lyricMode`，
+    /// 默认 `orig`，见 `SettingsStore`）：`orig` 照原样；`trans` 有译文
+    /// 用译文、没有译文的行照旧原文；`both` 同排拼成「原文 ｜ 译文」。
+    /// 译文与原文字数不一样、逐字时间戳对不上，`trans`/`both` 一律不带
+    /// chars，让形态按句长自己均分（壳版 `lyricSchedule` 同款做法）。
     private func lyricSchedule() -> [[String: Any]] {
         guard let store else { return [] }
         // r22l 编译修：store.lyrics 是 @MainActor 隔离的发布状态，
         // 非隔离方法里同步读报硬错；本方法只在 pushInit 里调，
         // pushInit 的调用链全在主线程（见下），包进 assumeIsolated。
         let lines = MainActor.assumeIsolated { store.lyrics }
+        let mode = SettingsStore.readStageLyricMode()
         return lines.enumerated().map { (i, line) in
             let start = Double(line.startMs) / 1000
             let next = (i + 1 < lines.count) ? Double(lines[i + 1].startMs) / 1000 : nil
@@ -314,10 +320,20 @@ final class StageBridge: NSObject, ObservableObject {
             for w in line.words {
                 chars.append(["c": w.text, "t": Double(w.startMs) / 1000])
             }
+            var text = line.text
+            if !line.translation.isEmpty {
+                if mode == "trans" {
+                    text = line.translation
+                    chars = []
+                } else if mode == "both" {
+                    text = line.text + " ｜ " + line.translation
+                    chars = []
+                }
+            }
             var row: [String: Any] = [
                 "t": start,
                 "dur": dur,
-                "text": line.text,
+                "text": text,
             ]
             if !chars.isEmpty { row["chars"] = chars }
             return row
@@ -347,6 +363,10 @@ final class StageBridge: NSObject, ObservableObject {
             lines.last.map { String($0.startMs) } ?? "0",
             lines.first.map { String($0.words.count) } ?? "0",
             accent.map(String.init).joined(separator: ","),
+            // r25 #31：形态歌词档也进签名——切档后歌词文本变了，签名不变
+            // 会被去重挡掉、形态收不到新词（壳版切档调 StageHost.refresh()
+            // 强制重发；原生侧这里靠签名变化触发重发）。
+            SettingsStore.readStageLyricMode(),
         ]
         let sig = sigParts.joined(separator: "|")
         if !force, sig == lastInitSig { return }

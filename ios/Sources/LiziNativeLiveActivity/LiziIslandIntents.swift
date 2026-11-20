@@ -9,9 +9,11 @@ import Foundation
 /// App 里跑 perform()。只依赖 AppIntents/Foundation，别引 WebKit。
 ///
 /// 传输：LiveActivityIntent 在 App 进程内执行（iOS 17.2+），不打开 App；
-/// perform() 只调同进程的 IslandControlRelay，WebHost 启动时把
-/// “点 DOM 按钮 / 切喜欢” 的闭包挂上来。不走 HTTP、不依赖本地服务端口
-/// （端口是动态回落的，写死 18791 会错），也不用 App Group（本工程没有）。
+/// perform() 只调同进程的 IslandControlRelay；handler 由 `LiziNativeApp`
+/// 在 init 里注册（`LiziNativeApp.swift:48-59`），闭包直接调原生
+/// `PlaybackStore`（previous / togglePlay / next / toggleLike），
+/// 不经过 WebHost、不点 DOM 按钮、不执行 JS、不走 HTTP、不依赖本地服务
+/// 端口，也不用 App Group（本工程没有）。
 ///
 /// AirPlay 不走这里：第三方 Live Activity 里放不了 AVRoutePickerView
 /// （UIKit 视图，Widget 只支持纯 SwiftUI），也没有公开 API 能在岛上
@@ -40,7 +42,7 @@ enum IslandControlAction: String, AppEnum {
     }
 }
 
-/// 岛上控制 Intent：点按钮 → 在 App 进程内执行 → 中继调网页播放器。
+/// 岛上控制 Intent：点按钮 → 在 App 进程内执行 → 中继调原生播放器。
 /// 不打开 App（openAppWhenRun = false）。
 @available(iOS 17.2, *)
 struct LiziIslandControlIntent: LiveActivityIntent {
@@ -66,15 +68,18 @@ struct LiziIslandControlIntent: LiveActivityIntent {
     }
 }
 
-/// 同进程中继：Intent 与 WebHost 之间唯一的口子。
-/// handler 由 WebHost 在 init 时注册（点 DOM 按钮 / 调 __liziLikeCurrent）；
-/// Intent 侧只认这个闭包。App 刚被 Intent 唤醒时 WebHost 可能还没建好，
+/// 同进程中继：Intent 与原生播放器之间唯一的口子。
+/// handler 由 `LiziNativeApp` 在 init 里注册（`LiziNativeApp.swift:48-59`：
+/// 闭包捕获 `PlaybackStore`，动作跳到主线程执行 previous / togglePlay /
+/// next / toggleLike，同步返回 true 表示已接下）；Intent 侧只认这个闭包。
+/// App 刚被 Intent 唤醒时 App 可能还没完成 init、handler 还没挂上，
 /// dispatch 最多等 2 秒（每 50ms 查一次），等不到就返回 false（按钮这次没生效，
-/// 岛还在，用户再点一次即可；App 播着歌时 WebHost 一直都在，不会走到这一步）。
+/// 岛还在，用户再点一次即可；App 播着歌时 handler 一直都在，不会走到这一步）。
 final class IslandControlRelay {
     static let shared = IslandControlRelay()
 
-    /// WebHost 注册：收到动作返回 true（已接下并执行 JS），页面还没好返回 false。
+    /// LiziNativeApp 注册：收到动作返回 true（已接下，动作跳到主线程执行）；
+    /// handler 还没挂上时返回 false（dispatch 会等 2 秒再试）。
     var handler: ((IslandControlAction) -> Bool)?
 
     private init() {}

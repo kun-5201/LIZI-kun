@@ -94,14 +94,34 @@ final class AppleMusicService {
         guard !token.isEmpty else {
             return .json(200, ["code": 200, "loggedIn": false, "error": "开发者 token 是空的"])
         }
-        // 只做格式校验（JWT 三段），真校验走 statusBody 的 catalog 调用。
+        // r25 U8：JWT 三段格式校验 + catalog 真校验都在落盘之前。
+        // 以前是先存盘、再由 statusBody 验，验失败也不清，脏 token 一直留
+        // 在盘上、每次 status 都要再验一次。现：验失败不写盘。
         guard token.split(separator: ".").count == 3 else {
             return .json(200, ["code": 200, "loggedIn": false,
                                "error": "开发者 token 不是 JWT 格式（应为三段 base64，用 MusicKit 私钥签发）"])
         }
+        let verified = await verifyDevToken(token)
+        if verified == false {
+            // catalog 明确判无效（401/403）：不写盘新 token，并清掉已存的
+            // 旧 token + 复位校验缓存，错误原样回给 UI。
+            UserDefaults.standard.removeObject(forKey: Self.devTokenKey)
+            tokenValid = false; tokenVerifiedAt = .distantPast
+            return .json(200, ["code": 200, "loggedIn": false,
+                               "error": "开发者 token 无效或已过期（catalog 校验失败）"])
+        }
+        if verified == nil {
+            // 限流/网络等不定论：不写盘新 token，也不清旧登录态（verifyDevToken
+            // 的 nil 一贯是不定论、不清登录态），如实报原因、让用户稍后重试。
+            return .json(200, ["code": 200, "loggedIn": false,
+                               "error": "没能连上 Apple 校验 token（网络或限流），未保存，请稍后重试"])
+        }
         UserDefaults.standard.set(token, forKey: Self.devTokenKey)
         if !utoken.isEmpty { UserDefaults.standard.set(utoken, forKey: Self.userTokenKey) }
-        tokenVerifiedAt = .distantPast; userTokenVerifiedAt = .distantPast
+        // 刚验过：把这次的通过结果记进 300 秒缓存，免得紧接着的 statusBody
+        // 又调一次 catalog；user token 仍按老路子由 statusBody 现验。
+        tokenValid = true; tokenVerifiedAt = Date()
+        userTokenVerifiedAt = .distantPast
         return .json(200, await statusBody())
     }
 
@@ -134,10 +154,13 @@ final class AppleMusicService {
     }
 
     /// 开发者 token 校验：catalog 读一首已知曲目（公开文档端点，200 = token 有效）。
-    private func verifyDevToken() async -> Bool? {
+    /// 不传参时验已存盘的 token（statusBody 用）；传参验候选 token（loginToken
+    /// 落盘前先验，r25 U8）。返回 nil = 其它状态码（限流/网络）不定论，不清登录态。
+    private func verifyDevToken(_ candidate: String? = nil) async -> Bool? {
+        let token = candidate ?? devToken
         guard let url = URL(string: "https://api.music.apple.com/v1/catalog/tw/songs/\(Self.catalogSongId)") else { return nil }
         do {
-            let (_, resp) = try await Upstream.fetch(url, headers: ["Authorization": "Bearer \(devToken)"], timeout: 15)
+            let (_, resp) = try await Upstream.fetch(url, headers: ["Authorization": "Bearer \(token)"], timeout: 15)
             if resp.statusCode == 200 { return true }
             if resp.statusCode == 401 || resp.statusCode == 403 { return false }
             return nil // 其它状态码（限流/网络）不定论，不清登录态
@@ -286,9 +309,16 @@ final class AppleMusicService {
               let list = j["results"] as? [[String: Any]] else {
             return .json(200, ["code": 200, "source": "applemusic", "tracks": [], "error": "歌单拉不到"])
         }
-        // results[0] 是歌单本身，后面是曲目。
+        // results[0] 是歌单本身，后面是曲目。r25-B4：把歌单本身的
+        // collectionName / artworkUrl100 透出来（{ name, cover }，
+        // NativeBridge.playlistFrom 认这两个键），详情页才能显示真名真封面；
+        // 没有该字段的回包（results 为空或首条不是歌单）保持空串，不编。
+        // 封面与曲目同一口径升到 600（itunesTrack 同款替换）。
+        let head = list.first(where: { !scStr($0, "collectionName").isEmpty })
+        let plName = head.map { scStr($0, "collectionName") } ?? ""
+        let plCover = head.map { scStr($0, "artworkUrl100").replacingOccurrences(of: "100x100bb.jpg", with: "600x600bb.jpg") } ?? ""
         let tracks = list.dropFirst().compactMap(Self.itunesTrack)
-        return .json(200, ["code": 200, "source": "applemusic", "tracks": tracks])
+        return .json(200, ["code": 200, "source": "applemusic", "name": plName, "cover": plCover, "tracks": tracks])
     }
 
     private func songUrl(_ req: HttpRequest) async throws -> HttpResponse {

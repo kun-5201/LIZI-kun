@@ -87,7 +87,9 @@ final class HomeViewModel: ObservableObject {
     private static let sourceKey = "lizi.native.hall.source"
     private static let lastTrackKey = "lizi.native.hall.lastTrack"
     /// 与 PlaybackStore.likedKey 同一个键（它在那边是 private，这里照抄字面量，
-    /// 只读 id 列表，不改写）。
+    /// 只读，不改写）。键里存的是 id+platform 复合键（"platform\u{1f}id"，
+    /// r25-B2；旧单键裸 id 已由 PlaybackStore.init 里的
+    /// migrateLegacyLikedKeys() 迁移），这里只数条数，条数语义不变。
     private static let likedKey = "lizi.native.likedTrackIds"
     /// 跑马带速度：壳版 localStorage['lizi.hall.marq.speed'] 同款语义，
     /// 0–100，默认 24；可调 UI 放 P3，这里只读值。
@@ -119,7 +121,7 @@ final class HomeViewModel: ObservableObject {
     /// 上次播放的歌（PlaybackStore.currentTrack 为空时 Hero 显示它）。
     @Published var lastTrack: Track?
     @Published var lastPlayedAt: Date?
-    /// 已喜欢的曲目数（只有 id，没有详情，见文件头注释）。
+    /// 已喜欢的曲目数（只数 likedKey 里的 id+platform 复合键条数，没有曲目详情，见文件头注释）。
     @Published var likedCount = 0
     /// 四条 rails 的拉取结果（按 kind 存；切台 / 切来源时按需加载）。
     @Published var rails: [RailKind: RailResult] = [:]

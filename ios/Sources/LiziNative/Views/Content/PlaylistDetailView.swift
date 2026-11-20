@@ -9,11 +9,14 @@ import SwiftUI
 ///
 /// 诚实边界（不编假数据）：
 /// - 曲目数为 0 或接口无数据时显示空态，写清原因，不编曲目。
-/// - 部分平台的详情接口只回曲目、不回歌单名/封面/创建者（bodian
-///   /api/bodian/playlist/tracks、酷我榜单 /api/kuwo/rank/tracks、
-///   Apple Music /api/applemusic/playlist/tracks）：
-///   标题为空时显示「〈平台名〉歌单」通用名（不是真实歌单名），封面用白色底 +
-///   音符占位，曲目数显示已加载数；网易/QQ/汽水回完整歌单对象，正常显示。
+/// - 各平台详情形状（r25-B2 逐家核对服务端路由后定；详情见
+///   NativeBridge.playlistDetail / playlistMeta 的注释）：
+///   网易/QQ 的 detail 端点回全量（名/封面/曲数/曲目）；波点/酷狗/汽水
+///   detail 只回名/封面/曲数、曲目另调 tracks 合并；酷我非榜单 tracks
+///   接口本身带名/封面/总数；只有酷我榜单是 tracks-only，标题为空时显示
+///   「〈平台名〉歌单」通用名（不是真实歌单名），封面用白色底 + 音符占位，
+///   曲目数显示已加载数；Apple Music tracks 回包带 name/cover（r25-B4：
+///   服务端 playlistTracks 透 iTunes lookup 首条的歌单名/封面），显示真名真封面。
 /// - 标题与曲目同时为空 = 接口没有返回数据或请求失败（两种情况桥接层无法区分，
 ///   空态文案把两种可能都写清，不谎称是哪一种）。
 /// - 禁缩放：没有任何 MagnificationGesture，尺寸全部固定 pt。
@@ -240,7 +243,12 @@ struct PlaylistDetailView: View {
 
 // MARK: - ViewModel
 
-/// 歌单详情状态机：只调 NativeBridge.playlistDetail 一次，不编数据。
+/// 歌单详情状态机：两阶段加载，不编数据。
+/// 第一阶段调 NativeBridge.playlistMeta（detail 端点拿名/封面/曲数），
+/// 有真名/真封面就先显示头部；第二阶段调 NativeBridge.playlistDetail
+/// （有 detail 的平台内部再合一次元信息 + tracks，见其注释；无 detail 的
+/// 平台 tracks-only），补全曲目。网易/QQ 的 detail 本身已回全量曲目，
+/// 第一阶段后直接结束，不再调第二阶段。
 /// `hasContent` = 标题或曲目任一非空；两者都空 = 无数据（空态写清两种可能）。
 @MainActor
 final class PlaylistDetailViewModel: ObservableObject {
@@ -269,8 +277,37 @@ final class PlaylistDetailViewModel: ObservableObject {
         guard !started else { return }
         started = true
         isLoading = true
-        let result = await NativeBridge.playlistDetail(platform: platform, id: id, isRank: isRank)
-        playlist = result
+        // 第一阶段：元信息（名/封面/曲数）。无 detail 端点的平台（酷我/
+        // Apple Music）这步为空，不编，直接等第二阶段。
+        let meta = await NativeBridge.playlistMeta(platform: platform, id: id, isRank: isRank)
+        if !meta.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || meta.coverURL != nil {
+            playlist = meta
+        }
+        // detail 本身已回全量曲目（网易/QQ）：一次就够，不再调第二阶段。
+        if !meta.tracks.isEmpty {
+            playlist = meta
+            isLoading = false
+            return
+        }
+        // 第二阶段：曲目（第一阶段的 meta 传进去复用，不重复调 detail）。
+        let full = await NativeBridge.playlistDetail(platform: platform, id: id, isRank: isRank,
+                                                     meta: meta)
+        if full.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let shown = playlist,
+           !shown.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // detail 成功但 tracks 失败时 full 只有空标题：保留第一阶段
+            // 已显示的真名/真封面/创建者/简介/曲数，只把曲目（空）合进来。
+            var merged = full
+            merged.title = shown.title
+            merged.coverURL = shown.coverURL ?? merged.coverURL
+            merged.creator = shown.creator.isEmpty ? merged.creator : shown.creator
+            merged.description = shown.description.isEmpty ? merged.description : shown.description
+            if merged.trackCount == 0 { merged.trackCount = shown.trackCount }
+            playlist = merged
+        } else {
+            playlist = full
+        }
         isLoading = false
     }
 }

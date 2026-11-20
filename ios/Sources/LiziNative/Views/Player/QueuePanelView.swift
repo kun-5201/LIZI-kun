@@ -3,8 +3,14 @@ import SwiftUI
 /// 播放队列面板（r20：由 `PlayerView` 叠在歌词区上打开/关闭，只盖住歌词区，
 /// 绝不遮控制行和最底部细进度条；不用 sheet，sheet 会盖住整页）。
 ///
-/// 点行切歌（`store.play(_:)`；同一首歌在队列里出现多次时按 `queueId` 区分，
-/// 这里按行点的是该行的那一项）。当前在播的行高亮 + 「正在播放」标记。
+/// 点行切歌（`store.play(queueItem:)`；按 `queueId` 定位，同一首歌在队列里
+/// 出现多次时点第几行就播第几行，r25-B2 U6；旧 `play(item.track)` 按
+/// id+platform 找第一个匹配项，点第二行会播成第一行，已不用）。
+/// 当前在播的行高亮 + 「正在播放」标记。
+/// 左滑删除单行（`store.removeFromQueue(at:)`）+ 头部「清空」按钮
+/// （二次确认后 `store.clearQueue()`，清空并停止；r25-B2 U3）。
+/// 列表用 List（swipeActions 只在 List 行上生效，ScrollView 里不生效），
+/// 行背景透明 + 隐藏系统分隔线，沿用原来的自定义 Divider，外观不变。
 ///
 /// 头部一行小按钮（r20 从顶栏 / 传输排撤下后搬到这里，功能接原来的
 /// store 调用，一个没丢）：
@@ -15,6 +21,9 @@ struct QueuePanelView: View {
 
     /// 关闭回调（`PlayerView` 的 showQueue；不传时不显示关闭按钮）。
     var onClose: (() -> Void)? = nil
+
+    /// 清空队列二次确认弹窗。
+    @State private var showClearConfirm = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,17 +38,30 @@ struct QueuePanelView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(spacing: 0) {
-                        ForEach(Array(store.queue.enumerated()), id: \.element.id) { index, item in
+                List {
+                    ForEach(Array(store.queue.enumerated()), id: \.element.id) { index, item in
+                        VStack(spacing: 0) {
                             QueueRowView(item: item, isCurrent: index == store.currentIndex)
-                                .onTapGesture { store.play(item.track) }
+                                .onTapGesture { store.play(queueItem: item) }
                             Divider()
                                 .background(Color.white.opacity(0.08))
                                 .padding(.leading, 56)
                         }
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                        .listRowSeparator(.hidden)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                store.removeFromQueue(at: index)
+                            } label: {
+                                Label("删除", systemImage: "trash")
+                            }
+                            .accessibilityLabel("从队列删除 \(item.track.title)")
+                        }
                     }
                 }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -49,6 +71,14 @@ struct QueuePanelView: View {
             RoundedRectangle(cornerRadius: PlayerTokens.radiusLg)
                 .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
         )
+        .alert("清空队列", isPresented: $showClearConfirm) {
+            Button("清空", role: .destructive) {
+                store.clearQueue()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将清空队列并停止播放，此操作无法撤销。")
+        }
     }
 
     // MARK: - 头部：循环模式切换 + 随机开关 + 数量 + 关闭
@@ -68,6 +98,22 @@ struct QueuePanelView: View {
             Spacer()
 
             if !store.queue.isEmpty {
+                Button {
+                    showClearConfirm = true
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 12, weight: .medium))
+                        Text("清空")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(Color.red)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.white.opacity(0.12), in: Capsule())
+                }
+                .accessibilityLabel("清空队列")
+
                 Text("共 \(store.queue.count) 首")
                     .font(.system(size: PlayerTokens.textXs))
                     .foregroundStyle(PlayerTokens.playerDim)

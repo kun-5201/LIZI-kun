@@ -76,6 +76,29 @@ struct HomeView: View {
     /// 登录提示（r23 集成）：rail 展开需要登录时弹提示，不进详情。
     @State private var loginPrompt: LoginPrompt?
     @State private var loginTarget: LoginSheetTarget?
+    /// 本地音乐区块显示开关（#48：键与 `SettingsStore.localMusicShown`
+    /// 同键 `lizi.local.show`，默认开；@AppStorage 直接监听 UserDefaults
+    /// 变化，设置页拨开关后回首页即生效，不依赖 SettingsStore 实例）。
+    @AppStorage("lizi.local.show") private var localMusicShown = true
+    /// U4：sheet 关后刷新用的进行中任务（onDone 与 onChange 可能先后各
+    /// 触发一次，先取消上一单、只留最新一单）。
+    @State private var loginRefreshTask: Task<Void, Never>?
+
+    /// sheet 关后刷新首页（U4）：先刷登录态（`LoginStore.refresh`，
+    /// 60 秒节流），再重拉每日推荐 + 当前来源的 rail。登录完成前
+    /// daily/rails 还是未登录空态，不刷就一直停在空态——这就是 U4 的 bug。
+    /// loadDaily/loadRail 本身有代际守卫与 Task.isCancelled 检查，
+    /// 被取消的一单写不进状态。
+    private func refreshAfterLoginSheetClosed() {
+        loginRefreshTask?.cancel()
+        loginRefreshTask = Task {
+            LoginStore.shared.refresh()
+            await viewModel.loadDaily()
+            if let kind = viewModel.selectedSource.railKind {
+                await viewModel.loadRail(kind)
+            }
+        }
+    }
 
     // MARK: - r24 首页两卡拖动改尺寸（分界手柄 + 持久化）
 
@@ -355,7 +378,12 @@ struct HomeView: View {
                                 }
                             }
 
-                            LocalMusicSectionView()
+                            // #48：按「在首页显示」开关（`lizi.local.show`，
+                            // 默认开）显示/隐藏本地音乐区块；关了整块消失、
+                            // 不留占位，导入功能不受影响。
+                            if localMusicShown {
+                                LocalMusicSectionView()
+                            }
                         }
                         .padding(.top, 24)
                         // 底部留白 50 = 16 净空 + 34 Home Indicator
@@ -391,7 +419,20 @@ struct HomeView: View {
         .ignoresSafeArea(edges: [.top, .bottom])
         // r23 集成：登录提示 alert + 「去登录」 sheet（rail 展开用）。
         .loginRequiredAlert(prompt: $loginPrompt, loginTarget: $loginTarget)
-        .sheet(item: $loginTarget) { LoginSheetView(platform: $0.platform) }
+        // U4：传 onDone，登录完成时刷新首页 daily + rails。
+        // 注意 onDone 只在 LoginSheetView.close() 路径触发——取消按钮与
+        // 汽水/波点/酷狗的 onClose 走它；网易/QQ/酷我/Apple Music 各 flow
+        // 用自己的 @Environment(\.dismiss) 直接关弹窗，onDone 不触发。
+        // 所以关后刷新不能只靠 onDone：下面 onChange(of: loginTarget)
+        // 在 sheet 已关（回 nil，不论哪条关闭路径）时再刷一次，两处共用
+        // 同一个 refreshAfterLoginSheetClosed()，里面先取消上一单，
+        // 先后触发也只落一单有效加载。
+        .sheet(item: $loginTarget) { target in
+            LoginSheetView(platform: target.platform, onDone: { refreshAfterLoginSheetClosed() })
+        }
+        .onChange(of: loginTarget?.platform) { platform in
+            if platform == nil { refreshAfterLoginSheetClosed() }
+        }
         .task {
             // r24 第 1 件：首页启动就刷一次登录态（fire-and-forget，
             // 不等它回来再 initialLoad——7 个 status 并行刷，各自失败

@@ -231,9 +231,16 @@ struct SearchView: View {
                     ForEach(viewModel.history, id: \.self) { item in
                         HStack(spacing: 8) {
                             Button {
-                                // 只设文字：onChange 的 300ms 防抖会接手搜，不在这里
-                                // 再调 searchNow，否则同一条词会连搜两次。
+                                // U7：点历史词时与当前输入完全相同时，设 query
+                                // 不触发 onChange（值没变），原来就点了没反应。
+                                // 相同词显式调一次 searchNow；不同词仍只设文字、
+                                // 走 onChange 的 300ms 防抖（searchNow 会取消
+                                // 防抖再起一单，两边都调会连搜两次，所以只在
+                                // 相同词时显式调；searchNow 本身会取消在途防抖，
+                                // 不会把旧输入的防抖搜带出来）。
+                                let alreadySame = viewModel.query == item
                                 viewModel.query = item
+                                if alreadySame { viewModel.searchNow() }
                                 searchFocused = false
                             } label: {
                                 Text(item)

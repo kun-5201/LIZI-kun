@@ -13,8 +13,9 @@ import Foundation
 /// | 平台头像 | `lizi.hall.platAvatar` | 关 | 壳版键；原生大厅暂未消费（见 SettingsView 注释） |
 /// | 平台颜色铺色 | `lizi.hall.platColor` | 关 | 壳版键；同上 |
 /// | 大厅内容轨 | `lizi.hall.rail` | 开 | 壳版键；同上 |
-/// | 本地音乐首页显示 | `lizi.local.show` | 开 | 壳版键；同上 |
-/// | 播放页版式 | `lizi.now.layout` | `""`（默认） | 壳版 `player-layouts.js` 的键；PlayerView 暂未消费 |
+/// | 本地音乐首页显示 | `lizi.local.show` | 开 | 壳版键；HomeView 已消费（r25） |
+/// | 播放页版式 | `lizi.now.layout` | `""`（默认） | 壳版 `player-layouts.js` 的键；PlayerView 已消费（r25） |
+/// | 形态歌词 | `lizi.stage.lyricMode` | `orig`（原文） | 壳版键（安卓快照 `app.js:1901-1905`，`#set-stage-lyric`）；三档非开关：`orig` 原文 / `both` 双文 / `trans` 译文；StageBridge 已消费（r25） |
 /// | 平台管理（显示哪些平台） | `lizi.platforms.v1` | 全选（无键） | 壳版语义：没存 = 全部；全选 = 删键 |
 /// | 我的专辑展示 | `lizi.native.myAlbums.form` | spine | 原生键：MyAlbumsView 读这把键，壳版键不跟 |
 /// | 跑马带速度 | `lizi.native.hall.marq.speed` | 24 | 原生键：HomeViewModel 读这把键 |
@@ -86,6 +87,44 @@ final class SettingsStore: ObservableObject {
 
     private static func readNowLayout() -> String {
         normalizeLayout(UserDefaults.standard.string(forKey: "lizi.now.layout") ?? "")
+    }
+
+    /// 播放页重读版式（PlayerView 进页时调：设置页改完版式后播放页是新创建的，
+    /// 初始化时已读到新值；多一道重读更稳。只读 UserDefaults，不动其它设置）。
+    func refreshNowLayout() {
+        nowLayout = Self.readNowLayout()
+    }
+
+    // MARK: - 形态歌词（壳版 `#set-stage-lyric`，三档，不是开关）
+
+    /// 形态歌词显示档：`orig` 原文 / `both` 双文（原文 ｜ 译文同排）/
+    /// `trans` 译文。只改形态（可视化）里显示的字，播放页歌词不动；
+    /// 没有译文的行照旧显示原文。键与默认值照抄壳版（安卓快照
+    /// `app.js:1901-1905`：`lizi.stage.lyricMode`，默认 `orig`；
+    /// 当前 `public/` 里这节已被删，只剩安卓快照与对照表可考）。
+    /// 非法值回落 `orig`。
+    @Published var stageLyricMode: String = SettingsStore.readStageLyricMode() {
+        didSet {
+            let v = Self.normalizeStageLyricMode(stageLyricMode)
+            if v != stageLyricMode { stageLyricMode = v; return }
+            UserDefaults.standard.set(v, forKey: Self.stageLyricModeKey)
+        }
+    }
+
+    static let stageLyricModeKey = "lizi.stage.lyricMode"
+
+    static let stageLyricModes: [(id: String, name: String)] = [
+        ("orig", "原文"),
+        ("both", "双文"),
+        ("trans", "译文"),
+    ]
+
+    static func normalizeStageLyricMode(_ id: String) -> String {
+        stageLyricModes.contains { $0.id == id } ? id : "orig"
+    }
+
+    static func readStageLyricMode() -> String {
+        normalizeStageLyricMode(UserDefaults.standard.string(forKey: stageLyricModeKey) ?? "orig")
     }
 
     // MARK: - 我的专辑展示形态（壳版 `lizi.myAlbums.form` 语义，原生键）
@@ -246,6 +285,37 @@ final class SettingsStore: ObservableObject {
 
     var localMusicSummary: String {
         localMusicCount == 0 ? "未导入" : "已导入 \(localMusicCount) 首"
+    }
+
+    // MARK: - 网易每日签到（r25 #45：只做应用内入口，后端路由已有）
+
+    /// 调一次网易每日签到（`POST /api/daily/signin` → 服务端
+    /// `Server/NetEase.swift` 的 `daily/signin`：weapi `/point/dailyTask`，
+    /// type 0 安卓 + type 1 网页各一次；code 200 累加点数，code -2 当天已签
+    /// 也算成功；两次都失败才算失败；未登录不调上游、直接回 code 301）。
+    /// 返回如实展示用的结果文案，不编点数、不编成功：
+    /// - 服务端回非 2xx（上游无响应，服务端回 502）→ `NativeBridge.call`
+    ///   回 nil，这里只报「服务端无响应」，不猜是已签还是未签。
+    /// - 回包里 `signedIn` / `alreadySigned` / `point` / `message`
+    ///   原样转述；`point` 是服务端回包字段名，文案里只叫「点」，不另起名。
+    func dailySignIn() async -> String {
+        guard let d = await NativeBridge.call(path: "/api/daily/signin") else {
+            return "签到失败：服务端无响应（上游无响应）。"
+        }
+        let code = (d["code"] as? NSNumber)?.intValue ?? -1
+        let signedIn = (d["signedIn"] as? NSNumber)?.boolValue ?? false
+        let alreadySigned = (d["alreadySigned"] as? NSNumber)?.boolValue ?? false
+        let point = (d["point"] as? NSNumber)?.intValue ?? 0
+        let message = d["message"] as? String ?? ""
+        if code == 301 || !signedIn {
+            return message.isEmpty ? "签到失败：需要登录网易云音乐后才能签到。" : message
+        }
+        if alreadySigned {
+            return point > 0
+                ? "今天已签到（之前已签过），共获得 \(point) 点。"
+                : "今天已签到（之前已签过）。"
+        }
+        return "签到成功，本次共获得 \(point) 点。"
     }
 
     // MARK: - LX 自定义源（读/写 LXSourceRegistry 已有存储，不改取链逻辑）

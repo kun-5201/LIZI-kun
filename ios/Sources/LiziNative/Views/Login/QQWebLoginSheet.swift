@@ -142,20 +142,21 @@ struct QQWebLoginSheet: View {
         return fields
     }
 
-    /// 账号 id 取 uin / p_uin / pt2gguin / qqmusic_uin / loginuin（p_uin 开头
-    /// 的 "o" 去掉；"0" / "null" 不算）；凭证取第一个非空的 qqmusic_key /
+    /// 账号 id 取 uin / p_uin / wxuin / pt2gguin / qqmusic_uin / loginuin（p_uin 开头
+    /// 的 "o" 去掉；"0" / "null" 不算；wxuin 是微信登录 QQ 音乐的账号 id，r25 U1：
+    /// 这类用户 cookie 里只有 wxuin、没有 uin，不认它就没有任何登录路径）；凭证取第一个非空的 qqmusic_key /
     /// qm_keyst / musickey / music_key / p_skey / skey / psrf_access_token /
     /// psrf_qq_access_token。两样缺一不可，缺了返回后端同款中文原因。
     static func cookieProblem(_ raw: String) -> String? {
         let fields = cookieFields(raw)
         var uin = ""
-        for key in ["uin", "p_uin", "pt2gguin", "qqmusic_uin", "loginuin"] {
+        for key in ["uin", "p_uin", "wxuin", "pt2gguin", "qqmusic_uin", "loginuin"] {
             guard let v = fields[key], !v.isEmpty else { continue }
             let norm = v.hasPrefix("o") ? String(v.dropFirst()) : v
             if norm != "0" && norm.lowercased() != "null" && !norm.isEmpty { uin = norm; break }
         }
         guard !uin.isEmpty else {
-            return "网页登录没拿到 QQ 号（缺 uin / p_uin）：请确认已在网页里登录，再点一次「同步登录状态」"
+            return "网页登录没拿到 QQ 号（缺 uin / p_uin / wxuin）：请确认已在网页里登录，再点一次「同步登录状态」"
         }
         for key in ["qqmusic_key", "qm_keyst", "musickey", "music_key", "p_skey", "skey",
                     "psrf_access_token", "psrf_qq_access_token"] {

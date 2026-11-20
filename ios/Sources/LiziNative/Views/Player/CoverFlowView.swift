@@ -278,7 +278,9 @@ struct CoverFlowView: View {
         if let onSelectIndex {
             onSelectIndex(index)
         } else if store.queue.indices.contains(index) {
-            store.play(store.queue[index].track)
+            // r25-B4：按 queueId 播（U6 同根：play(track) 只按 id+platform
+            // 找第一个匹配项，队列有重复曲目时点第几行会播成第一行）。
+            store.play(queueItem: store.queue[index])
         }
     }
 }

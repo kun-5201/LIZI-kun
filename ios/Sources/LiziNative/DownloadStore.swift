@@ -95,9 +95,11 @@ final class DownloadStore: NSObject, ObservableObject {
         }
         setState(key: key, state: .downloading(0))
         // 取链：整条播放编排（官方 → 云盘 → LX），不用平台腿单点。
+        // r27 构建修（run 44773480205）：guard-let 的 else 分支里 result 不在
+        // 作用域（cannot find 'result' in scope），失败原因只剩 store.errorMessage。
         guard let result = await store.resolveURLForDownload(track: track),
               let url = result.url else {
-            setState(key: key, state: .failed("取链失败：\(downloadReasonText(result?.reason ?? store.errorMessage))"))
+            setState(key: key, state: .failed("取链失败：\(downloadReasonText(store.errorMessage))"))
             return
         }
         if result.isTrial || result.isPreview {

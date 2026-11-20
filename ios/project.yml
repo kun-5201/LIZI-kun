@@ -154,6 +154,9 @@ targets:
       # 清单外补 4：LocalHttpServer 的 init 签名要 LiziRouter 类型；
       # Router 本身 P0 不实例化。
       - Sources/Lizi/Server/Router.swift
+      # r27 构建修（run 44773480205）：Router 调 CommentsService.handle，
+      # 本文件漏列导致 cannot find 'CommentsService' in scope。
+      - Sources/Lizi/Server/CommentsService.swift
       # 动画插图（Ken Burns 本地生成）与灵动岛管理器。
       - Sources/Lizi/AnimatedArtwork.swift
       - Sources/Lizi/LiveActivityManager.swift

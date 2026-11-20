@@ -621,6 +621,14 @@ actor FoliaKugouService {
 
     /// 取第一个非空字段（Folia 的 valueOf 同款：按给定 key 顺序找）。
     private static func firstField(_ d: [String: Any], _ keys: String...) -> Any? {
+        firstField(d, keys: keys)
+    }
+
+    /// 数组版 firstField（r24 构建修，run 44656645107）：strField / intField
+    /// 里 `keys` 已是收集好的 [String]，不能直接塞进 `String...` 形参，
+    /// 编译器报 "cannot pass array of type 'String...' as variadic
+    /// arguments"。循环体搬到这里，可变参数版转调它；字面量调用点不动。
+    private static func firstField(_ d: [String: Any], keys: [String]) -> Any? {
         for k in keys {
             guard let v = d[k] else { continue }
             if let s = v as? String, s.isEmpty { continue }
@@ -1037,18 +1045,22 @@ actor FoliaKugouService {
                                              "srcappid": Self.srcappid, "qrcode": key],
                                     encrypt: .web)
         let data = Self.dataDict(res.json)
-        let status = Self.intField(data, "status", "code")
+        // r24 构建修（run 44656645107）：局部量叫 `status` 会遮住同名
+        // 方法 `status()`，下面 `try? await status()` 被当成调 Int，
+        // 编译器报 "cannot call value of non-function type 'Int'"。
+        // 改名 qrStatus，方法调用恢复。
+        let qrStatus = Self.intField(data, "status", "code")
         let token = Self.strField(data, "token")
         let userid = Self.strField(data, "userid", "user_id", "uid")
-        switch status {
+        switch qrStatus {
         case 0:
             return .json(200, ["code": 800, "status": 0, "message": "二维码已过期"])
         case 1:
             return .json(200, ["code": 801, "status": 1, "message": "等待扫码"])
         case 2, 3:
-            return .json(200, ["code": 802, "status": status, "message": "已扫码，请在手机上确认"])
+            return .json(200, ["code": 802, "status": qrStatus, "message": "已扫码，请在手机上确认"])
         default:
-            if status == 4 || !token.isEmpty {
+            if qrStatus == 4 || !token.isEmpty {
                 guard !token.isEmpty, !userid.isEmpty else {
                     return .json(200, ["code": 801, "status": 1, "message": "等待扫码"])
                 }
@@ -1068,7 +1080,7 @@ actor FoliaKugouService {
                                    "nickname": nickname, "avatar": avatar])
             }
             let message = Self.strField(data, "message", "msg", "error")
-            return .json(200, ["code": 800, "status": status,
+            return .json(200, ["code": 800, "status": qrStatus,
                                "message": message.isEmpty ? "扫码登录失败" : message])
         }
     }

@@ -153,12 +153,11 @@ struct HomeView: View {
             let minHeroH: CGFloat = ceil(40 + 30 + titleLineH + 8 + 17)
             // - 平面带一排封面卡宽（HomeCoverRingView 分档表：compact 188 /
             //   standard 202 / large 220，≈0.51vw），minPanelH 按 tier 走。
-            let flatCard: CGFloat
-            switch tier {
-            case .compact: flatCard = 188
-            case .standard: flatCard = 202
-            case .large: flatCard = 220
-            }
+    /// r24 构建修（run 44656645107）：`let flatCard` + `switch` 语句在
+    /// GeometryReader 的 @ViewBuilder 闭包里，分支产出 `()` 不符合 View，
+    /// 编译器报 "type '()' cannot conform to 'View'"。改成三元表达式
+    /// （同理下面 minPanelH 的 if/else 也改成三元，免得修完一个又冒一个）。
+    let flatCard: CGFloat = tier == .compact ? 188 : tier == .standard ? 202 : 220
             // - minPanelH：面板内边距上下 10+10（dailyPanel `.padding(10)`）
             //   + 平台条 42（PlatformStripView `.frame(height: 42)`）
             //   + 面板 VStack 间距 8（条与下一行之间）。
@@ -172,15 +171,11 @@ struct HomeView: View {
             //   （flatCard/4，标准档 202/4 ≈ 50，封面露一角、能认出是封面带；
             //   模板默认露 70，标准档下限 20+42+8+50.5 = 120.5→121 < 140，
             //   默认值仍在合法区间里）。
-            // r24 构建修：同上，`flatCard / 4` 先单独算成 CGFloat，
-            // 再进 ceil，避免整串混字面量又让编译器超时。
+            // r24 构建修：同上，if/else 赋值改三元表达式。
             let ringPeek: CGFloat = flatCard / 4
-            let minPanelH: CGFloat
-            if isLandscape {
-                minPanelH = ceil(20 + 42 + 8 + ringPeek)
-            } else {
-                minPanelH = 20 + 42 + 8 + 32 + 8 + flatCard
-            }
+            let minPanelH: CGFloat = isLandscape
+                ? ceil(20 + 42 + 8 + ringPeek)
+                : 20 + 42 + 8 + 32 + 8 + flatCard
             // - maxHeroH = contentH − minPanelH。内容极矮时（横屏小屏，
             //   如 667×375 档 contentH 265 < minHeroH 153 + minPanelH 125，
             //   667 宽走 large 档 flatCard 220，下限和是 278）
@@ -711,6 +706,10 @@ private struct RailRowView: View {
     let onRetry: () -> Void
     /// 点卡片的直达回调（r24 第 1 件）：曲目 → 播，歌单 → 歌单详情页，
     /// 电台频道 → rail 详情页；与「展开」按钮的 onExpand 分开。
+    /// r24 构建修（run 44656645107）：第 1 件工人只写了上面这段注释与
+    /// 下面的调用点，漏声明了本属性，编译器报 "cannot find 'onEntryTap'
+    /// in scope"；这里补上声明，调用方 HomeView.body 已传实参。
+    let onEntryTap: (RailEntry) -> Void
 
     /// 行标题（喜欢 rail 按平台取真名，其余 rail 固定名）。
     private var displayTitle: String { kind.displayTitle(platform: platform) }

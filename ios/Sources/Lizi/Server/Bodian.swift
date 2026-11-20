@@ -1,5 +1,29 @@
 import Foundation
 import Compression
+import CoreImage
+import UIKit
+
+/// 二维码 data URL（r24 构建修，run 44646659508）：原来与各边车共用的
+/// `scQRCodeDataURL` 定义在已删的 Kugou.swift 里，波点登录还在用，
+/// 编译器报 "cannot find 'scQRCodeDataURL' in scope"。这里新写一个
+/// 同名同契约的通用 helper（不是把旧文件搬回来：输出格式与树内
+/// NetEase.qrDataURL 同款——512px、纠错 M、PNG data URL，前端
+/// login_qr_create 只读 `qrimg`，格式必须一致）。
+/// 只有 BodianService 在用，放本文件文件级作用域。
+func scQRCodeDataURL(_ content: String) -> String {
+    guard let data = content.data(using: .utf8),
+          let filter = CIFilter(name: "CIQRCodeGenerator") else { return "" }
+    filter.setValue(data, forKey: "inputMessage")
+    filter.setValue("M", forKey: "inputCorrectionLevel")
+    guard let output = filter.outputImage else { return "" }
+    let scale = 512.0 / output.extent.width
+    let scaled = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+    let context = CIContext()
+    guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return "" }
+    let image = UIImage(cgImage: cgImage)
+    guard let png = image.pngData() else { return "" }
+    return "data:image/png;base64,\(png.base64EncodedString())"
+}
 
 /// 波点边车：bodian-music-api@0.1.2（MIT）的 Swift 移植。
 /// 上游细节见 /tmp/qishui-bodian-details.md（逐字摘自包内 src/）。

@@ -176,12 +176,16 @@ targets:
       - Sources/LiziNative/Resources/GalleryHTML
       # P3-A 舞台 + P3 r19 集成去重：r28 起形态文件只剩 post-build 脚本拷
       # 的 stages/ 结构拷贝一份（stages/*.html 85 个 + stages/assets/ 全部
-      # 82 个文件，形态相对引用 assets/... 才能全解析）；resources 列表里
-      # 的 stages 条目已删——XcodeGen 2.46 会把 resources 里的目录逐文件平
-      # 拷进包根，那份平拷（85 个 html）是 r27 包里多出来的第二份。`stages/`
-      # 全小写，与壳版 public/ 下的相对引用 `stages/...` 同名；旧的第二份
-      # 拷贝 GalleryHTML/stages/（69 html + 15 个不全的 assets，约 27MB）
-      # 已删，长廊页的 stage-layer 改走 `../../stages/...`（见
+      # 82 个文件，形态相对引用 assets/... 才能全解析）。注意：包根那份平拷
+      # （85 个 html，r27 包里多出来的第二份）不是 resources 条目造成的——
+      # resources 里的 stages 条目 r28 已删，平拷照样在；真正来源是原生
+      # target 的 sources: 里 `Sources/LiziNative` 整目录 glob，XcodeGen
+      # 会把该目录下的非代码文件自动收进包、平拷到包根。删 resources 条目
+      # 删不掉它，post-build 脚本「Copy structured resources」末尾用 find
+      # 删包根 *.html（只留 index.html，即画廊 index 的平拷）才去重。
+      # `stages/` 全小写，与壳版 public/ 下的相对引用 `stages/...` 同名；
+      # 旧的第二份拷贝 GalleryHTML/stages/（69 html + 15 个不全的 assets，
+      # 约 27MB）已删，长廊页的 stage-layer 改走 `../../stages/...`（见
       # forms-labs/js/app.js stageSrc）。304-kidcore 的
       # ../assets/fonts/ 字体放 Resources/assets/fonts/，与 stages/
       # 平级，相对路径原样解析。
@@ -197,8 +201,9 @@ targets:
     # LXSponsored 全是平的，StageBridge 的 subdirectory:"stages" 查不到、
     # GalleryHTML 的 ../../stages/ 与 ../vendor/ 全断、linglan.js 因不在
     # LXSponsored/ 子目录下注册不上。照抄壳版「Copy public frontend」的做法，
-    # 用 post-build 脚本把 4 个目录按结构拷进 .app。平拷的冗余文件留着无害
-    #（Fraunces 还要靠包根的平拷进 UIAppFonts；其余平拷文件只是占体积）。
+    # 用 post-build 脚本把 4 个目录按结构拷进 .app。舞台的包根平拷由本脚本
+    # 末尾的 find 删掉（只留 index.html）；其余平拷留着——Fraunces 还要靠
+    # 包根的平拷进 UIAppFonts，其余平拷文件只是占体积。
     postBuildScripts:
       - name: Copy structured resources
         basedOnDependencyAnalysis: false
@@ -211,6 +216,12 @@ targets:
           cp -R "$SRC/GalleryHTML" "$APP/GalleryHTML"
           cp -R "$SRC/assets" "$APP/assets"
           cp -R "$SRC/LXSponsored" "$APP/LXSponsored"
+          # 去重：包根的舞台 html 平拷来自 sources: 的 `Sources/LiziNative`
+          # 整目录 glob（XcodeGen 把该目录下的非代码文件自动收进包根），不是
+          # resources 条目，删 resources 条目删不掉，只能在这里删。只删包根
+          # maxdepth 1 的 *.html、保留 index.html（画廊 index 的平拷，1 个）；
+          # stages/ 子目录不受影响（find 不递归进子目录）。
+          find "$APP" -maxdepth 1 -name '*.html' ! -name 'index.html' -delete
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lty5201.lizi-native

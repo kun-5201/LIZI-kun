@@ -170,7 +170,10 @@ final class PlaybackStore: ObservableObject {
     }
 
     /// 一首曲目的喜欢复合键。
-    static func likeKey(for track: Track) -> String {
+    /// 构建工 r31 修：纯字符串拼接，不碰任何 actor 状态，标 nonisolated——
+    /// 否则 RailsBridge.appendLocalStarred 的同步闭包里调不到（@MainActor
+    /// 隔离的静态方法在同步非隔离上下文里是硬错，run 44832049482 编译失败）。
+    nonisolated static func likeKey(for track: Track) -> String {
         "\(track.platform)\u{1f}\(track.id)"
     }
 

@@ -39,6 +39,7 @@ enum LiziTokens {
     static let size12: CGFloat = 12
     static let size13: CGFloat = 13
     static let size14: CGFloat = 14
+    static let size15: CGFloat = 15
     static let size16: CGFloat = 16
     static let size20: CGFloat = 20
     static let size25: CGFloat = 25

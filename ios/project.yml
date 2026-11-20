@@ -227,7 +227,7 @@ targets:
       # 壳版 Sources/Lizi/Info.plist 同理：磁盘上不存在，构建时由 XcodeGen 生成。
       path: Sources/LiziNative/Info.plist
       properties:
-        CFBundleDisplayName: LIZI 原生
+        CFBundleDisplayName: LIZI kun
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UISupportedInterfaceOrientations:

@@ -546,8 +546,13 @@ private struct BrandMarkView: View {
             path.addLine(to: CGPoint(x: 490.18, y: 595.37))
             path.closeSubpath()
         }
-        .transform(CGAffineTransform(translationX: -328, y: -329)
-            .scaledBy(x: 17 / 368, y: 17 / 366))
+        // r26 修：顺序必须是「先平移 viewBox 原点、再缩放」。旧写法
+        // `CGAffineTransform(translationX: -328, y: -329).scaledBy(...)`
+        // 是 scaledBy 拼在平移之后，点先被缩放（~0.046×）再平移 -328，
+        // 标记落在约 (-313,-314)，屏外看不见。现用 scale.concatenating(translate)：
+        // 点先平移 (-328,-329)、再缩放，落在 0.04…16.97 的 17×17 框内。
+        .transform(CGAffineTransform(scaleX: 17 / 368, y: 17 / 366)
+            .concatenating(CGAffineTransform(translationX: -328, y: -329)))
         .fill(LiziTokens.ink)
         .frame(width: 17, height: 17)
     }

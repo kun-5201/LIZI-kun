@@ -265,8 +265,9 @@ struct PlayerView: View {
 
     // MARK: - 竖屏：壳版窄屏几何（封面 → 弹性歌词区 → 歌名 → 控制行 → 进度条）
 
-    /// 竖屏布局：段顺序与 r20 / 壳版窄屏一致（顶栏 → 封面流 → 歌词区 →
-    /// 歌名块 → 底部三排），只改锚定方式：
+    /// 竖屏布局：段顺序（r29 task 6：顶栏 → 封面流 → 歌名 → 歌词区 →
+    /// 歌手 → 底部三排；歌名提到歌词区之上、歌手挪到歌词区之下，即原来
+    /// titleBlock 的位置、原来药丸的位置）：
     /// - 每一行都给死宽度（内容宽 = 屏宽 − 2×16）：行的布局宽
     ///   由 frame 定，不由内容理想宽定——再长的单行歌名/副标题/歌词也只能在
     ///   行宽里截断，撑不大 VStack。
@@ -285,8 +286,16 @@ struct PlayerView: View {
                     .frame(width: contentWidth, height: PlayerTokens.coverTrackHeight(tier))
                     .clipped()
                     .padding(.top, 6)
+                // r29 task 6：默认版式重排——歌名提到歌词区之上、歌手挪到
+                // 歌词区之下（原来 titleBlock 的位置，原来药丸的位置）：
+                // 顶栏 → 封面流 → 歌名 → 歌词区 → 歌手 → 底部三排。
+                // titleBlock 本体不动（02/04/06 变体仍在调它），这里只拆
+                // 它的两行：titleOnlyBlock（歌名，点按开队列）+ artistBlock
+                // （歌手 + 试听/演示角标）。
+                titleOnlyBlock(tier: tier)
+                    .frame(width: contentWidth)
                 lyricsZone(tier: tier, width: contentWidth)
-                titleBlock(tier: tier)
+                artistBlock(tier: tier)
                     .frame(width: contentWidth)
                 // r27 v4 底部三排（见 PlayerBottomDock）：第 3 排下载/喜欢/
                 // 评论/音质 → 第 2 排进度条+两端时间 → 最下面一排模式/
@@ -308,6 +317,56 @@ struct PlayerView: View {
             .padding(.bottom, geo.safeAreaInsets.bottom)
         }
         .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+    }
+
+    // MARK: - r29 task 6：默认版式拆出来的歌名块 / 歌手块（只默认 portraitLayout 用）
+
+    /// 歌名块（titleBlock 的歌名那行 1:1，不改字号/对齐/截断；点按开队列
+    /// 的手势从 titleBlock 原样搬来）。上间距 8 = 旧「歌词区 → 歌名块 8」
+    /// 段间距；歌名 → 歌词区 8 由 lyricsZone 自身的 .padding(.top, 8) 给，
+    /// 不双倍。歌名行高 = titleSize × 1.25（35/40/45）。
+    private func titleOnlyBlock(tier: PlayerTokens.PlayerSizeTier) -> some View {
+        Text(store.currentTrack?.title ?? "未在播放")
+            .font(.liziDisplay(size: PlayerTokens.titleSize(tier)))
+            .foregroundStyle(PlayerTokens.playerForeground)
+            .lineLimit(1)
+            .minimumScaleFactor(0.5)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, 8)
+            .contentShape(Rectangle())
+            .onTapGesture { showQueue.toggle() }
+            .accessibilityHint("点按打开播放队列")
+    }
+
+    /// 歌手块（titleBlock 的副标题 + 状态角标两行 1:1，字号/对齐/压缩逻辑
+    /// 不动；放在 lyricsZone 之后、dock 之前，即原来 titleBlock 的位置）。
+    /// 上间距 8（有状态行时 compact/large 收到 4，与旧 titleBlockTopPadding
+    /// 同规则）；下间距 10（有状态行时 compact/large 收到 4，与旧
+    /// titleBlockBottomPadding 同规则）。副标题行高 ≈ subtitleSize × 1.3
+    /// （17/18/20），有状态行时再加角标行（试听/演示）。
+    private func artistBlock(tier: PlayerTokens.PlayerSizeTier) -> some View {
+        VStack(spacing: 2) {
+            Text(subtitleText)
+                .font(.system(size: PlayerTokens.subtitleSize(tier)))
+                .foregroundStyle(PlayerTokens.playerSub)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .center)
+            statusCapsules(compactStyle: tier == .compact, largeStyle: tier == .large)
+        }
+        .padding(.top, artistBlockTopPadding(tier: tier))
+        .padding(.bottom, artistBlockBottomPadding(tier: tier))
+    }
+
+    /// 歌手块上间距：与旧 titleBlockTopPadding 同规则——compact/large +
+    /// 有状态行时 8 → 4，其余一律 8。
+    private func artistBlockTopPadding(tier: PlayerTokens.PlayerSizeTier) -> CGFloat {
+        ((tier == .compact || tier == .large) && hasStatusRow) ? 4 : 8
+    }
+
+    /// 歌手块下间距：与旧 titleBlockBottomPadding 同规则——compact/large +
+    /// 有状态行时 10 → 4，其余一律 10。
+    private func artistBlockBottomPadding(tier: PlayerTokens.PlayerSizeTier) -> CGFloat {
+        ((tier == .compact || tier == .large) && hasStatusRow) ? 4 : 10
     }
 
     // MARK: - r25 #7：竖屏版式变体（02 / 04 / 06；默认走上面的 portraitLayout）
@@ -750,8 +809,9 @@ struct PlayerView: View {
     // 两档行扫描 + 白字 bbox，见交回）：
     // - 三圆直径：左圆行 y=180/190 扫描 x 48–191、搜索圆 x 834–977、
     //   齿轮圆 x 1014–1157，弦拟合 Ø≈145–146px → 48.3–48.7pt，
-    //   统一取整 49pt（portraitTopBarButtonDiameter，三档同一值，不再走
-    //   PlayerTokens.topBarButton 的 44/48/52；横屏胶囊仍走它，一字不动）。
+    //   统一取整 49pt（r27 实测值；r29 task 5 改小一档 → 44pt，见下面常量，
+    //   三档同一值，不再走 PlayerTokens.topBarButton 的 44/48/52；
+    //   横屏胶囊仍走它，一字不动）。
     // - 圆心：左 (119.5, 186)px = (39.8, 62.0)pt；搜索 (905.5, 186)px
     //   = (301.8, 62.0)pt；齿轮 (1085.5, 186)px = (361.8, 62.0)pt。
     //   左缘 47px = 15.7pt、右缘 1158px = 386pt（离屏边 16pt），与内容宽
@@ -762,8 +822,11 @@ struct PlayerView: View {
     //   差 1.5pt，playerTopBarTargetTop = 39 不动。
     // - 图标（白字 bbox，阈值 >205）：左 "<" x100–130 × y163–215
     //   = 31×53px = 10.3×17.7pt；搜索放大镜 59×59px = 19.7pt；
-    //   齿轮 65×65px = 21.7pt。图标字号因子 0.42 → 0.47（Ø49 时 23pt；
+    //   齿轮 65×65px = 21.7pt。图标字号因子 0.42 → 0.47（r27 Ø49 时 23pt；
     //   SF 图标字形高约 0.8–0.95em，正好落在实测 17.7–21.7pt 区间）。
+    //   r29 task 5：直径 44pt 后图标字号 = 44 × 0.47 = 20.7pt，字形高约
+    //   16.6–19.7pt（按原比例跟着缩，不只缩外框）；圆心 = 39 + 22 = 61pt，
+    //   顶边 39 不动。
     // - 注意（r27 追加，v4 合成图已批）：任务二原图的左图标实测是向左
     //   尖角 "<"（31×53px），但用户批的 v4 合成图（build-player-v4-composite.py）
     //   把返回画成了向下 chevron ⌄（折线 [97,169]→[122,195]→[147,169]，
@@ -771,12 +834,12 @@ struct PlayerView: View {
     //   chevron.down。任务书给的 Ø136px / 搜索圆心 960px 与实测（Ø≈146px /
     //   905.5px）不符，仍按实测落数（见上）。
 
-    /// r27：竖屏顶栏三钮统一直径 49pt（实测 Ø≈146px/3 = 48.7pt 取整，
+    /// r29 task 5：竖屏顶栏三钮统一直径 44pt（r27 实测 49pt，改小一档；
     /// 见上面 topBar 注释；三档同一值，不走 PlayerTokens.topBarButton）。
-    private static let portraitTopBarButtonDiameter: CGFloat = 49
+    private static let portraitTopBarButtonDiameter: CGFloat = 44
 
     private func topBar(tier: PlayerTokens.PlayerSizeTier) -> some View {
-        _ = tier // r27：竖屏三钮直径固定 49pt（实测值），不再按 tier 分档。
+        _ = tier // r29 task 5：竖屏三钮直径固定 44pt（r27 实测 49pt，改小一档），不再按 tier 分档。
         return HStack {
             topBarCircleButton(
                 systemName: "chevron.down",
@@ -811,9 +874,10 @@ struct PlayerView: View {
         }
     }
 
-    /// 顶栏圆形毛玻璃按钮：`.ultraThinMaterial` 圆形，直径 r27 起固定 49pt
-    /// （实测值，见 topBar 注释）；图标字号 = 直径 × 0.47（r27 实测图标
-    /// 17.7–21.7pt，旧 0.42 偏小；SF 图标字形高约 0.8–0.95em）。
+    /// 顶栏圆形毛玻璃按钮：`.ultraThinMaterial` 圆形，直径 r29 task 5 起
+    /// 固定 44pt（r27 实测 49pt，改小一档，见 topBar 注释）；图标字号 =
+    /// 直径 × 0.47（Ø44 时 20.7pt；r27 Ø49 时 23pt，实测图标 17.7–21.7pt，
+    /// 旧 0.42 偏小；SF 图标字形高约 0.8–0.95em）。
     private func topBarCircleButton(
         systemName: String,
         diameter: CGFloat,
@@ -1082,19 +1146,22 @@ struct PlayerView: View {
 // 进度条按外框 32 计（视觉细条 4，触摸区 32，见 PlayerProgressBar.touchHeight），
 // 不是 4。r27：顶栏直径改固定 49pt（实测值，见 topBar 注释），三档总账各变
 // +5/+1/−3pt（compact 636→641、standard 779→780、large 854→851），仍全未超高；
+// r29 task 5：顶栏三钮 49 → 44pt，三档总账各 −5pt（compact 641→636、
+// standard 780→775、large 851→846），仍全未超高；task 6 只改默认版式，
+// 变体仍调 titleBlock 不动，变体总账不受拆分影响。
 // 歌词展开功能已删，封面不再随展开收小，总账里不再有展开腾出的余量。）
 //
 // - compact（375×667 SE 最短屏，topInset 20，底部 0）：
-//   20 + 49 + 6 + 232 + 8 + 150 + 8 + 54 + 10 + 60 + 12 + 32 + 0 = 641 ≤ 667，
-//   余 26（歌词区实得 150 + 26 = 176）；状态角标 +22 → 663 ≤ 667 仍过。
-//   同档 mini（375×812，topInset 50，底部 34）：705 ≤ 812。
+//   20 + 44 + 6 + 232 + 8 + 150 + 8 + 54 + 10 + 60 + 12 + 32 + 0 = 636 ≤ 667，
+//   余 31（歌词区实得 150 + 31 = 181）；状态角标 +22 → 658 ≤ 667 仍过。
+//   同档 mini（375×812，topInset 50，底部 34）：700 ≤ 812。
 // - standard（402×874 用户真机 iPhone 16 Pro，topInset 59，底部 34）：
-//   59 + 49 + 6 + 254 + 8 + 180 + 8 + 60 + 10 + 68 + 12 + 32 + 34 = 780 ≤ 874，
-//   余 94（歌词区实得 180 + 94 = 274）；状态角标 +22 → 802 ≤ 874 仍过。
-//   同档 390×844（topInset 47）：768 ≤ 844。
+//   59 + 44 + 6 + 254 + 8 + 180 + 8 + 60 + 10 + 68 + 12 + 32 + 34 = 775 ≤ 874，
+//   余 99（歌词区实得 180 + 99 = 279）；状态角标 +22 → 797 ≤ 874 仍过。
+//   同档 390×844（topInset 47）：763 ≤ 844。
 // - large（430×932，topInset 59，底部 34）：
-//   59 + 49 + 6 + 280 + 8 + 210 + 8 + 67 + 10 + 76 + 12 + 32 + 34 = 851 ≤ 932，
-//   余 81（歌词区实得 210 + 81 = 291）。
+//   59 + 44 + 6 + 280 + 8 + 210 + 8 + 67 + 10 + 76 + 12 + 32 + 34 = 846 ≤ 932，
+//   余 86（歌词区实得 210 + 86 = 296）。
 // 三档全未超高（上面这段总账是加音量行之前的数；r25-B4 在竖屏四变体接了
 // 音量行，r25-B5 又只在 compact 默认/04 撤掉：该两档无角标歌词区实得 162、
 // 角标 140（B4 口径重算，见下段），其余档/变体以下面 r25-B4/B5 的数为准）。
@@ -1160,6 +1227,9 @@ struct PlayerView: View {
 //   成了常态，statusCapsules 已改成两条件全不成立时整行不渲染，幽灵高
 //   归零；上面「角标态破 10pt」的旧账只对试听/演示角标出现时仍有效，
 //   普通曲目（无试听/演示）固定段 505、歌词区实得 162。
+//   r29 task 5/6：默认版式顶栏 49 → 44（−5）、歌名/歌手拆分（+6），
+//   普通曲目固定段 505 → 506、歌词区实得 162 → 161；有角标态 512 → 513、
+//   实得 155 → 154；失败原因行 513 → 514、实得 154 → 153。仍不溢出。
 //
 // r27 v4 底部三排（只改竖屏默认版式；02/04/06 变体与横屏仍用旧控制行 +
 // 细进度条，总账不动）：默认版式里 PlayerControlRow（68/60/76）+ 最底部
@@ -1176,26 +1246,36 @@ struct PlayerView: View {
 // 所以上一版固定段全档少算 10pt——compact 有角标 553 碰巧没错
 // （角标净增量应为 +7 不是 +17：间距省 10 + 角标行 +17），其余五格
 // 各少 10pt；下表是按代码逐项重算的纠正后数字，任务书的旧数只留作对照）。
-// - standard（用户真机 402×874，一字不动）：固定段 671
-//   （39+49+6+254+8+8+60+10+8+28+8+32+8+50+8+61+34），歌词区实得
-//   874 − 671 = 203 ≥ 180，余 23；有角标 +22 → 固定段 693，实得 181，
-//   只余 1pt（紧，未遮掩：下轮动 standard 前先看这 1pt；390×844 同档
-//   按此口径固定段 671 + 180 = 851 > 844，超 7pt，见交回）；
-//   有曲无角标幽灵行 +6 → 实得 197；失败原因行 +20 → 实得 183。
-// - large（430×932，无角标一字不动）：固定段 712（39+49+6+280+8+8+67
-//   +10+8+28+8+32+8+51+8+68+34），歌词区实得 932 − 712 = 220 ≥ 210，
-//   余 10；有角标态 r27 压缩 −15（titleBlock 间距 8/10 → 4/4 省 10，
-//   角标行 22 → 约 17 省 5）：固定段 719，实得 213，余 3；失败原因行
-//   −12（间距省 10 + 行 20 → 约 18 省 2）：固定段 720，实得 212，余 2；
-//   有曲无角标幽灵行 +6 → 实得 214。
+// r29 task 5/6 纠正：r27 实账 standard/large 里「8+28」那 36pt 是已删
+// 第二行（PlayerSecondRow.swift，r28 删文件；dock 只有三排，第 3 排
+// 32 + 间隙 8 + 第 2 排 50 + 间隙 8 + 最下面一排 61），r27 换 dock 时
+// 旧账没摘掉、r28 也没发现（r28.cjs 不验这份总账）；compact 那行从
+// 没算过第二行（写着「无第二行」），所以 compact 505 是对的。下表是
+// 顶栏 44 + 歌名/歌手拆分后的真数：固定段 = 顶 39 + 顶栏 44 + 6 +
+// 封面 + 歌名顶 8 + 歌名（35/40/45）+ 歌词顶 8 + 歌手顶 8 + 副标题
+// （17/18/20）+ 歌手底 10 + dock 顶（4/8/8）+ dock（118/159/167）+
+// 安全区（0/34/34）；三档净变：顶栏 −5、拆分 +6、摘已删第二行 −36
+// （只 standard/large 有）→ compact 505→506、standard 671→636、
+// large 712→677。有曲无角标幽灵行 r29 已归零（statusCapsules 空态
+// 不渲染），下表不再列。
+// - standard（用户真机 402×874）：固定段 636
+//   （39+44+6+254+8+40+8+8+18+10+8+32+8+50+8+61+34），歌词区实得
+//   874 − 636 = 238 ≥ 180，余 58；有角标 +22 → 固定段 658，实得 216，
+//   余 36；失败原因行 +20 → 固定段 656，实得 218，余 38；390×844 同档
+//   按此口径固定段 636 + 180 = 816 ≤ 844，余 28。
+// - large（430×932）：固定段 677（39+44+6+280+8+45+8+8+20+10+8
+//   +32+8+51+8+68+34），歌词区实得 932 − 677 = 255 ≥ 210，余 45；
+//   有角标态 r27 压缩 −15（歌手块间距 8/10 → 4/4 省 10，角标行 22 →
+//   约 17 省 5）：固定段 684，实得 248，余 38；失败原因行 −12（间距
+//   省 10 + 行 20 → 约 18 省 2）：固定段 685，实得 247，余 37。
 // - compact（375×667，无第二行）：r27 压缩 −41（封面流 232 → 209 省 23；
 //   dock 132 → 118 省 14：大播放键 Ø48 → 42、第 3 排 28 → 26、第 2 排
-//   48 → 46、排间距 4 → 2；dock 上间距 8 → 4 省 4）。固定段 505
-//   （39+49+6+209+8+8+54+10+4+26+2+46+2+42），歌词区实得
-//   667 − 505 = 162 ≥ 150，余 12；有角标（r26 压缩后净 +7）→ 固定段
-//   512，实得 155，余 5；失败原因行（净 +8）→ 固定段 513，实得 154，
-//   余 4；有曲无角标幽灵行 +4 → 实得 158。歌词区最小高仍是 150，
-//   未放宽（约 5 行可见：顶部留白 20 + 当前行约 27 + 上方 4 行约 20/行）。
+//   48 → 46、排间距 4 → 2；dock 上间距 8 → 4 省 4）。固定段 506
+//   （39+44+6+209+8+35+8+8+17+10+4+26+2+46+2+42），歌词区实得
+//   667 − 506 = 161 ≥ 150，余 11；有角标（r26 压缩后净 +7）→ 固定段
+//   513，实得 154，余 4；失败原因行（净 +8）→ 固定段 514，实得 153，
+//   余 3。歌词区最小高仍是 150，未放宽（约 5 行可见：顶部留白 20 +
+//   当前行约 27 + 上方 4 行约 20/行）。
 // - 02/04/06 变体：仍走旧控制行 + 细进度条；04 compact 封面跟随
 //   209（歌词区 326 → 347，余量更大），其余总账仍是 r26 的数，一字不动。
 // - 注意：PlayerTokens.swift 的纸面总账（topInset 口径）同步改成了

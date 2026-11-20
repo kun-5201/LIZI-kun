@@ -2,6 +2,21 @@ import SwiftUI
 
 /// 首页（大厅）：顶栏 + Hero 大卡 + 铺色面板（平台条 + 来源 chips + 跑马带/环）+ rails + 本地音乐。
 ///
+/// r24 首页两卡拖动改尺寸：Hero 底边 / 面板顶边接缝处一条 28pt 高分界手柄
+/// （上下各压 14pt，中间一条 36×4 圆角胶囊），竖直拖动改两块高度分配，
+/// 松手停在哪就是哪（不回弹、不吸附、不贴靠档位）；Hero 与面板高度之和
+/// 恒等于 contentH，首屏仍拼满。尺寸按方向分别持久化，见下面
+/// heroFractionPortraitKey / heroFractionLandscapeKey（竖屏默认 0.5、
+/// 横屏默认 9/16）；拖动中只改 @State、不写 UserDefaults，松手才写当前
+/// 方向的 key。上下限见 body 里 minHeroH / minPanelH 的注释（数都从
+/// HeroCardView / PlatformStripView / SourceChipsView / HomeCoverRingView
+/// 的代码量出来，不是拍脑袋）。拖动时外层 ScrollView 用
+/// `.scrollDisabled(dragging)` 停滚；手柄 28pt 高只盖住 Hero 底边 14pt
+/// 与面板顶边 14pt——Hero 播放钮底边在 Hero 底边之上 20pt、平台条从面板
+/// 内 10pt 才起（图标/搜索钮更往下），手柄盖住的区域没有可点控件；
+/// 点按因 DragGesture(minimumDistance: 6) 未触发而失败透传，不挡
+/// Hero 整卡点按进播放页与面板顶的平台条点按。
+///
 /// 布局（模板 v2，已确认：~/workspace/lizi-home-template-portrait.png /
 /// lizi-home-template-landscape.png；竖屏与横屏都是上下叠，横屏左右分已作废）：
 /// 1. 顶栏（固定在滚动区之外，r20 修）：一行，左列设置齿轮 + 搜索
@@ -62,6 +77,35 @@ struct HomeView: View {
     @State private var loginPrompt: LoginPrompt?
     @State private var loginTarget: LoginSheetTarget?
 
+    // MARK: - r24 首页两卡拖动改尺寸（分界手柄 + 持久化）
+
+    /// 持久化 key（r24，就这两个，不另起）：竖屏 / 横屏各记各的 fraction。
+    private static let heroFractionPortraitKey = "lizi.native.home.heroFraction.portrait"
+    private static let heroFractionLandscapeKey = "lizi.native.home.heroFraction.landscape"
+
+    /// 读存值：读不到（double(forKey:) 缺键回 0）或非法（非有限、≤0、≥1）
+    /// 回落默认——竖屏 0.5、横屏 9/16（0.5625，与 r23 前的模板公式同值）。
+    /// 读出后在 body 里再按当前 contentH 与上下限夹一次（见 minFrac / maxFrac）。
+    private static func loadHeroFraction(landscape: Bool) -> CGFloat {
+        let fallback: CGFloat = landscape ? 9.0 / 16.0 : 0.5
+        let raw = UserDefaults.standard.double(
+            forKey: landscape ? heroFractionLandscapeKey : heroFractionPortraitKey)
+        guard raw.isFinite, raw > 0, raw < 1 else { return fallback }
+        return CGFloat(raw)
+    }
+
+    /// Hero 占 contentH 的比例，竖屏 / 横屏各一个 @State（UserDefaults 初始化，
+    /// 见 loadHeroFraction；旋转后按新方向的存值恢复，fraction 是相对值，
+    /// contentH 一变高度自动重算）。拖动中只改这里、不写 UserDefaults，
+    /// 松手才写当前方向的 key。
+    @State private var heroFractionPortrait: CGFloat = HomeView.loadHeroFraction(landscape: false)
+    @State private var heroFractionLandscape: CGFloat = HomeView.loadHeroFraction(landscape: true)
+    /// 正在拖分界手柄：外层 ScrollView `.scrollDisabled(dragging)` 停滚。
+    @State private var dividerDragging = false
+    /// 本次拖动的起始 Hero 高（onChanged 第一次进来时记，松手清掉；
+    /// translation 是从手势起点累计的，必须配一个固定的起点算 newHeroH）。
+    @State private var dragStartHeroH: CGFloat?
+
     var body: some View {
         GeometryReader { outer in
             // r20 顶栏修复：topBar 原来是 ScrollView 里的第一行，往下滚就滚出
@@ -84,7 +128,61 @@ struct HomeView: View {
             let gapTop: CGFloat = isLandscape ? 26 : 15
             let gapMid: CGFloat = isLandscape ? 20 : 0
             let contentH = outer.size.height - topPad - topBarH - gapTop - gapMid
-            let heroH: CGFloat = isLandscape ? contentH * 9 / 16 : contentH / 2
+            // r24 两卡高度分配：heroH = contentH × fraction（按方向取各自的
+            // @State），panelH = contentH − heroH，总高不变、首屏仍拼满。
+            // tier 在这里算一次，minPanelH 与 dailyPanel 共用。
+            let tier = PlayerTokens.sizeTier(for: outer.size, topInset: outer.safeAreaInsets.top)
+            // r24 上下限（数都从代码量出来，见各行注释；fraction 的合法夹取
+            // 区间就是 [minHeroH, maxHeroH] 换算成的比例）：
+            // - minHeroH：Hero 内上下内边距 20+20（HeroCardView
+            //   `.padding(.vertical, 20)`）+ 顶行 30（锁钮 30×30 圆钮，
+            //   徽章 12pt 字行高约 15，取大者 30；无歌时顶行是空的，
+            //   按有歌的最坏情况算）+ 底行：歌名行高 ≈ titleSize×1.25
+            //   （PlayerTokens 文件头同款行高约定）+ 间距 8
+            //   （底行 VStack spacing 8）+ 副标题行高 ≈ 13×1.3 ≈ 17
+            //   （播放钮 ⌀52 小于底行高，不计）；顶行与底行之间的 Spacer
+            //   可压到 0，不计。竖屏 titleSize 42：40+30+52.5+8+17 = 147.5→148；
+            //   横屏 titleSize 46：40+30+57.5+8+17 = 152.5→153。
+            //   封面是铺满的底图、无固定高，不占下限。
+            let titleSize: CGFloat = isLandscape ? 46 : 42
+            let minHeroH = ceil(40 + 30 + titleSize * 1.25 + 8 + 17)
+            // - 平面带一排封面卡宽（HomeCoverRingView 分档表：compact 188 /
+            //   standard 202 / large 220，≈0.51vw），minPanelH 按 tier 走。
+            let flatCard: CGFloat
+            switch tier {
+            case .compact: flatCard = 188
+            case .standard: flatCard = 202
+            case .large: flatCard = 220
+            }
+            // - minPanelH：面板内边距上下 10+10（dailyPanel `.padding(10)`）
+            //   + 平台条 42（PlatformStripView `.frame(height: 42)`）
+            //   + 面板 VStack 间距 8（条与下一行之间）。
+            //   竖屏再加 chips 行 32（SourceChipsView：13pt 字行高约 16 +
+            //   上下内边距 8+8；文件头旧账「chip 32」同值）+ 间距 8
+            //   + 至少一排环封面 flatCard（歌名/歌手行与「展开 3D 环」提示行
+            //   都在面板内竖滑区里，面板是定高窗、裁断是模板原意，不计入下限；
+            //   标准档：20+42+8+32+8+202 = 312）。
+            //   横屏面板默认只有约 140 高、chips 在环下面滑下去才见（见 dailyPanel
+            //   注释），不计 chips；只要求条之外再露约 1/4 张封面
+            //   （flatCard/4，标准档 202/4 ≈ 50，封面露一角、能认出是封面带；
+            //   模板默认露 70，标准档下限 20+42+8+50.5 = 120.5→121 < 140，
+            //   默认值仍在合法区间里）。
+            let minPanelH: CGFloat
+            if isLandscape {
+                minPanelH = ceil(20 + 42 + 8 + flatCard / 4)
+            } else {
+                minPanelH = 20 + 42 + 8 + 32 + 8 + flatCard
+            }
+            // - maxHeroH = contentH − minPanelH。内容极矮时（横屏小屏，
+            //   如 667×375 档 contentH 265 < minHeroH 153 + minPanelH 117）
+            //   两条下限打架：保 Hero 下限（歌名 + 播放钮必须完整），面板取
+            //   剩下的（仍有条 + 一角封面），不让区间倒挂。
+            let maxHeroH = max(minHeroH, contentH - minPanelH)
+            let minFrac = minHeroH / contentH
+            let maxFrac = maxHeroH / contentH
+            let storedFrac = isLandscape ? heroFractionLandscape : heroFractionPortrait
+            let fraction = min(max(storedFrac, minFrac), maxFrac)
+            let heroH = contentH * fraction
             let panelH = contentH - heroH
             let blockW = outer.size.width - 32
             VStack(spacing: 0) {
@@ -99,7 +197,7 @@ struct HomeView: View {
                                 width: blockW,
                                 viewHeight: outer.size.height,
                                 height: heroH,
-                                titleSize: isLandscape ? 46 : 42,
+                                titleSize: titleSize,
                                 viewModel: viewModel
                             )
                             .padding(.horizontal, 16)
@@ -115,7 +213,7 @@ struct HomeView: View {
                                 width: blockW,
                                 height: panelH,
                                 isLandscape: isLandscape,
-                                tier: PlayerTokens.sizeTier(for: outer.size, topInset: outer.safeAreaInsets.top)
+                                tier: tier
                             )
                             // r22l 编译修：231 行 tier 类型错导致这行
                             // dailyPanel 调用的结果类型推不出来，`.horizontal`
@@ -126,6 +224,67 @@ struct HomeView: View {
                             .padding(Edge.Set.horizontal, 16)
                         }
                         .padding(.top, gapTop)
+                        // r24 分界手柄（见文件头）：叠在 Hero 底边 / 面板顶边
+                        // 接缝处，中心在 gapTop + heroH + gapMid/2（竖屏
+                        // gapMid = 0 就是接缝本身；横屏 gapMid = 20，手柄
+                        // 居中压在 20pt 间隙正中、上下各探进 Hero / 面板 4pt）。
+                        // 触摸区 28pt 高（上下各一半）、宽 blockW，与两块同宽；
+                        // 中间只画一条 36×4 圆角胶囊（低对比度）。
+                        // 透传：手柄上下各 14pt 盖住的区域没有可点控件——Hero
+                        // 播放钮底边在 Hero 底边之上 20pt（52 圆钮 + 底内边距
+                        // 20，见 HeroCardView），面板顶 14pt 内只有面板内边距
+                        // 10 + 平台条顶 4pt（条从面板内 10pt 才起，图标 22 与
+                        // 搜索钮 32 居中在条里、更往下，见 PlatformStripView）；
+                        // 点按因 DragGesture(minimumDistance: 6) 未触发而失败
+                        // 透传，Hero 整卡点按与平台条点按不受影响。
+                        // 横向为主的拖动不改尺寸（Hero 左右滑切歌只在接缝上下
+                        // 14pt 的窄条里会被手柄先接到，见交回说明）。
+                        .overlay(alignment: .top) {
+                            HomeResizeHandle()
+                                .frame(width: blockW, height: 28)
+                                .offset(y: gapTop + heroH + gapMid / 2 - 14)
+                                .gesture(
+                                    DragGesture(minimumDistance: 6)
+                                        .onChanged { value in
+                                            if dragStartHeroH == nil { dragStartHeroH = heroH }
+                                            guard abs(value.translation.height) >= abs(value.translation.width) else { return }
+                                            dividerDragging = true
+                                            let startHeroH = dragStartHeroH ?? heroH
+                                            let newHeroH = min(max(startHeroH + value.translation.height, minHeroH), maxHeroH)
+                                            let newFraction = newHeroH / contentH
+                                            if isLandscape {
+                                                heroFractionLandscape = newFraction
+                                            } else {
+                                                heroFractionPortrait = newFraction
+                                            }
+                                        }
+                                        .onEnded { _ in
+                                            dividerDragging = false
+                                            dragStartHeroH = nil
+                                            // 松手即停：只写当前方向的 key，不回弹、
+                                            // 不吸附、不贴靠档位；拖动中不写 UserDefaults。
+                                            UserDefaults.standard.set(
+                                                Double(isLandscape ? heroFractionLandscape : heroFractionPortrait),
+                                                forKey: isLandscape ? Self.heroFractionLandscapeKey : Self.heroFractionPortraitKey
+                                            )
+                                        }
+                                )
+                                .accessibilityLabel("调整 Hero 与面板高度")
+                                .accessibilityHint("上下拖动改变两块高度，松手即停")
+                                .accessibilityAdjustableAction { direction in
+                                    let step: CGFloat = 0.05
+                                    let next = min(max(fraction + (direction == .increment ? step : -step), minFrac), maxFrac)
+                                    if isLandscape {
+                                        heroFractionLandscape = next
+                                    } else {
+                                        heroFractionPortrait = next
+                                    }
+                                    UserDefaults.standard.set(
+                                        Double(next),
+                                        forKey: isLandscape ? Self.heroFractionLandscapeKey : Self.heroFractionPortraitKey
+                                    )
+                                }
+                        }
 
                         // 首屏之下（下滑才看到）：rails 行 + 本地音乐区。
                         // 本地音乐排在最末；段间距 24 与上面同档。
@@ -168,6 +327,10 @@ struct HomeView: View {
                         .padding(.bottom, 50)
                     }
                 }
+                // r24：拖分界手柄时外层整页 ScrollView 不许跟着滚
+                // （dividerDragging 只在竖向拖动里置 true，松手清掉；
+                // minOS 16.2 可用，本项目已有 LyricsPanelView 同款用法）。
+                .scrollDisabled(dividerDragging)
                 .background(LiziTokens.paper)
             }
             // r21：环的纵向锚点用这个坐标空间量（平面带把自己的 frame 报到
@@ -369,6 +532,22 @@ struct HomeView: View {
             }
         }
         .padding(.top, topPad) // 品牌纵向中心 = topPad + 32（屏顶起算，见上）
+    }
+}
+
+/// r24 分界手柄（只画样子，手势挂在 HomeView 里 overlay 处）：
+/// 28pt 高的透明触摸区（`.contentShape(Rectangle())` 保证整块都吃触摸，
+/// Color.clear 本身不画东西）+ 中间一条 36×4 圆角胶囊（低对比度墨色）。
+/// 不加任何缩放手势、不加 scaleEffect——只改两块高度分配。
+private struct HomeResizeHandle: View {
+    var body: some View {
+        ZStack {
+            Color.clear
+            RoundedRectangle(cornerRadius: 2)
+                .fill(LiziTokens.ink.opacity(0.28))
+                .frame(width: 36, height: 4)
+        }
+        .contentShape(Rectangle())
     }
 }
 

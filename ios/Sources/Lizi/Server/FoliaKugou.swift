@@ -307,13 +307,17 @@ actor FoliaKugouService {
               let plain = json.data(using: .utf8) else { return nil }
         var out = Data(count: plain.count + kCCBlockSizeAES128)
         var outLen = 0
+        // r24 构建修（run 44658757593）：`out.count` 在
+        // `out.withUnsafeMutableBytes` 闭包里读 `out`，与已借出的可变借用
+        // 重叠，编译器报 overlapping accesses。先拷到局部量再进闭包。
+        let outCapacity = out.count
         let status = keyData.withUnsafeBytes { kPtr in
             ivData.withUnsafeBytes { ivPtr in
                 plain.withUnsafeBytes { pPtr in
                     out.withUnsafeMutableBytes { oPtr in
                         CCCrypt(CCOperation(kCCEncrypt), CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionPKCS7Padding),
                                 kPtr.baseAddress, keyData.count, ivPtr.baseAddress,
-                                pPtr.baseAddress, plain.count, oPtr.baseAddress, out.count, &outLen)
+                                pPtr.baseAddress, plain.count, oPtr.baseAddress, outCapacity, &outLen)
                     }
                 }
             }
@@ -332,13 +336,16 @@ actor FoliaKugouService {
               let cipher = Data(base64Encoded: base64, options: .ignoreUnknownCharacters) else { return nil }
         var out = Data(count: cipher.count + kCCBlockSizeAES128)
         var outLen = 0
+        // r24 构建修（run 44658757593）：同 aesEncrypt，`out.count` 先拷
+        // 到局部量，避免与 withUnsafeMutableBytes 的可变借用重叠。
+        let outCapacity = out.count
         let status = keyData.withUnsafeBytes { kPtr in
             ivData.withUnsafeBytes { ivPtr in
                 cipher.withUnsafeBytes { cPtr in
                     out.withUnsafeMutableBytes { oPtr in
                         CCCrypt(CCOperation(kCCDecrypt), CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionPKCS7Padding),
                                 kPtr.baseAddress, keyData.count, ivPtr.baseAddress,
-                                cPtr.baseAddress, cipher.count, oPtr.baseAddress, out.count, &outLen)
+                                cPtr.baseAddress, cipher.count, oPtr.baseAddress, outCapacity, &outLen)
                     }
                 }
             }

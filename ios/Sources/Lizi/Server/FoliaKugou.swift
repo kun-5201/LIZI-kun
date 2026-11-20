@@ -638,14 +638,14 @@ actor FoliaKugouService {
     }
 
     private static func strField(_ d: [String: Any], _ keys: String...) -> String {
-        guard let v = firstField(d, keys) else { return "" }
+        guard let v = firstField(d, keys: keys) else { return "" }
         if let s = v as? String { return s }
         if let n = v as? NSNumber { return n.stringValue }
         return ""
     }
 
     private static func intField(_ d: [String: Any], _ keys: String...) -> Int {
-        guard let v = firstField(d, keys) else { return 0 }
+        guard let v = firstField(d, keys: keys) else { return 0 }
         return scNum(v)
     }
 

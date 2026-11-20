@@ -932,6 +932,16 @@ final class PlaybackStore: ObservableObject {
                                           via: "platform")
     }
 
+    /// r27 下载用：复用播放取链整条编排（resolveURL：官方 → 云盘 → LX；
+    /// 演示音不在 resolveURL 里，取链全失败时只回失败原因、不回演示音地址，
+    /// 所以下载永远拿不到演示音，不用另判）。
+    /// 不推进代际（不取消在播任务）：用当前 resolveGeneration 快照；
+    /// 取链中途切歌导致代际变化时 resolveURL 因 gen 对不上回 nil，
+    /// 下载按失败处理，用户重试。质量走 preferredQuality（resolveURL 内定）。
+    func resolveURLForDownload(track: Track) async -> NativeBridge.SongURLResult? {
+        await resolveURL(for: track, gen: resolveGeneration, quality: preferredQuality)
+    }
+
     // MARK: - 进度（AVPlayer periodic time observer 驱动）
 
     private func handleTimeUpdate(_ time: CMTime) {

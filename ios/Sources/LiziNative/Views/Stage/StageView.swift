@@ -251,7 +251,8 @@ struct StageView: View {
         .padding(.trailing, geo.safeAreaInsets.trailing + tokens.sideMargin)
         // r26：竖屏顶边 = geo.safeAreaInsets.top + topGap；本页根 GeometryReader
         // 与 VStack 都 .ignoresSafeArea()，运行时 geo.safeAreaInsets.top 是 0，
-        // 所以有效顶边就是 topGap（竖屏 35/39/43，标准档 39pt 对齐播放页）。
+        // 所以有效顶边就是 topGap（竖屏 48/52/56，标准档 52pt，脱开岛底 48pt；
+        // r27：35/39/43 → 48/52/56）。
         // 别把这一项换成 key window 安全区——那会一下冲到约 91pt。
         .padding(.top, geo.safeAreaInsets.top + tokens.topGap)
     }

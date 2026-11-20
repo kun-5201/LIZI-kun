@@ -226,6 +226,9 @@ final class LiziRouter {
             return .json(200, ["code": 0])
         }
 
+        // ---- 评论区（r27）：只读；网易云实测通，其它平台老实回 501（见 CommentsService）----
+        if path == "/api/comments" { return await CommentsService.handle(req) }
+
         // ---- 网易云接口转发 ----
         if path.hasPrefix("/api/") {
             return await netease.handleApi(req)

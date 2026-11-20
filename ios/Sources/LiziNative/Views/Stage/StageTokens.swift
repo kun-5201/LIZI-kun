@@ -27,9 +27,9 @@ import SwiftUI
 /// | 项目               | P-c | P-s | P-l | L-c | L-s | L-l |
 /// |--------------------|-----|-----|-----|-----|-----|-----|
 /// | sideMargin         |  12 |  16 |  16 |  28 |  32 |  36 |
-/// | topGap（屏顶起算，见上） |  35 |  39 |  43 |  16 |  20 |  24 |
-///   （r26：竖屏 28/32/36 → 35/39/43，每档 +7；标准档顶边 39pt，
-///   对齐播放页竖屏顶栏 39pt；横屏 16/20/24 一字不动。）
+/// | topGap（屏顶起算，见上） |  48 |  52 |  56 |  16 |  20 |  24 |
+///   （r26：竖屏 28/32/36 → 35/39/43，每档 +7；r27：竖屏 35/39/43 → 48/52/56，
+///   顶边脱开岛底 48pt；横屏 16/20/24 一字不动。）
 /// | topRowGap          |   8 |  10 |  10 |  12 |  14 |  16 |
 /// | 圆按钮直径（竖屏） |  40 |  44 |  46 |   – |   – |   – |
 /// | 返回胶囊宽（横屏） |   – |   – |   – |  80 |  84 |  88 |
@@ -159,21 +159,21 @@ struct StageTokens {
             idealCapsuleWidthLandscape = 0
             switch tier {
             case .compact:
-                sideMargin = 12; topGap = 35; topRowGap = 8
+                sideMargin = 12; topGap = 48; topRowGap = 8
                 roundButtonDiameter = 40
                 capsuleHPadding = 10; capsuleVPadding = 8
                 coverSize = 48; titleFont = 15; artistFont = 11
                 skipButtonFrame = 20; playButtonFrame = 24
                 skipIconSize = 16; playIconSize = 20; transportSpacing = 4
             case .standard:
-                sideMargin = 16; topGap = 39; topRowGap = 10
+                sideMargin = 16; topGap = 52; topRowGap = 10
                 roundButtonDiameter = 44
                 capsuleHPadding = 12; capsuleVPadding = 8
                 coverSize = 56; titleFont = 16; artistFont = 12
                 skipButtonFrame = 22; playButtonFrame = 26
                 skipIconSize = 18; playIconSize = 22; transportSpacing = 4
             case .large:
-                sideMargin = 16; topGap = 43; topRowGap = 10
+                sideMargin = 16; topGap = 56; topRowGap = 10
                 roundButtonDiameter = 46
                 capsuleHPadding = 12; capsuleVPadding = 8
                 coverSize = 60; titleFont = 17; artistFont = 12

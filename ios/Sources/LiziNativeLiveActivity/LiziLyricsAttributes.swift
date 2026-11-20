@@ -16,7 +16,8 @@ struct LiziLyricsAttributes: ActivityAttributes {
         /// Total duration in seconds (0 when unknown); drives the
         /// elapsed / remaining readout in the expanded island.
         var duration: Double = 0
-        /// Whether the current track is liked (star in the expanded island).
+        /// Whether the current track is liked (star in the expanded island,
+        /// heart on the lock screen, r27).
         var isLiked: Bool = false
         /// Album cover, downsampled to ~120px JPEG by the app before pushing
         /// (nil = no cover yet / track has none; the widget draws a ♪ instead).

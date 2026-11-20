@@ -697,7 +697,7 @@ struct SettingsView: View {
             HStack {
                 rowLabel("关于 LIZI")
                 Spacer()
-                Text("LIZI 原生")
+                Text("LIZI kun")
                     .font(.liziBody(size: LiziTokens.size13))
                     .foregroundColor(LiziTokens.ink2)
             }

@@ -481,6 +481,65 @@ return false
         (await lyrics(for: track)).lines
     }
 
+    // MARK: - 评论区（r27，只读）
+
+    /// 一条评论（服务端 /api/comments 归一化后的形状，见 CommentsService）。
+    struct SongComment: Identifiable, Hashable {
+        var id: String { "\(nickname)-\(timeMs)-\(content.prefix(12))" }
+        var nickname: String
+        var avatarURL: URL?
+        var content: String
+        /// 评论时间（毫秒 epoch；显示时格式化，见 timeText）。
+        var timeMs: Int
+        var likedCount: Int
+
+        var timeText: String {
+            guard timeMs > 0 else { return "" }
+            let date = Date(timeIntervalSince1970: TimeInterval(timeMs) / 1000)
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "zh_CN")
+            f.dateFormat = "yyyy-MM-dd HH:mm"
+            return f.string(from: date)
+        }
+    }
+
+    /// 拉评论（只读；发评论本轮不做）。
+    /// - 只有网易云有验证过的公开读接口；其它平台服务端回 code 501 + 老实原因，
+    ///   这里原样转成 error，不编假评论。
+    /// - 返回 (comments, total, hasMore, error)：error 非空时 comments 为空，
+    ///   UI 直接显示 error 文案 + 重试。
+    static func comments(platform: String, id: String, key: String,
+                         offset: Int = 0, limit: Int = 20) async
+    -> (comments: [SongComment], total: Int, hasMore: Bool, error: String?) {
+        let d = await call(path: "/api/comments", query: [
+            "platform": platform, "id": id, "key": key,
+            "offset": "\(offset)", "limit": "\(limit)",
+        ])
+        guard let d else {
+            return ([], 0, false, "评论请求失败，请检查网络后重试")
+        }
+        let code = (d["code"] as? NSNumber)?.intValue ?? -1
+        guard code == 0 else {
+            let err = (d["error"] as? String) ?? ""
+            return ([], 0, false, err.isEmpty ? "该平台暂无评论接口" : err)
+        }
+        let total = (d["total"] as? NSNumber)?.intValue ?? 0
+        let hasMore = (d["hasMore"] as? NSNumber)?.boolValue ?? false
+        let items = (d["comments"] as? [[String: Any]] ?? []).compactMap { c -> SongComment? in
+            let content = (c["content"] as? String) ?? ""
+            guard !content.isEmpty else { return nil }
+            let avatar = (c["avatar"] as? String) ?? ""
+            return SongComment(
+                nickname: (c["nickname"] as? String) ?? "匿名用户",
+                avatarURL: avatar.isEmpty ? nil : URL(string: avatar),
+                content: content,
+                timeMs: (c["timeMs"] as? NSNumber)?.intValue ?? 0,
+                likedCount: (c["likedCount"] as? NSNumber)?.intValue ?? 0
+            )
+        }
+        return (items, total, hasMore, nil)
+    }
+
     // MARK: - 每日推荐 / 歌单 / 歌手 / 专辑
 
     /// 每日推荐（各平台自己的推荐接口；壳版 `marqSource` 同款映射，

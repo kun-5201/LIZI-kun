@@ -35,9 +35,14 @@ struct PlayerProgressBar: View {
     var tier: PlayerTokens.PlayerSizeTier = .standard
 
     /// 填充色（r36 横屏传统：传 traditionalRed 时走纯红填充，稿里
-    /// 进度条就是纯红 + 白圆点；nil = 原来的 barA→barB 蓝紫渐变，
-    /// 竖屏 / dock 一字不动）。
+    /// 进度条就是纯红填充（圆点色见 dotColor，r37-2 横屏是红点）；
+    /// nil = 原来的 barA→barB 蓝紫渐变，竖屏 / dock 一字不动）。
     var fillColor: Color? = nil
+
+    /// 轨道色 / 播放头圆点色（r37-2 横屏：修正版施工图里轨道是浅灰实线、
+    /// 圆点是红色；nil = 原来的淡白轨道 + 白圆点，竖屏 / dock 一字不动）。
+    var trackColor: Color? = nil
+    var dotColor: Color? = nil
 
     /// 触摸区高（r20 工人 E）：32pt。视觉细条仍 4pt，贴框底。
     /// 总高账 +28pt：compact 最紧 608+28=636 ≤ 667（状态角标行再 +22
@@ -61,8 +66,9 @@ struct PlayerProgressBar: View {
             ZStack(alignment: .bottomLeading) {
                 // 视觉细条：高 4pt，贴框底；外观与改前一字不改。
                 ZStack(alignment: .leading) {
-                    // 未走过的轨道（壳版 .dock__bar 的淡白底）。
-                    Color.white.opacity(0.08)
+                    // 未走过的轨道（壳版 .dock__bar 的淡白底；r37-2 横屏传
+                    // trackColor 时走调用方给的浅灰）。
+                    trackColor ?? Color.white.opacity(0.08)
                     // 走过的部分：fillColor 有值时纯色（r36 横屏传统红条），
                     // 否则走过的渐变（壳版 .dock__paint：bar-a → bar-b）。
                     Group {
@@ -87,7 +93,7 @@ struct PlayerProgressBar: View {
                     // 两端夹住不冒出轨道外）。
                     if store.currentTrack != nil {
                         Circle()
-                            .fill(Color.white)
+                            .fill(dotColor ?? Color.white)
                             .frame(width: 10, height: 10)
                             .offset(x: min(max(0, fraction * width - 5), max(0, width - 10)))
                     }

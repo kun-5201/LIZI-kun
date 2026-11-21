@@ -304,17 +304,54 @@ import UIKit
 /// 点榜单卡不再跳独立详情页——面板内换成该榜单的全部歌（rankDetailContent：
 /// v4 顶栏只留榜单名 + 返回「‹ 榜单」+ 搜索，轮播是首页环，卡片正常显示
 /// 无排名数字、无总数、无提示文字，点卡播歌）；平台条在详情态隐藏。
+///
+/// r37-1（用户 2026-11-22 00:30 定稿，稿图 ~/workspace/lizi-home-panel-mockup.png；
+/// 00:31 用户长期规则：不要多加东西、不要乱改以前的东西，各模式内容按本来样子
+/// 正常显示在卡片里面）——首页面板常驻、只一个排版：
+/// - 面板 = 顶栏（`PlatformStripView`：当前模式名 + ⌄ + 平台图标 + 右边搜索）
+///   + 一排封面卡片。顶栏钉在面板顶、全程常驻：面板里原先压在顶栏上面的两块
+///   （r35-3 的正在播放置顶行 `nowPlayingPinBlock`、搜索歌单带 `searchQueueBlock`）
+///   已删（置顶行带歌名/歌手 + 播放/暂停钮，与「卡片只放封面、没有暂停键」冲突；
+///   两块占着面板顶，Hero 拖大、面板缩小时顶栏会被顶出定高窗、看不见），
+///   榜单详情态也不再隐藏顶栏（r36 v4 的 `selectedRankBoard == nil` 守卫已删，
+///   顶栏和菜单一直在，随时能点回今日推荐或用户自建歌单）；榜单详情自己的顶行
+///   （榜单名 + 返回「‹ 榜单」+ 搜索）原样保留。面板本身仍随整页滚动
+///   （r35-5：滑到底显示本地音乐），常驻指的是面板里的顶栏与卡片行在首页
+///   一直都在、滚动时不被面板内其他块顶走，不是把顶栏钉在屏幕顶。
+/// - 卡片只放封面图：面板里全部卡片（每日环平面带 `FlatRingCard`、rail 跑马带
+///   `RailMarqueeCardView`、排行榜目录卡、面板内榜单详情的环平面带）都不画
+///   歌名/歌手文字、不放暂停键；点按行为不变（点封面就播那首 / 集合卡原路由）。
+///   歌单详情页、搜索页等别处的标题不动；3D 环展开态的环卡（`RingCardView`）
+///   标题不动——00:42:43 纠正：套壳版 1:1 复刻只限 3D 环卡，环卡按套壳版
+///   （封面 + 歌名）显示；面板本身不按套壳版改显示/滑动逻辑。
+///   入口提示行（「拖动展开 3D 环 · 拖动旋转」）不是卡片标题，原样保留。
+///   封面-only 由 `HomeCoverRingView.coverOnly`（默认 false，每日推荐与面板内
+///   榜单详情两路传 true）与 `RailMarqueeCardView` 去标题实现；卡宽与跑马带
+///   机制不动（卡宽 180/190/209 与 3D 环几何、面板封顶公式耦合，稿图「第三张
+///   露一半」是示意，现有一屏约 1.8 张、带子自滚 + 可拖，已能看出能滑，
+///   改卡宽留待真机再定）。
+///   r37-1 追加（用户 2026-11-22 00:39 显示逻辑，长期规则）：封面没显示出来
+///   时卡片先盖歌名/标题文字占位（白字盖在深色占位底上、盖在封面框里，不占卡高），
+///   用户能先滑、认出是哪首歌；封面一到占位消失、只剩封面。占位只在封面未显示
+///   时出现，不变常驻标题；无封面 URL 的卡永远无图可显，占位一直显示。
+///   观测走 `CoverImageLoader` 进程内缓存（与 `CoverImageView` 同一份在飞任务，
+///   不重复发请求；失败重试节拍照抄 `ProxyImageView`）。
+/// - 搜索进卡片（r35-3 链路复用，不另起搜索结果页）：搜完点歌立起的队列
+///   （`playback.queueTitle` + `playback.queue`，`setQueue(title:)` 透传）
+///   不再另占一块带子，直接显示在每日推荐那一排卡片里（`dailyRingContent`：
+///   队列非空时环内容就是队列曲目，点卡切歌走环自带的 `setQueue(title:)`，
+///   队列标题不丢；队列清空/切到别的歌单点歌时标题消失、行变回每日推荐）。
+///   搜索歌单带用的 `searchRingModel` 随 `searchQueueBlock` 一起删。
+/// - 默认模式今日推荐（`HomeRailPage.daily`，持久化键无值时回落它，不改）；
+///   模式菜单（`sourceMenuOverlay`，6 行：每日推荐/精选/我喜欢的音乐/
+///   我的歌单/电台/排行榜）与 `sourceTitle` 不动，切到哪个模式顶栏就显示
+///   那个模式名 + ⌄，内容跟着换。Hero 大卡与本地音乐不动。
 struct HomeView: View {
     @EnvironmentObject var playback: PlaybackStore
     @EnvironmentObject var nav: AppNavigation
     @StateObject private var viewModel = HomeViewModel()
     /// 首页环状态机（r21）：平面带与全屏环覆盖层共用（见 HomeCoverRingView 文件头）。
     @StateObject private var ringModel = HomeCoverRingModel()
-    /// r36：搜索歌单带的环状态机——搜索带改用首页环（HomeCoverRingView，
-    /// 参照图那套：真封面、横向轮播、当前大张居中、左右露出相邻封面、
-    /// 封面下歌名 + 歌手），独立实例（与每日推荐的 ringModel 各用各的，
-    /// 两条带子内容不同，offset/内容宽度不抢）。
-    @StateObject private var searchRingModel = HomeCoverRingModel()
     /// r36 v4（用户 21:45 批「对就是这样」，稿图 lizi-chart-detail-mockup.png）：
     /// 榜单详情在首页面板里——点榜单卡后，面板换成该榜单的全部歌
     /// （HomeCoverRingView 轮播），不再跳独立详情页。
@@ -326,8 +363,9 @@ struct HomeView: View {
     @State private var rankDetailTracks: [Track] = []
     /// 榜单曲目加载中（加载态只亮 spinner，不写文字——详情页不加提示）。
     @State private var rankDetailLoading = false
-    /// r36 v4：榜单歌曲带的环状态机（独立实例，与每日推荐 ringModel、
-    /// 搜索带 searchRingModel 各用各的，三条带子内容不同不抢状态）。
+    /// r36 v4：榜单歌曲带的环状态机（独立实例，与每日推荐 ringModel
+    /// 各用各的，两条带子内容不同不抢状态；r37-1：搜索带 searchRingModel
+    /// 已随 searchQueueBlock 删掉，搜索队列直接进每日推荐那排卡片）。
     @StateObject private var rankSongsRingModel = HomeCoverRingModel()
     /// r31：rail 来源跑马带驱动（`RailMarqueeDriver`，CADisplayLink + dt，
     /// 与环平面带同款）。归 HomeView 所有：dailyPanel 的
@@ -487,17 +525,13 @@ struct HomeView: View {
             // 横屏面板 140 本来就小于内容高，封顶不触发。拖大 Hero 后面板按
             // split 收缩（低于封顶），不受封顶影响；拖小 Hero 后面板停在封顶，
             // 余下是本地音乐，不留空。
-            // r36：有搜索歌单块时封顶跟着抬高 flatCard + 198（带块
-            // flatCard + 122：标题行约 20 + 间距 8 + 环 flatCard + 94
-            // （卡 flatCard + 52 + 间距 6 + 提示行约 16 + 内边距 20），
-            // 再加块与条之间的间距 8；置顶行 68：行高 60 + 与带块之间
-            // 的间距 8），不然每日内容的底边（提示行）会被裁掉。
-            // 没搜过歌时封顶不动。
-            let searchBeltExtraH: CGFloat = (playback.queueTitle != nil && !playback.queue.isEmpty) ? flatCard + 198 : 0
-            // r36-2：排行榜块已从面板里拆掉（改成来源菜单里的一项），
-            // 封顶不再给它留份：r35-10 的 rankBeltExtraH（有榜 184 /
-            // 没榜约 48）已删。
-            let panelContentH: CGFloat = flatCard + 217 + searchBeltExtraH
+            // r37-1：搜索歌单带已删（见文件头 r37-1 节）——搜索队列直接显示在
+            // 每日推荐那排卡片里，不再另占一块带子，封顶不用再给它抬高；
+            // r36 的 searchBeltExtraH（flatCard + 198）已删，封顶回到
+            // flatCard + 217。封面-only 后带子本身矮了 52（卡下不再画两行字），
+            // 封顶不动：面板底下多出的 52pt 是稿图里卡片行下面的空底色，
+            // 榜单详情态（环仍带歌名/歌手，带高 flatCard + 52）也正好用满。
+            let panelContentH: CGFloat = flatCard + 217
             let panelH = min(contentH - heroH, panelContentH)
             let blockW = outer.size.width - 32
             VStack(spacing: 0) {
@@ -742,38 +776,26 @@ struct HomeView: View {
     ) -> some View {
         // r23h：条钉在面板顶，见本函数头注释。
         VStack(spacing: 8) {
-            // r35-3（补充，19:21「正在播放点击播放了就自动置顶在今日推荐上面」）：
-            // 点歌播起来后，正在播放的那首钉在面板最上面（置顶行，见
-            // nowPlayingPinBlock），一直看得见，不用往下翻找；切歌时
-            // currentTrack 跟着换，置顶跟着换。条件与搜索带同一把：
-            // 只有搜完点歌立起的队列（queueTitle != nil）才出现；切到别的
-            // 歌单点歌、清空队列时标题没了，块跟着消失。只动面板里头，
-            // Hero 大卡、本地音乐、顶栏一字不动。
-            if playback.queueTitle != nil, !playback.queue.isEmpty,
-               let track = playback.currentTrack {
-                nowPlayingPinBlock(track: track, isDark: panelTone.isDark)
-            }
-            // r35-3：搜完点歌后，正在播放的搜索歌单占面板顶上一块（卡片带，
-            // 见 searchQueueBlock）。不是独立页面、不是独立卡片——就是
-            // 面板里的一块；没搜过歌时（queueTitle 为 nil）不出现，面板
-            // 与原来一字不差。条仍在块下面，钉住不动。
-            if playback.queueTitle != nil, !playback.queue.isEmpty {
-                searchQueueBlock(isDark: panelTone.isDark, tier: tier)
-            }
+            // r37-1（顶栏常驻）：顶栏就是面板的第一行，上面不再压任何块——
+            // r35-3 的置顶行（nowPlayingPinBlock，带歌名/歌手 + 播放/暂停钮）
+            // 与搜索歌单带（searchQueueBlock）已删：置顶行与「卡片只放封面、
+            // 没有暂停键」冲突，两块又占着面板顶、Hero 拖大后面板缩小时会把
+            // 顶栏顶出定高窗（看不见、点不到）；搜索队列不再另占一块带子，
+            // 直接显示在每日推荐那排卡片里（见 dailyRingContent）。
             // r36-2：排行榜块已拆（r35-10 的 rankBlock 在此，搜歌块在上、
             // 榜单块在下；现改成来源菜单里的一项，见 sourceContent 的
             // .rank 分支 + rankSourceContent），面板里不再留榜单块。
             // r28 tone-aware：平台条标题/搜索/选中圈跟专辑取色深场走白字、浅场走墨色。
             // r30：点标题弹来源小菜单（壳版 #hall-src-menu 思路）。
-            // r36 v4：已点进某张榜单时平台条隐藏——面板顶栏只留榜单名 +
-            // 返回 + 搜索（稿图里没有平台条）；回榜单列表后条再出现。
-            if selectedRankBoard == nil {
-                PlatformStripView(
-                    viewModel: viewModel,
-                    isDark: panelTone.isDark,
-                    onSourceMenuTap: { sourceMenuShown = true }
-                )
-            }
+            // r37-1：顶栏不再在榜单详情态隐藏——r36 v4 的
+            // `if selectedRankBoard == nil` 守卫已删（详情态顶栏只留榜单名 +
+            // 返回 + 搜索是旧稿图的做法，新定稿要求顶栏和菜单一直在，随时能
+            // 点回今日推荐或用户自建歌单）；榜单详情自己的顶行原样保留。
+            PlatformStripView(
+                viewModel: viewModel,
+                isDark: panelTone.isDark,
+                onSourceMenuTap: { sourceMenuShown = true }
+            )
             // r30 来源内容：每日推荐 = 环/跑马带，其余 4 栏 = rail 卡片跑马带
             // + 排行榜面板（r36-2，见 sourceContent 的 .rank 分支）
             // （原 HomeRailPageView，原样搬进本文件 RailSourceListView；
@@ -820,93 +842,13 @@ struct HomeView: View {
         }
     }
 
-    /// r35-3（补充）：正在播放置顶行（今日推荐面板最上面）：当前播的那首
-    /// 钉在这里——封面 48 + 歌名/歌手 + 播放/暂停钮；点行进播放页
-    /// （HeroCardView 同款 `nav.showClassicPlayer()`），钮点 `togglePlay()`。
-    /// 行高 60（封面 48 + 上下各 6），封顶跟着抬 68（行 60 + 与带块之间
-    /// 的间距 8，见 body 里 searchBeltExtraH）；面板定高窗，Hero 拖大、
-    /// 面板缩小时块在顶上不动，下面的每日内容先被裁（面板定高窗的老规矩）。
-    /// 切歌时调用方传的 track（`playback.currentTrack`）跟着换，置顶跟着换。
-    private func nowPlayingPinBlock(track: Track, isDark: Bool) -> some View {
-        Button(action: { nav.showClassicPlayer() }) {
-            HStack(spacing: 10) {
-                CoverImageView(url: track.coverURL, placeholderIconSize: 20, darkPlaceholder: isDark)
-                    .frame(width: 48, height: 48)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(track.title.isEmpty ? "未知标题" : track.title)
-                        .font(.liziBody(size: LiziTokens.size15, weight: .semibold))
-                        .foregroundColor(isDark ? .white : LiziTokens.ink)
-                        .lineLimit(1)
-                    Text(track.artist.isEmpty ? track.platform : track.artist)
-                        .font(.liziBody(size: LiziTokens.size13))
-                        .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
-                        .lineLimit(1)
-                }
-                Spacer()
-                Button(action: { playback.togglePlay() }) {
-                    Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(isDark ? .white : LiziTokens.ink)
-                        .frame(width: 36, height: 36)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(playback.isPlaying ? "暂停" : "播放")
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-        }
-        .buttonStyle(.plain)
-        .background((isDark ? Color.white : Color.black).opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .accessibilityLabel("正在播放：\(track.title)")
-    }
-
-    /// r36：正在播放的搜索歌单块（今日推荐面板顶上一块）：标题行
-    /// （歌单名 + 共 N 首）+ 首页环（HomeCoverRingView，参照图那套：
-    /// 真封面、横向轮播、当前大张居中、左右露出相邻封面、封面下歌名 +
-    /// 歌手）。r35-3 的 96pt 小卡 RailMarqueeView 已删——小卡带在真机
-    /// 上看着像静止的网格，参照图要的是首页那套大封面轮播。
-    /// 环点卡走 `setQueue(tracks, startAt:, title:)`（queueTitle 透传，
-    /// 不传标题会把搜索 queueTitle 置 nil、置顶行跟着丢，见
-    /// HomeCoverRingView.queueTitle）；点卡切歌、当前播高亮、拖动开环
-    /// 全是环自带的。面板是定高窗：块高 = 标题行约 20 + 间距 8 +
-    /// 环 flatCard + 94，封顶里它那份是 flatCard + 122
-    /// （见 body 里 panelContentH；置顶行另占 68），底边不裁；
-    /// Hero 拖大、面板缩小时，块在顶上不动，下面的每日内容先被裁
-    /// （面板定高窗的老规矩）。
-    private func searchQueueBlock(isDark: Bool, tier: PlayerTokens.PlayerSizeTier) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text(playback.queueTitle ?? "")
-                    .font(.liziBody(size: LiziTokens.size16, weight: .semibold))
-                    .foregroundColor(isDark ? .white : LiziTokens.ink)
-                    .lineLimit(1)
-                Spacer()
-                Text("共 \(playback.queue.count) 首")
-                    .font(.liziBody(size: LiziTokens.size13))
-                    .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
-            }
-            HomeCoverRingView(
-                model: searchRingModel,
-                dailyTracks: playback.queue.map { $0.track },
-                marqueeSpeed: viewModel.marqSpeedPxPerSecond,
-                tier: tier,
-                panelIsDark: isDark,
-                queueTitle: playback.queueTitle
-            )
-        }
-    }
-
     /// r36-2：排行榜来源面板（菜单点「排行榜」切到这里，见 sourceContent
     /// 的 .rank 分支；r35-10 的 rankBlock 在 dailyPanel 里，现整块搬过来）：
-    /// 当前平台的榜单列表——横排卡片跑马带（卡片就是截图里那种榜单卡：
+    /// 当前平台的榜单列表——横向 ScrollView 全排出来（r37-5：旧跑马带一屏
+    /// 只装得下约 1.8 张，见 rankBoardListContent；卡片就是截图里那种榜单卡：
     /// 榜单名 + 封面/占位，r36：卡宽改成与首页环平面带同档
     /// （compact 180 / standard 190 / large 209，见 body 里 flatCard
-    /// 同款公式），参照图那套大封面卡片横向轮播——真封面、当前大张居中、
-    /// 左右露出相邻封面、封面下榜单名；速度跟首页跑马带走，向左
-    /// 自动滑、滑到头循环；驱动共用 railMarqueeDriver，同一时间只有
-    /// 一个来源的带子可见，见文件头 r36-2）；点卡选中该榜单，面板换成
+    /// 同款公式）；点卡选中该榜单，面板换成
     /// 该榜单的全部歌（r36 v4，见 rankDetailContent，不再跳独立详情页）。
     /// 标题行不另画——平台条上已显示来源名「排行榜」。
     /// 没榜的平台（波点/汽水/Apple Music）只画诚实文案
@@ -928,8 +870,10 @@ struct HomeView: View {
     /// r36 v4（用户 21:45 批「对就是这样」，稿图 lizi-chart-detail-mockup.png）：
     /// 榜单详情面板——榜单里的全部歌（100/1000 首）一张一张排到首页面板里，
     /// 像今日推荐那样横向轮播（HomeCoverRingView，独立 rankSongsRingModel）；
-    /// 每张卡正常显示（真封面 + 歌名 + 歌手），不带排名数字（21:43）、
-    /// 不显示多少首（21:44）、不加任何提示文字（21:44，hideEntryHint）；
+    /// 每张卡封面-only（r37-1：图到后只显封面、图未到先显歌名占位；
+    /// 3D 环展开态的环卡按套壳版带歌名——00:42:43 纠正：1:1 复刻只限 3D 环卡），
+    /// 不带排名数字（21:43）、不显示多少首（21:44）、
+    /// 不加任何提示文字（21:44，hideEntryHint）；
     /// 点卡播歌（环自带 setQueue 整队从该下标起播）。
     /// 面板顶栏只留三样：榜单名（左）+ 返回「‹ 榜单」+ 搜索（右）。
     /// 面板底色是专辑取色（dailyPanel 的 panelTone，稿图里的绿就是
@@ -970,7 +914,8 @@ struct HomeView: View {
                     marqueeSpeed: viewModel.marqSpeedPxPerSecond,
                     tier: tier,
                     panelIsDark: isDark,
-                    hideEntryHint: true
+                    hideEntryHint: true,
+                    coverOnly: true
                 )
             } else if rankDetailLoading {
                 HStack {
@@ -996,20 +941,32 @@ struct HomeView: View {
         }
     }
 
-    /// 榜单目录（未点进某张榜单时）：当前平台的榜单列表——横排卡片跑马带，
-    /// 见 rankSourceContent 的文档；没榜的平台只画诚实文案，不发请求。
+    /// 榜单目录（未点进某张榜单时）：当前平台的榜单列表——横向 ScrollView
+    /// 全排出来（r37-5，旧跑马带见本函数内注释）；没榜的平台只画诚实文案，
+    /// 不发请求。
+    /// r37-5（排行榜一次只露 2 张卡）：根因在 UI 不在取数——
+    /// NativeBridge.rankBoards 回全量榜单（网易 65 个、QQ 30 个、酷狗 56 个、
+    /// 酷我 bangMenu 全量，无任何 prefix(2)/截断），旧写法却把榜单塞进
+    /// RailMarqueeView 跑马带：面板宽约 358pt、卡宽 190pt，一屏只装得下
+    /// 约 1.8 张，剩下全被 .clipped() 裁掉、只能等带子自己滚过来；带子
+    /// 一停（dwell/拖动旗）用户就只看到头 2 张。改法：榜单目录改成横向
+    /// ScrollView，一张一张全排出来，用户自己左右滑看全量，不再依赖
+    /// 跑马带；卡片仍是 RailMarqueeCardView（r37-1：只放封面，榜单名不画；
+    /// 点卡进详情的路由不动），驱动不再参与榜单目录（共享 railMarqueeDriver 的
+    /// setWidth stale 问题随之绕开）。
     private func rankBoardListContent(isDark: Bool, tier: PlayerTokens.PlayerSizeTier) -> some View {
         let cardWidth: CGFloat = tier == .compact ? 180 : tier == .standard ? 190 : 209
         return VStack(alignment: .leading, spacing: 8) {
             if !viewModel.rankBoards.isEmpty {
-                RailMarqueeView(
-                    cards: rankCards,
-                    cardWidth: cardWidth,
-                    isDark: isDark,
-                    driver: railMarqueeDriver,
-                    speed: viewModel.marqSpeedPxPerSecond
-                )
-                .frame(height: cardWidth + 52)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 16) {
+                        ForEach(rankCards) { card in
+                            RailMarqueeCardView(card: card, width: cardWidth, isDark: isDark)
+                        }
+                    }
+                }
+                // r37-1：卡高 = 卡宽（只放封面，不再画榜单名行）。
+                .frame(height: cardWidth)
             } else if viewModel.rankSpinnerVisible {
                 // 250ms 后仍在加载：spinner（与 rail 各栏 loadingView 同款
                 // 尺寸，见 RailSourceListView）。
@@ -1143,18 +1100,33 @@ struct HomeView: View {
     /// 竖屏它根本滚不动（内容 283 < 窗口 331），横屏它先滚完自己的
     /// 255.5pt 才停，外层一次都轮不到。拆掉后面板内容超出窗的部分
     /// 由面板圆角裁掉（模板原意「齐底边裁断」），竖滑归外层整页。
+    /// r37-1：搜索进卡片（r35-3 链路复用，不另起搜索结果页）——搜完点歌
+    /// 立起的队列直接当这排卡片的内容（见函数体）；卡片封面-only
+    /// （`coverOnly: true`，歌名/歌手不画，见 HomeCoverRingView），
+    /// 点卡播歌、跑马带、3D 环开环一律不动。
     private func dailyRingContent(
         tier: PlayerTokens.PlayerSizeTier
     ) -> some View {
-        HomeCoverRingView(
+        // r37-1：搜完点歌后，正在播放的搜索歌单（queueTitle != nil 且
+        // 队列非空）直接显示在这排卡片里——不是独立页面、不是独立卡片、
+        // 不再另占一块搜索带（r35-3 的 searchQueueBlock 已删）；
+        // queueTitle 透传给环，点卡切歌走环自带的 setQueue(title:)，
+        // 队列标题不丢；切到别的歌单点歌、清空队列时 queueTitle 没了，
+        // 行变回每日推荐。没搜过歌时与原来一字不差。
+        let searchQueue: [Track]? = (playback.queueTitle != nil && !playback.queue.isEmpty)
+            ? playback.queue.map { $0.track }
+            : nil
+        return HomeCoverRingView(
             model: ringModel,
-            dailyTracks: viewModel.daily.map { $0.track },
+            dailyTracks: searchQueue ?? viewModel.daily.map { $0.track },
             isLoadingDaily: viewModel.isLoadingDaily,
             dailySpinnerVisible: viewModel.dailySpinnerVisible,
             dailyEmptyReason: viewModel.dailyEmptyReason,
             marqueeSpeed: viewModel.marqSpeedPxPerSecond,
             tier: tier,
-            panelIsDark: panelTone.isDark
+            panelIsDark: panelTone.isDark,
+            queueTitle: searchQueue != nil ? playback.queueTitle : nil,
+            coverOnly: true
         )
     }
 
@@ -1163,9 +1135,9 @@ struct HomeView: View {
     /// 「用户创建的歌单」改名「我的歌单」）改成与每日推荐同款的横向卡片跑马带
     /// （`RailMarqueeView`），不再是竖向列表。r30 的列表行（曲目 =
     /// TrackRowView 56pt 行，歌单/电台 = 56pt 横行）已删：
-    /// - 曲目卡 = 封面 + 歌名 + 歌手（环平面带 FlatRingCard 同款形状，
-    ///   卡宽与环同档），点一张播一首（setQueue 整份曲目）；
-    /// - 歌单/专辑/电台卡 = 该集合本身（封面 + 名字 + 创建者·数量），
+    /// - 曲目卡 = 只放封面（r37-1：歌名/歌手不画；环平面带 FlatRingCard
+    ///   coverOnly 同款形状，卡宽与环同档），点一张播一首（setQueue 整份曲目）；
+    /// - 歌单/专辑/电台卡 = 该集合本身（r37-1：只放封面，名字/创建者·数量不画），
     ///   点一张进面板内集合曲目（r31：我的歌单 / 我喜欢里的歌单或专辑卡
     ///   点后不跳详情页，面板原地换成该集合的全部歌曲卡片，返回键回列表；
     ///   精选/电台里的歌单卡仍进歌单详情页），不显示成文字列表；
@@ -1179,7 +1151,8 @@ struct HomeView: View {
     ///   酷狗/汽水精选=曲目、酷我精选=排行榜（歌单）；空态文案原样保留
     ///   （如「这一层没有歌曲」「这一层没有歌单」与各平台诚实原因）。
     ///
-    /// 面板是定高窗：跑马带一排卡（卡高 = 卡宽 + 52，与环平面带同高）
+    /// 面板是定高窗：跑马带一排卡（卡高 = 卡宽，r37-1：只放封面，
+    /// 与环平面带 coverOnly 同高）
     /// + 底部「查看全部」进 RailDetailView 整页（带子滚动看全量，
     /// 不再只放 3 条）；横屏面板只有约 140 高，栏头 + 条占掉
     /// 大半后 rail 栏只剩约一行的位置、其余裁断是模板原意，
@@ -1250,7 +1223,7 @@ struct HomeView: View {
         // MARK: - 面板内打开的歌单 / 专辑（r31）
 
         /// 点「我的歌单」/「我喜欢」里的歌单或专辑卡后，面板原地换成该集合的
-        /// 全部歌曲卡片（真封面 + 歌名 + 歌手，点一首就播；跑马带与来源列表
+        /// 全部歌曲卡片（r37-1：只放封面，歌名/歌手不画；点一首就播；跑马带与来源列表
         /// 同一个驱动、同一速度一直向左滚；没封面用 DefaultCoverArt，见
         /// `RailMarqueeCardView.coverArt`）。歌多时曲目已全量取数
         /// （`railPlaylistTracks` / `albumDetail` 翻页取满），带子接着滚，
@@ -1301,14 +1274,15 @@ struct HomeView: View {
                         driver: marqueeDriver,
                         speed: viewModel.marqSpeedPxPerSecond
                     )
-                    .frame(height: cardWidth + 52)
+                    // r37-1：卡高 = 卡宽（只放封面，不再画歌名/歌手行）。
+                    .frame(height: cardWidth)
                     Spacer(minLength: 0)
                     openedViewAllButton
                 }
             }
         }
 
-        /// 打开的集合的全部歌曲卡片：封面 + 歌名 + 歌手，点一张播一首
+        /// 打开的集合的全部歌曲卡片：只放封面（r37-1），点一张播一首
         /// （setQueue 整份曲目，从点中的那首起播）。
         private var openedTrackCards: [RailMarqueeCard] {
             let tracks = viewModel.openedTracks
@@ -1370,16 +1344,17 @@ struct HomeView: View {
                     driver: marqueeDriver,
                     speed: viewModel.marqSpeedPxPerSecond
                 )
-                // 卡高 = 卡宽 + 52（封面 + 间距 7 + 16pt 名行 + 间距 7 + 14pt
-                // 副标题行，与环平面带 flatHeight 同高）。
-                .frame(height: cardWidth + 52)
+                // 卡高 = 卡宽（r37-1：只放封面，不再画名行/副标题行，
+                // 与环平面带 coverOnly 的 flatHeight 同高）。
+                .frame(height: cardWidth)
                 Spacer(minLength: 0)
                 viewAllButton(total: total)
             }
         }
 
-        /// 面板卡片（r31）：把该栏条目展平成一张张卡——曲目卡（封面 + 歌名 +
-        /// 歌手）与集合卡（歌单/专辑/电台本身：封面 + 名字 + 创建者·数量）同一形状；
+        /// 面板卡片（r31）：把该栏条目展平成一张张卡——曲目卡与集合卡
+        /// （歌单/专辑/电台本身）同一形状，都是只放封面（r37-1：歌名/歌手/
+        /// 名字/创建者·数量不画，标题只留给 VoiceOver）；
         /// 分组说明卡（groupHeader）不是内容、不进带子。点按行为：
         /// 曲目点播；「我的歌单」/「我喜欢」里的歌单卡点后在面板内打开
         /// （`viewModel.openPlaylist`），专辑卡在面板内打开
@@ -1530,7 +1505,8 @@ struct HomeView: View {
     // MARK: - r31 rail 跑马带（驱动 + 视图 + 卡片）
 
     /// rail 跑马带里的一张卡（曲目 / 歌单 / 电台共用同一形状）：
-    /// 封面 + 名字 + 副标题；点按行为由调用方 `marqueeCards` 按条目类型填。
+    /// 只放封面（r37-1：名字/副标题不画，字段保留给 VoiceOver 与点按路由）；
+    /// 点按行为由调用方 `marqueeCards` 按条目类型填。
     private struct RailMarqueeCard: Identifiable {
         var id: String
         var coverURL: URL?
@@ -1844,42 +1820,79 @@ struct HomeView: View {
         }
     }
 
-    /// 跑马带里的一张卡：封面 + 名字 + 副标题（环平面带 FlatRingCard 同款形状：
-    /// 封面正方形 + 16pt 名 + 14pt 副标题，间距 7；颜色跟面板深场走）。
+    /// 跑马带里的一张卡：只放封面图（r37-1：歌名/副标题不画——面板卡片
+    /// 只放封面，点按行为不变；名字只留给 VoiceOver 的 accessibilityLabel）。
+    /// r37-1 追加（用户 2026-11-22 00:39 显示逻辑）：封面没显示出来时先盖
+    /// 标题文字占位（白字盖在深色占位底上），用户能先滑、认出是哪张卡；
+    /// 封面一到占位消失、只剩封面。占位盖在封面框里，不占卡高。
     /// 没封面（coverURL 为 nil）用 r30 的 DefaultCoverArt 深色默认图，不摆白卡；
     /// URL 有但加载失败时 CoverImageView 的白占位是已知残留（见 HomeCoverRingView
     /// 文件头 r30 节），与环卡同款。
+    /// isDark：标题字色已随标题一起删，字段保留（调用方原样传，不改签名）。
     private struct RailMarqueeCardView: View {
         let card: RailMarqueeCard
         let width: CGFloat
         let isDark: Bool
 
+        /// r37-1 追加：这张卡的封面图是否已显示（`CoverImageLoader` 进程内
+        /// 缓存观测；false = 占位底 + 标题占位，true = 只剩封面）。
+        /// 观测与 `CoverImageView`（`ProxyImageView`）走同一份加载器、同一
+        /// 个在飞任务——不重复发请求；失败重试节拍（0.5s / 1.5s、最多 3 次）
+        /// 照抄 `ProxyImageView`，免得图到了占位还赖着不走。
+        @State private var coverLoaded = false
+
         var body: some View {
             Button(action: card.onTap) {
-                VStack(alignment: .leading, spacing: 7) {
+                ZStack(alignment: .center) {
                     coverArt
                         .frame(width: width, height: width)
                         .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
-                        // r35-3：当前在播的卡高亮（封面 accent 描边 + 歌名 accent
-                        // 加粗）；isCurrent 为 false 时描边透明、歌名原色，
-                        // rail 各栏的渲染与原来一字不差。
+                        // r35-3：当前在播的卡高亮（封面 accent 描边）；isCurrent
+                        // 为 false 时描边透明（r37-1：歌名那行已删，高亮只剩封面描边）。
                         .overlay(
                             RoundedRectangle(cornerRadius: LiziTokens.radius10)
                                 .stroke(card.isCurrent ? LiziTokens.accent : Color.clear, lineWidth: 2)
                         )
-                    Text(card.title)
-                        .font(.liziBody(size: LiziTokens.size16, weight: card.isCurrent ? .semibold : .medium))
-                        .foregroundColor(card.isCurrent ? LiziTokens.accent : (isDark ? .white : LiziTokens.ink))
-                        .lineLimit(1)
-                    Text(card.subtitle)
-                        .font(.liziBody(size: LiziTokens.size14))
-                        .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
-                        .lineLimit(1)
+                    // r37-1 追加：封面未显示时的标题占位（无封面 URL 的卡永远
+                    // 无图可显，占位一直显示——那是唯一能认出卡的办法；有封面
+                    // URL 的图一到即消失，不变常驻标题）。
+                    if !coverLoaded {
+                        VStack(alignment: .center, spacing: 2) {
+                            Text(card.title)
+                                .font(.liziBody(size: LiziTokens.size15, weight: .semibold))
+                                .foregroundColor(.white)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.center)
+                            if !card.subtitle.isEmpty {
+                                Text(card.subtitle)
+                                    .font(.liziBody(size: LiziTokens.size12))
+                                    .foregroundColor(.white.opacity(0.75))
+                                    .lineLimit(1)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .shadow(color: .black.opacity(0.6), radius: 6, x: 0, y: 1)
+                    }
                 }
-                .frame(width: width, alignment: .leading)
             }
             .buttonStyle(.plain)
             .accessibilityLabel(card.isCurrent ? "正在播放 \(card.title)" : card.title)
+            .task(id: card.coverURL) {
+                // r37-1 追加：观测封面是否已显示（见 coverLoaded 注释）；
+                // url 一变任务重开，coverLoaded 先归 false（旧图不顶替新卡）。
+                coverLoaded = false
+                guard let url = card.coverURL else { return }
+                var attempt = 0
+                while !Task.isCancelled, !coverLoaded {
+                    if await CoverImageLoader.shared.image(for: url) != nil {
+                        coverLoaded = true
+                        break
+                    }
+                    attempt += 1
+                    guard attempt <= 2 else { break }
+                    try? await Task.sleep(nanoseconds: UInt64((attempt == 1 ? 0.5 : 1.5) * 1_000_000_000))
+                }
+            }
         }
 
         @ViewBuilder

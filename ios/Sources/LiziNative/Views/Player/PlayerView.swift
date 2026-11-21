@@ -122,7 +122,12 @@ struct PlayerView: View {
                 Group {
                     if isLandscape { traditionalLandscapeBackground } else { background }
                 }
-                .frame(width: screenSize.width, height: screenSize.height)
+                // r37-3：横屏底图改按 geo.size（当前真实布局尺寸）取框，
+                // 不再取 UIScreen.main.bounds——后者是静态快照，旋转瞬间 /
+                // 分屏下可能仍是旧朝向尺寸，底图就会留一条没盖住的边
+                // （窗口底默认偏白，看着就是一条白条）；竖屏一字不动。
+                .frame(width: isLandscape ? geo.size.width : screenSize.width,
+                       height: isLandscape ? geo.size.height : screenSize.height)
                 if isLandscape {
                     landscapeLayout(geo: geo, tier: tier)
                         .task(id: store.currentTrack?.coverURL) {
@@ -354,11 +359,19 @@ struct PlayerView: View {
     // MARK: - 横屏传统：v2 稿图比例（r36，第③件；用户 2026-11-21 21:23 批 v2 稿
     //   `~/workspace/lizi-landscape-mockup-v2.png`，脚本 `draw-landscape-mockup-v2.py`；
     //   r35-7 的 232 封面 + 文字钮整段作废）
+    // r37-2：下面 v2 比例数字（封面左 120、右列 x=540、歌名红合行、返回/
+    //   顶栏左右留白按岛侧 59pt 兜底）已被修正版施工图
+    //   `~/workspace/lizi-landscape-fixed-mockup.png`（用户已批「对」）取代，
+    //   以 landscapeLayout / traditionalRightColumn / traditionalTopBar
+    //   里的 r37-2 注释为准：返回贴左 3.75% 屏宽、封面左 15.625%、
+    //   右列 x=50% 宽 37.5%、歌名/歌手分两行（白字）、进度条下加两端时间；
+    //   其余 v2 口径（Ø44 圆钮、齿轮进舞台不带 openSettings、背景优先级
+    //   壁纸 > 取色 > 深色底、控制行五键真实现）一字不动。
 
-    /// v2 稿主红（标题/当前句/控制/进度条）与淡红（下一句歌词）。
-    /// 稿里值：RED (226,72,72)，FADE (150,130,130)。
+    /// v2 稿主红（当前句/控制/进度条）。稿里值：RED (226,72,72)。
+    /// r37-2：下一句改走浅灰白（修正版施工图）、歌名改白字，淡红 FADE
+    /// (150,130,130) 不再有人用，随改动删掉，不留死常量。
     private static let traditionalRed = Color(red: 226 / 255, green: 72 / 255, blue: 72 / 255)
-    private static let traditionalRedFaint = Color(red: 150 / 255, green: 130 / 255, blue: 130 / 255)
 
     /// v2 比例（稿图 1280×720，真机横屏比 16:9 更宽，一律按相对比例换算，
     /// 不按绝对像素硬套；横向按屏宽、纵向按屏高）：
@@ -391,41 +404,124 @@ struct PlayerView: View {
     /// - 封面：真专辑图原样显示（与竖屏/Now Playing 同一 coverURL）；
     ///   没封面 / 加载失败走深色默认封面（CoverImageView r36），不许白框；
     ///   加载失败本身是 bug（重试见 CoverImageLoader.swift），不拿色块顶替。
-    /// 横屏传统模式（r36 v2，见本节头注释）：顶栏 + 内容行全部按 v2
-    /// 相对比例定位（横向按屏宽、纵向按屏高），不按绝对像素硬套。
-    /// 岛侧安全区：v2 左留白 9.375%（874 宽上 82pt）已大于岛侧 59pt；
-    /// 右留白 6.48%（874 宽上 57pt）略小于 59pt，岛在右时取 59pt 兜底；
-    /// 顶栏返回在 3.52%（874 宽上 31pt），岛在左时同样取 59pt 兜底。
+    /// 横屏传统模式（r36 v2；r37-2 按用户已批的修正版施工图
+    /// `~/workspace/lizi-landscape-fixed-mockup.png` 重排，1280×720 稿图比例换算）：
+    /// - 返回 `<` 移到最左侧（稿里 x=48/1280 = 3.75% 屏宽，贴左边缘；岛在左时
+    ///   也不再取 59pt 兜底——返回钮在屏顶（中心 y≈6.67% 屏高），岛在横屏时
+    ///   贴侧边中部，纵向不重叠；样式仍是裸红 `<`）。
+    /// - 搜索 / 舞台两个 Ø44 红圈钮在右上角（稿里中心 x≈87.5% / 94.14% 屏宽，
+    ///   中心 y 同返回钮；齿轮右缘离屏边约 4.14% 屏宽，留出间距），和返回分开两端。
+    /// - 封面移到左中（稿里 x=200/1280 = 15.625% 屏宽，顶 130/720 = 18.06% 屏高，
+    ///   边长仍是 28.125% 屏宽的方形）；右列从 50% 屏宽起，宽 37.5% 屏宽。
+    /// - 右列：歌名（白粗体）/ 歌手 / 当前句（红粗体）/ 下一句 / 红进度条
+    ///   （可拖 + 点按 seek，复用 PlayerProgressBar）/ 两端时间 / 控制行五键。
+    /// - r37-3：整层按 geo.size 排布（不用 UIScreen 快照），底图见
+    ///   traditionalLandscapeBackground；r37-8：封面容器挂滑动切歌手势。
     private func landscapeLayout(geo: GeometryProxy, tier: PlayerTokens.PlayerSizeTier) -> some View {
         let compactTier = PlayerTokens.PlayerSizeTier.compact
-        let screenWidth = UIScreen.main.bounds.width
-        let screenHeight = UIScreen.main.bounds.height
-        let (islandLeading, islandTrailing) = Self.landscapeSideInsets
-        let topLeading = max(islandLeading, 0.0352 * screenWidth)
-        let topTrailing = max(islandTrailing, 0.0648 * screenWidth)
+        let screenWidth = geo.size.width
+        let screenHeight = geo.size.height
+        let islandTrailing = Self.landscapeSideInsets.trailing
+        // r37-2：返回贴左边缘（稿 48/1280）；右上两钮右缘留约 4.14% 屏宽
+        // （稿齿轮右缘 1231/1280），岛在右时取岛侧 59pt 兜底防重叠。
+        let topLeading = 0.0375 * screenWidth
+        let topTrailing = max(islandTrailing, 0.0414 * screenWidth)
         let coverSize = 0.28125 * screenWidth
+        // r37-2：顶栏三钮中心 y = 稿里 48/720 = 6.67% 屏高；钮径仍是 r36-5 的 Ø44
+        // （44/1280 = 3.4375% 屏宽）。
+        let topBarDiameter = 0.034375 * screenWidth
+        let topBarTop = 0.0667 * screenHeight - topBarDiameter / 2
         return ZStack(alignment: .topLeading) {
             traditionalTopBar(width: screenWidth - topLeading - topTrailing, screenWidth: screenWidth)
                 .padding(.leading, topLeading)
-                .padding(.top, 0.0361 * screenHeight)
-            HStack(alignment: .top, spacing: 0.0469 * screenWidth) {
-                CoverImageView(url: store.currentTrack?.coverURL, placeholderIconSize: 64)
-                    .frame(width: coverSize, height: coverSize)
-                    .clipShape(RoundedRectangle(cornerRadius: coverSize * 24 / 360))
-                traditionalRightColumn(width: 0.5 * screenWidth, screenWidth: screenWidth, screenHeight: screenHeight, tier: compactTier)
+                .padding(.top, topBarTop)
+            HStack(alignment: .top, spacing: 0.0625 * screenWidth) {
+                // r37-8：封面容器（固定 coverSize 方形）挂滑动切歌手势——
+                // 手势挂容器不挂图片，占位态（歌名文字占位）一样能滑；
+                // 阈值 0.3×边长、方向（左滑上一首 / 右滑下一首）与
+                // CoverFlowView.swipeGesture 同款。
+                // r37-8 细化：封面未加载先显示歌名文字占位（深色渐变底，
+                // 与 DefaultCoverArt 同款配色，不许白底），确保用户能先看、
+                // 能先滑动、能认出是哪首歌；图一加载出来 ProxyImageView 只
+                // 渲染图、整支占位（含歌名）消失，不显示歌名。
+                // 占位标题取当前这首歌（store.currentTrack?.title）；右列的
+                // 歌名行不动，这里只是封面占位态的文字。滑动手势挂在容器上
+                // （见下 .gesture），一字不动。
+                ZStack {
+                    ProxyImageView(url: store.currentTrack?.coverURL) {
+                        landscapeCoverTitlePlaceholder(
+                            title: store.currentTrack?.title, coverSize: coverSize
+                        )
+                    }
+                }
+                .frame(width: coverSize, height: coverSize)
+                .clipShape(RoundedRectangle(cornerRadius: coverSize * 24 / 360))
+                .contentShape(Rectangle())
+                .gesture(landscapeCoverSwipeGesture(coverSize: coverSize))
+                traditionalRightColumn(width: 0.375 * screenWidth, screenWidth: screenWidth, screenHeight: screenHeight, tier: compactTier)
             }
             .frame(width: screenWidth, alignment: .leading)
-            .padding(.leading, 0.09375 * screenWidth)
-            .padding(.top, 0.1597 * screenHeight)
+            .padding(.leading, 0.15625 * screenWidth)
+            .padding(.top, 0.1806 * screenHeight)
         }
         .frame(width: screenWidth, height: screenHeight, alignment: .topLeading)
+        // r37-3：横屏整层忽略安全区——祖先一旦按安全区缩进本页，底图与返回键
+        // 仍贴到左右边缘，不留白条；竖屏不动（portraitLayout 不走这里）。
+        .ignoresSafeArea()
+    }
+
+    /// r37-8 细化：横屏封面未加载的歌名文字占位（见 landscapeLayout）：
+    /// 深色渐变底（DefaultCoverArt 同款配色，不许白底）+ 当前歌名居中；
+    /// 字号按封面边长取（边长 × 0.08，稿图 360 → 约 29pt），最多 3 行、
+    /// 左右留 12pt，不溢出。切换靠 ProxyImageView：图一到只渲染图，
+    /// 本占位整支消失，有封面时不显示歌名；无歌名时只剩深色底，不编假数据。
+    @ViewBuilder
+    private func landscapeCoverTitlePlaceholder(title: String?, coverSize: CGFloat) -> some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(white: 0.24), Color(white: 0.10)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+            Text(title ?? "")
+                .font(.system(size: coverSize * 0.08, weight: .semibold))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .padding(.horizontal, 12)
+        }
+    }
+
+    /// r37-8：横屏封面滑动切歌（CoverFlowView.swipeGesture 的单封面版）：
+    /// 阈值 0.3×边长、左滑上一首 / 右滑下一首与竖屏封面流一致；
+    /// 队列不足 2 首或无当前下标时不切歌；单张静态封面没有跟手位移
+    /// （没有 5 张流可插值），过阈值即切歌。手势挂在封面容器上
+    /// （见 landscapeLayout），占位态也一样接。
+    private func landscapeCoverSwipeGesture(coverSize: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .local)
+            .onEnded { value in
+                let dx = value.translation.width
+                guard store.queue.count >= 2, store.currentIndex >= 0,
+                      abs(dx) > coverSize * 0.3 else { return }
+                if dx < 0 {
+                    // 左滑上一首：直接按队列下标（不走 previous() 的回开头分支，
+                    // 与 CoverFlowView 同款）。
+                    let prev = (store.currentIndex - 1 + store.queue.count) % store.queue.count
+                    if store.queue.indices.contains(prev) {
+                        store.play(queueItem: store.queue[prev])
+                    }
+                } else {
+                    // 右滑下一首：走 next()，和按钮一致。
+                    store.next()
+                }
+            }
     }
 
     /// 传统横屏顶栏（r36 v2）：左裸红 `<` 返回（r35 原样，不动），右搜索 /
     /// 齿轮两个红描边 Ø44 圆钮（v2 稿图；r34 的 Ø38 作废，r35 的「舞台」/
     /// 「舞台控制」文字钮作废，用户 21:16 + 21:23 定稿）。钮径 =
     /// 44/1280 屏宽（0.034375 × 屏宽）；图标字号 = 钮径 × 0.47
-    /// （r34 同款因子）；两钮中心距 90px（0.0703 × 屏宽）。
+    /// （r34 同款因子）；两钮中心距（r37-2，修正版施工图）85px
+    /// （0.0664 × 屏宽），r36 的 90px 作废。
     /// 搜索进搜索页（.search，r34 原行为）；齿轮进舞台页（.stage()，
     /// 不带 openSettings，舞台页里自己的齿轮再调设置，r34 原行为）。
     /// 设置不进横屏顶栏。顶栏只留这 3 个功能。
@@ -445,7 +541,9 @@ struct PlayerView: View {
             }
             .accessibilityLabel("搜索")
             Spacer()
-                .frame(width: 0.0359 * screenWidth)
+                // r37-2：两钮中心距 = 稿里 (1205−1120)/1280 = 6.64% 屏宽，
+                // 减钮径 3.44% → 间隔 3.2% 屏宽（r36 的 3.59% 作废）。
+                .frame(width: 0.032 * screenWidth)
             traditionalTopBarCircleButton(systemName: "gearshape", diameter: diameter) {
                 // 齿轮就是舞台控制按钮（点进舞台页，不进设置页、
                 // 不在播放页弹调节面板；r34 原行为）。
@@ -468,40 +566,75 @@ struct PlayerView: View {
         }
     }
 
-    /// 传统横屏右列（r36 v2）：歌名 - 歌手 → 当前句 → 下一句 → 进度条（红）
-    /// → 控制行。纵向全部按屏高换算（稿图 y / 720 × 屏高），字号同款；
-    /// 歌名行与歌词行都单行（lineLimit 1 + minimumScaleFactor 0.5），
-    /// 长标题只缩小、不截断。
-    /// 混音 / 发行两行没做（见本节头注释：无数据源，不编假数据）；
-    /// 歌名→当前句取稿图歌名→混音的 50px 间距，行间不留空洞。
+    /// 传统横屏右列（r36 v2；r37-2 按修正版施工图重排）：
+    /// 歌名（白粗体，52/720 屏高）→ 歌手（近白，30）→ 当前句（红粗体，34）
+    /// → 下一句（浅灰白，30）→ 红进度条（复用 PlayerProgressBar，可拖 + 点按
+    ///   seek；轨道浅灰、播放头红点，见 PlayerDockView r37-2）→ 两端时间
+    ///   （00:29 / 04:30，零补齐）→ 控制行五键（r36 原样真实现）。
+    /// 无曲目时：歌名「未在播放」、歌手占位文案、歌词行空串占位、时间 00:00 /
+    /// 00:00、控制行 disabled——区域结构不塌、不留白。
+    /// 纵向按稿图 y（720 稿）换算：歌名顶 150、歌手 215、当前句 285、
+    /// 下一句 335、进度条 410、时间 425、控制中心 500；行高按字号×1.2 计，
+    /// 间距取稿图行间净空（歌名→歌手 6、歌手→当前句 16、当前句→下一句 12、
+    /// 下一句→进度条 22、进度条→时间 10、时间→控制行 16，单位 /720 屏高）。
     private func traditionalRightColumn(width: CGFloat, screenWidth: CGFloat, screenHeight: CGFloat, tier: PlayerTokens.PlayerSizeTier) -> some View {
         let h = screenHeight
         return VStack(alignment: .leading, spacing: 0) {
             Text(traditionalTitleText)
-                .font(.system(size: 28 / 720 * h, weight: .bold))
-                .foregroundStyle(Self.traditionalRed)
+                .font(.system(size: 52 / 720 * h, weight: .bold))
+                .foregroundStyle(Color.white)
                 .lineLimit(1)
                 .minimumScaleFactor(0.5)
                 .frame(width: width, alignment: .leading)
                 .padding(.top, 35 / 720 * h)
-            traditionalLyricLine(text: traditionalCurrentLyric, size: 24 / 720 * h, color: Self.traditionalRed, weight: .bold)
-                .padding(.top, 50 / 720 * h)
-            traditionalLyricLine(text: traditionalNextLyric, size: 22 / 720 * h, color: Self.traditionalRedFaint)
-                .padding(.top, 35 / 720 * h)
-            PlayerProgressBar(tier: tier, fillColor: Self.traditionalRed)
+            Text(traditionalArtistText)
+                .font(.system(size: 30 / 720 * h))
+                .foregroundStyle(Color(white: 0.92))
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+                .frame(width: width, alignment: .leading)
+                .padding(.top, 6 / 720 * h)
+            traditionalLyricLine(text: traditionalCurrentLyric, size: 34 / 720 * h, color: Self.traditionalRed, weight: .bold)
+                .padding(.top, 16 / 720 * h)
+            traditionalLyricLine(text: traditionalNextLyric, size: 30 / 720 * h, color: Color(white: 0.86))
+                .padding(.top, 12 / 720 * h)
+            PlayerProgressBar(tier: tier, fillColor: Self.traditionalRed, trackColor: Color(white: 0.78), dotColor: Self.traditionalRed)
                 .frame(width: width)
-                .padding(.top, 60 / 720 * h)
+                .padding(.top, 22 / 720 * h)
+            HStack {
+                Text(landscapeTimeText(store.progress))
+                Spacer()
+                Text(landscapeTimeText(store.duration))
+            }
+            .font(.system(size: 22 / 720 * h))
+            .foregroundStyle(Color(white: 0.9))
+            .frame(width: width)
+            .padding(.top, 10 / 720 * h)
             traditionalControlRow(width: width, screenWidth: screenWidth, screenHeight: h)
-                .padding(.top, 80 / 720 * h)
+                .padding(.top, 16 / 720 * h)
         }
         .frame(width: width, alignment: .topLeading)
     }
 
-    /// 右列歌名行（r35-7）：「歌名 - 歌手」；没歌手时只剩歌名；无曲目时「未在播放」。
+    /// 右列歌名行（r37-2：只剩歌名，歌手另起一行 traditionalArtistText；
+    /// r36 的「歌名 - 歌手」合行作废，按修正版施工图：歌名白粗体大字、
+    /// 歌手小字在下）。无曲目时「未在播放」。
     private var traditionalTitleText: String {
-        guard let track = store.currentTrack else { return "未在播放" }
-        if track.artist.isEmpty { return track.title }
-        return "\(track.title) - \(track.artist)"
+        store.currentTrack?.title ?? "未在播放"
+    }
+
+    /// 右列歌手行（r37-2）：歌手名；没歌手时回落平台名（与竖屏 subtitleText
+    /// 同规则）；无曲目时是选歌占位文案——行位不塌。
+    private var traditionalArtistText: String {
+        subtitleText
+    }
+
+    /// 横屏两端时间（r37-2）：零补齐 mm:ss（稿里 00:29 / 04:30）；
+    /// PlayerTokens.formatDuration 是 m:ss（0:29），竖屏 dock 用它，横屏另起不改它。
+    private func landscapeTimeText(_ seconds: TimeInterval) -> String {
+        guard seconds.isFinite, seconds > 0 else { return "00:00" }
+        let total = Int(seconds)
+        return String(format: "%02d:%02d", total / 60, total % 60)
     }
 
     /// 有效当前行（r35-7：从旧 landscapeEffectiveCurrent 原样搬来；还没开唱
@@ -673,6 +806,9 @@ struct PlayerView: View {
     /// 只做底色，不盖内容、不挡点按。
     private var traditionalLandscapeBackground: some View {
         ZStack {
+            // r37-3：底层先垫纯黑——上面任何一层（取色渐变 / 壁纸）万一没盖住，
+            // 露出来的也是黑不是白；竖屏 background 不动。
+            Color.black
             LinearGradient(
                 colors: [landscapeTone.a, landscapeTone.b, landscapeTone.c],
                 startPoint: .topLeading,
@@ -695,6 +831,10 @@ struct PlayerView: View {
             }
         }
         .allowsHitTesting(false)
+        // r37-3：横屏底图忽略安全区（竖屏 background 早就有 ignoresSafeArea，
+        // 横屏这支一直没加）：背景铺满整个横屏安全区（含左右边缘），
+        // 返回键浮在背景上层，不留白条；壁纸 > 取色 > 深色底的优先级不动。
+        .ignoresSafeArea()
     }
 
 

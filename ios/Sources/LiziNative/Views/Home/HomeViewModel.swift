@@ -99,6 +99,15 @@ final class HomeViewModel: ObservableObject {
     /// 延迟亮 spinner 的代际（loadDaily 每次起手 +1；旧的延迟任务回来
     /// 对不上就不亮，不串味到下一单）。
     private var dailySpinnerEpoch = 0
+    /// r37-6（每日推荐一直转圈）：本次每日加载的起始时间 + 看门狗代际。
+    /// loadDaily 的 defer + 120 秒整链超时本应保证落下，但 defer 只在
+    /// loadDaily 任务本身返回时跑——桥接层里若有不响应取消的挂起
+    /// （或 .task 取消后孤儿任务丢了结算），isLoadingDaily 仍能永久
+    /// 留在 true；看门狗是最后一道：起手 130 秒（整链 120 秒预算之外，
+    /// 不推翻 r35-9 的每腿 60 秒/整链 120 秒），同代际仍在加载就强制
+    /// 落到带文案的空态，绝不停在加载中。
+    private var dailyLoadStartedAt: Date?
+    private var dailyWatchdogEpoch = 0
     /// 每日推荐为空时的诚实原因（nil = 有数据或正在加载）。
     @Published var dailyEmptyReason: String?
     /// 排行榜目录（r35-10；r36：落点从面板内一块改成来源菜单里的一项，
@@ -378,6 +387,23 @@ final class HomeViewModel: ObservableObject {
                 dailySpinnerVisible = true
             }
         }
+        // r37-6：看门狗（见 dailyWatchdogEpoch 注释）：130 秒后同代际
+        // 仍在加载，就当桥接腿挂死了，强制落到带文案的空态。看门狗只清
+        // 加载态、不写缓存——一次挂死不是空数据，不进 r35-1 的否定缓存，
+        // 下次访问照常重拉；新加载起手 epoch +1，旧看门狗回来对不上
+        // 就空转，不误伤新单。
+        dailyWatchdogEpoch += 1
+        let watchdogEpoch = dailyWatchdogEpoch
+        dailyLoadStartedAt = Date()
+        Task {
+            try? await Task.sleep(nanoseconds: 130_000_000_000)
+            guard watchdogEpoch == dailyWatchdogEpoch,
+                  generation == homeLoadGeneration,
+                  isLoadingDaily, daily.isEmpty else { return }
+            isLoadingDaily = false
+            dailySpinnerVisible = false
+            dailyEmptyReason = "每日推荐拉取超时（130 秒无响应），请检查网络后重试。"
+        }
         defer {
             // r33：任何返回路径都无条件落下，除非更新的加载已接管
             // （代际比当前新，generation < homeLoadGeneration）。
@@ -494,6 +520,27 @@ final class HomeViewModel: ObservableObject {
     /// `RailKind.likedTitle(for:)`）。
     var sourceTitle: String { selectedSource.title(platform: selectedPlatform) }
 
+    /// r37-6：保证每日推荐有一单在飞或已落下（selectSource 两路共用）。
+    /// - 空 + 无原因 + 没在加载 → 起一单 loadDaily。
+    /// - 空 + 无原因 + 在加载，但起始时间超过 130 秒（看门狗都没把它
+    ///   落下，说明结算路径已丢）→ 先强制结算旧单（落加载态 + 超时文案），
+    ///   再起一单新的 loadDaily；不无限重起（新单自己带看门狗）。
+    /// - 有数据 / 有空原因 → 什么都不做。
+    private func ensureDailyLoaded() {
+        guard daily.isEmpty, dailyEmptyReason == nil else { return }
+        if isLoadingDaily {
+            if let startedAt = dailyLoadStartedAt,
+               Date().timeIntervalSince(startedAt) > 130 {
+                isLoadingDaily = false
+                dailySpinnerVisible = false
+                dailyEmptyReason = "每日推荐拉取超时（130 秒无响应），请检查网络后重试。"
+                Task { await loadDaily() }
+            }
+            return
+        }
+        Task { await loadDaily() }
+    }
+
     /// 切来源（菜单点选唯一入口；点当前来源且数据已在就直接 return，
     /// 什么都不做，见函数体 r35 分支；喜欢栏星标旗置起时重拉，
     /// 见 `loadRailPage`）。
@@ -527,9 +574,11 @@ final class HomeViewModel: ObservableObject {
         if page == selectedSource {
             if page == .daily {
                 if !daily.isEmpty || dailyEmptyReason != nil { return }
-                if !isLoadingDaily {
-                    Task { await loadDaily() }
-                }
+                // r37-6：同源点每日推荐时也走 ensureDailyLoaded——旧写法
+                // 只在 !isLoadingDaily 时补拉；若 isLoadingDaily 被一次
+                // 孤儿加载永久置起（r36 复现），这里直接 return、
+                // 面板永远转圈。卡死超 130 秒就强制结算旧单再重拉。
+                ensureDailyLoaded()
                 return
             }
             if railResults[page] != nil,
@@ -539,6 +588,10 @@ final class HomeViewModel: ObservableObject {
         }
         selectedSource = page
         UserDefaults.standard.set(page.rawValue, forKey: Self.sourceKey)
+        // r37-6：跨来源切回每日推荐也要保证有单——旧写法只调
+        // loadRailPage(page)，而 loadRailPage 开头就 guard 掉 .daily，
+        // 切过来后若每日是空且无原因、又没在加载，面板永远是旧的加载态。
+        if page == .daily { ensureDailyLoaded() }
         loadRailPage(page)
     }
 

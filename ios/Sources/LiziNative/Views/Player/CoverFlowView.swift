@@ -97,7 +97,11 @@ struct CoverFlowView: View {
                     .zIndex(zIndex(for: offset))
             }
         }
-        .frame(height: trackHeight)
+        // r37-8：容器给死宽高（宽 = 单张边长 itemSize，与子视图撑出来的宽同值，
+        // 不改布局）——手势的命中矩形不依赖子视图：封面图还没加载出来、
+        // 占位分支尺寸为 0 时，容器仍在、滑动切歌仍能接住；阈值
+        // （0.3×边长）与方向一字不动，竖屏滑动行为不变。
+        .frame(width: itemSize, height: trackHeight)
         .contentShape(Rectangle())
         .gesture(swipeGesture)
         .onAppear { snapDuration = stepDuration }
@@ -124,7 +128,15 @@ struct CoverFlowView: View {
         let metrics = metrics(for: offset)
 
         VStack(spacing: 8) {
-            CoverImageView(url: track?.coverURL, placeholderIconSize: 64)
+            // r37-8 细化：封面未加载先显示歌名文字占位（深色渐变底，
+            // 与 DefaultCoverArt 同款配色，不许白底），确保用户能先看、
+            // 能先滑动、能认出是哪首歌；图一加载出来 ProxyImageView 只
+            // 渲染图、整支占位（含歌名）消失，不显示歌名。
+            // 占位标题取当前这张自己的歌（track?.title）；滑动切歌手势
+            // 挂在容器上（见 body），这里一字不动。
+            ProxyImageView(url: track?.coverURL) {
+                coverTitlePlaceholder(title: track?.title)
+            }
                 .frame(width: itemSize, height: itemSize)
                 .clipShape(RoundedRectangle(cornerRadius: PlayerTokens.radiusMd))
                 .shadow(color: .black.opacity(0.5), radius: 18, x: 0, y: 18)
@@ -156,6 +168,30 @@ struct CoverFlowView: View {
         }
         // r23j：松手/点按的动画时长不再定死 0.38s，用松手前按实际滑距算好的 snapDuration。
         .animation(.easeOut(duration: snapDuration), value: store.currentIndex)
+    }
+
+    // MARK: - r37-8 细化：封面未加载的歌名文字占位
+
+    /// 歌名文字占位（r37-8 细化）：深色渐变底（DefaultCoverArt 同款配色，
+    /// 不许白底）+ 当前歌名居中；字号按封面边长取（边长 × 0.09，标准档
+    /// 188 → 约 17pt），最多 3 行、左右留 12pt，不溢出。歌名取调用方传
+    /// 的当前这首歌的 title；无歌名时只剩深色底，不编假数据。
+    /// 切换靠 ProxyImageView：图一加载出来只渲染图，本占位整支消失，
+    /// 有封面时不显示歌名。
+    @ViewBuilder
+    private func coverTitlePlaceholder(title: String?) -> some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(white: 0.24), Color(white: 0.10)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+            Text(title ?? "")
+                .font(.system(size: itemSize * 0.09, weight: .semibold))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .padding(.horizontal, 12)
+        }
     }
 
     // MARK: - 变换表（照抄 app.css .cf__item[data-off]，偏移按边长等比）

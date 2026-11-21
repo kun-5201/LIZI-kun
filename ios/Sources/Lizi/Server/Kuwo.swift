@@ -185,27 +185,19 @@ final class KuwoService {
 
     // MARK: - token + Secret
 
+    // r37-7：直接在整串里正则找 Hm_Iuvt_ 键值对，不再按逗号切分——
+    // 首页 Set-Cookie 带 Expires=Sat, 28 Nov 2026...（逗号在日期里），
+    // 旧切分正则 `,\s*(?=[^;=]+=[^;]*)` 会在 Expires 日期里切一刀；
+    // 单 cookie 时第一段仍能命中所以一直没爆，多 cookie 拼接时
+    // Hm_Iuvt_ 那段可能被错切、refreshToken 误判「首页没有下发 token」。
+    // 正则只认 `Hm_Iuvt_<名>=<值>`，逗号/分号/空格都是值的边界。
     private static func parseTokenCookie(_ raw: String) -> (name: String, value: String)? {
-        let splitRe = try! NSRegularExpression(pattern: #",(?=\s*[^;=]+=[^;]*)"#)
-        let ns = NSRange(raw.startIndex..., in: raw)
-        var lines: [String] = []
-        var last = raw.startIndex
-        for m in splitRe.matches(in: raw, range: ns) {
-            guard let r = Range(m.range, in: raw) else { continue }
-            lines.append(String(raw[last..<r.lowerBound]))
-            last = r.upperBound
-        }
-        lines.append(String(raw[last...]))
-        let lineRe = try! NSRegularExpression(pattern: #"^\s*([^=;]+)=([^;]*)"#)
-        for line in lines {
-            guard let m = lineRe.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
-                  let r1 = Range(m.range(at: 1), in: line),
-                  let r2 = Range(m.range(at: 2), in: line) else { continue }
-            let name = String(line[r1])
-            let value = String(line[r2])
-            if name.hasPrefix(cookiePrefix) { return (name, value) }
-        }
-        return nil
+        guard let re = try? NSRegularExpression(pattern: #"Hm_Iuvt_[^=;,\s]+=[^;,\s]+"#),
+              let m = re.firstMatch(in: raw, range: NSRange(raw.startIndex..., in: raw)),
+              let r = Range(m.range, in: raw) else { return nil }
+        let pair = String(raw[r])
+        guard let eq = pair.firstIndex(of: "=") else { return nil }
+        return (String(pair[..<eq]), String(pair[pair.index(after: eq)...]))
     }
 
     private func refreshToken() async throws {
@@ -220,22 +212,36 @@ final class KuwoService {
         tokenState = (token: hit.value, name: hit.name, secret: secret, at: Date())
     }
 
-    private func cookieHeader() -> String {
+    private func cookieHeader(name: String, token: String) -> String {
         var parts: [String] = []
         for (k, v) in userCookies where !k.hasPrefix(Self.cookiePrefix) { parts.append("\(k)=\(v)") }
-        parts.append("\(tokenState.name)=\(tokenState.token)")
+        parts.append("\(name)=\(token)")
         return parts.joined(separator: "; ")
     }
 
     /// www 接口：token 为空或超过 5 分钟先刷新；回 illegal 时刷新后重试一次。
+    /// r37-7（排行榜「The request is illegal」）：根因是鉴权三元组被读散了——
+    /// KuwoService 是 Sidecars 里的共享单例，initialLoad 时每日推荐与排行榜
+    /// 两路 www() 并发跑；旧写法在 headers 里分两次读 tokenState（一次经
+    /// cookieHeader() 读 name/token，一次直接读 secret），两次读之间若有
+    /// 另一路 refreshToken() 落盘，Cookie 拿的是新 token、Secret 却是旧
+    /// token 算出来的（或反过来），上游直接判 illegal；且只在并发刷新撞上
+    /// 的那一刻才发作，所以是「有时报」。VM 实测排除另外两个嫌疑：同款
+    /// token+Secret 调 bangMenu/musicList 在 t+0s 与 t+310s 都回 200 真数据
+    /// （token 寿命 ≥310 秒，5 分钟复用窗没问题；算法本身没错）。
+    /// 修法：每次发请求前把 (name, token, secret) 一次性快照到局部常量，
+    /// Cookie 与 Secret 都从同一份快照出，永不混对；重试仍走强制刷新。
+    /// 搜索/歌单/推荐走同一个 www()，同款修复，不另起鉴权路、不编数据。
     private func www(_ pathname: String, retry: Bool = true, timeout: TimeInterval = 20,
                      referer: String = "https://www.kuwo.cn/") async throws -> (status: Int, text: String) {
         if tokenState.token.isEmpty || Date().timeIntervalSince(tokenState.at) > 5 * 60 {
             try await refreshToken()
         }
+        // 一次性快照：此后本请求只认这份快照，不再碰 tokenState。
+        let auth = tokenState
         let url = URL(string: "https://www.kuwo.cn" + pathname)!
         let headers = ["User-Agent": Self.uaWeb, "Referer": referer,
-                       "Cookie": cookieHeader(), "Secret": tokenState.secret]
+                       "Cookie": cookieHeader(name: auth.name, token: auth.token), "Secret": auth.secret]
         let (data, resp) = try await Upstream.fetch(url, headers: headers, timeout: timeout)
         let text = String(data: data, encoding: .utf8) ?? ""
         if retry && text.range(of: "The request is illegal", options: .caseInsensitive) != nil {

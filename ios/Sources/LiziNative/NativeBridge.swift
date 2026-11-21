@@ -869,6 +869,7 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
         default:
             return ([], "该平台暂无排行榜。")
         }
+        let displayName = LiziPlatforms.all.first(where: { $0.id == platform })?.name ?? platform
         let path: String
         switch platform {
         case "netease": path = "/api/toplist"
@@ -902,13 +903,16 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
                                               "count": boards.count, "code": code, "timedOut": false])
             if failed {
                 let err = (dict?["error"] as? String) ?? (dict?["message"] as? String) ?? ""
+                // r37-7：失败文案按平台隔离——旧写法只写「排行榜目录拉取失败」，
+                // 酷我一家 illegal 看着像全平台榜单都挂了。现带平台名，只说
+                // 这一家；其它平台榜单是各自独立的 rankBoards 调用，不受影响。
                 let reason = err.isEmpty
-                    ? "排行榜目录拉取失败（code=\(code)），请检查网络后重试。"
-                    : "排行榜目录拉取失败（上游：\(err)）。"
+                    ? "\(displayName)排行榜目录拉取失败（code=\(code)），请检查网络后重试。"
+                    : "\(displayName)排行榜目录拉取失败（上游：\(err)）。"
                 return ([], reason)
             }
             if boards.isEmpty {
-                return ([], "该平台暂未返回排行榜。")
+                return ([], "\(displayName)暂未返回排行榜。")
             }
             return (boards, nil)
         } catch {
@@ -916,7 +920,7 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
                                      fields: ["platform": platform, "leg": path,
                                               "ms": Int(Self.legTimeout * 1000),
                                               "count": 0, "code": -1, "timedOut": true])
-            return ([], "排行榜目录拉取超时（60 秒无响应），请检查网络后重试。")
+            return ([], "\(displayName)排行榜目录拉取超时（60 秒无响应），请检查网络后重试。")
         }
     }
 
@@ -1578,11 +1582,23 @@ extension Track {
             album = (a["name"] as? String) ?? ""
             if let n = a["id"] as? NSNumber { albumId = n.stringValue }
         } else { album = "" }
+        // r37-4（卡片封面适配所有模式）：封面键回落补齐——服务端归一化层
+        // 多数已把各家拼写收到 "cover"，但凡有一路字典绕过归一化直达这里
+        // （LX 解析行、搜索行、未来新腿），"pic"/"coverUrl"/"img" 就会被
+        // 丢掉、卡片回黑底音符占位；只读上游已给的键，不编图。视图层铺满
+        // 本来就是对的（六路卡片全是 CoverImageView scaledToFill + 方形
+        // frame + 圆角裁切，无拉伸、无留白），缺的是这里少收的键。
         var coverString = (dict["cover"] as? String) ?? ""
         if coverString.isEmpty { coverString = (dict["picUrl"] as? String) ?? "" }
+        if coverString.isEmpty { coverString = (dict["pic"] as? String) ?? "" }
+        if coverString.isEmpty { coverString = (dict["coverUrl"] as? String) ?? "" }
+        if coverString.isEmpty { coverString = (dict["img"] as? String) ?? "" }
         if coverString.isEmpty { coverString = (dict["albumpic"] as? String) ?? "" }
         if coverString.isEmpty, let a = dict["album"] as? [String: Any] {
             coverString = (a["picUrl"] as? String) ?? ""
+        }
+        if coverString.isEmpty, let a = dict["album"] as? [String: Any] {
+            coverString = (a["pic"] as? String) ?? ""
         }
         if coverString.isEmpty, let a = dict["al"] as? [String: Any] {
             coverString = (a["picUrl"] as? String) ?? ""

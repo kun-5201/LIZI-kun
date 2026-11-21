@@ -619,6 +619,13 @@ final class HomeCoverRingModel: ObservableObject {
     /// 深场时平面卡歌名/歌手/提示用白字，浅场用墨字。默认 true
     /// （默认 tone #5b5bd6/#b04f8c/#2f6f8f 是深场，见 AlbumTone.default）。
     @Published var panelIsDark = true
+    /// r37-1：平面带卡片只放封面（调用方 HomeView 每日推荐那路传 true，
+    /// 见 `HomeCoverRingView.coverOnly`；榜单详情 / 歌单详情那路默认 false，
+    /// 卡片仍带歌名/歌手）。只影响平面带 `FlatRingCard` 的渲染与
+    /// `flatHeight`（true 时带高 = 卡宽，不再留两行字的 52pt）；
+    /// 3D 环展开态的环卡（`RingCardView`）标题不动；环几何只读 flatCard，
+    /// 不读 flatHeight（`ringCardCenterYLocal`），锚点不受影响。
+    @Published var coverOnly = false
     /// r36：点卡播歌时一并带上的队列标题（`PlaybackStore.setQueue(_:startAt:title:)`，
     /// 队列非空时不传标题会把 queueTitle 置 nil——搜索带若不传，
     /// 搜索 queueTitle + 置顶行会丢）。每日推荐那路传 nil（环本来不带标题）。
@@ -817,7 +824,8 @@ final class HomeCoverRingModel: ObservableObject {
                     speed: CGFloat,
                     tier: PlayerTokens.PlayerSizeTier,
                     panelIsDark: Bool = true,
-                    queueTitle: String? = nil) {
+                    queueTitle: String? = nil,
+                    coverOnly: Bool = false) {
         startFlatTimer()
         let oldIDs = tracks.map(\.id)
         dailyTracks = daily
@@ -829,6 +837,7 @@ final class HomeCoverRingModel: ObservableObject {
         marqueeSpeed = speed
         self.tier = tier
         self.panelIsDark = panelIsDark
+        self.coverOnly = coverOnly
         if tracks.map(\.id) != oldIDs {
             if ringPhase != .closed { closeRing() }
             flatOffsetX = 0
@@ -866,7 +875,8 @@ final class HomeCoverRingModel: ObservableObject {
 
     /// 平面带高：卡 + 间距 7 + 16pt 歌名行 + 间距 7 + 14pt 歌手行
     /// （r28：字号 14/13→16/14，行高跟着涨 3pt，旧 +49 会裁掉歌手行）。
-    var flatHeight: CGFloat { flatCard + 52 }
+    /// r37-1：coverOnly 时带高 = 卡宽（只放封面，两行字不画、不留空）。
+    var flatHeight: CGFloat { coverOnly ? flatCard : flatCard + 52 }
 
     /// 环卡宽：compact 141 / standard 149 / large 164（≈0.382vw，
     /// 39.6s 新视频中心卡 275px/720px）。
@@ -1324,11 +1334,16 @@ final class HomeCoverRingModel: ObservableObject {
 
     // MARK: 环拖动 / 松手
 
-    /// 覆盖层手指刚落下（还没动）：只取消待执行的松手收回
+    /// 覆盖层手指刚落下（还没动）：取消待执行的松手收回 + 停弹簧
     /// （ring.js onOverlayDown → beginPress → clearHold 同款；
+    /// 壳版 beginPress 在 pointerdown 当下就 `ring.target = null;
+    /// ring.velocity = 0`——手指按住不动时弹簧不再推着环走；
     /// 拖动本身 5px 后才由 ringDragStart 接管，见 RingTouchView）。
+    /// r37-9：旧写法只清收回代号、不停弹簧，松手弹簧跑着的时候换手
+    /// 按住，环还在手指底下自己滑；现在落指即停，与壳版同顺序。
     func ringTouchBegan() {
         guard ringPhase == .open else { return }
+        stopRingSpring()
         closeGeneration += 1
     }
 
@@ -1350,8 +1365,17 @@ final class HomeCoverRingModel: ObservableObject {
     ///   覆盖层入口传覆盖层本地 y（RingTouchView 的坐标原点与
     ///   "liziHome" 同在屏左上角，见 RingTouchView 注释）。
     /// 同时取消待执行的松手收回（代号 +1；ring.js beginPress clearHold 同款）。
+    /// r37-9（换手滑不动的根因之一）：旧守卫是
+    /// `guard ringPhase == .open, !ringDragging`——上一根手指的拖动若
+    /// 在异常路径上结束（见 ringDragEnded 的守卫、RingTouchView 缺 .failed
+    /// 出口），ringDragging 残留 true，新手指的每一次 ringDragStart 都被
+    /// 挡在守卫外、永远锚不到新起点，ringDragMoved 只能用旧锚点（或直接
+    /// 守卫拦住），环就跟不上新手。壳版 onPressMove 起拖时没有任何
+    /// `!dragging` 守卫，每次起拖都无条件重锚 startAngle / x0 / samples
+    /// （新 pointerdown 还先 detachPress 丢掉旧会话）；这里改成只守
+    /// phase，起拖永远重锚——新手指接管旧会话，而不是被旧会话挡住。
     func ringDragStart(x: CGFloat, y: CGFloat? = nil) {
-        guard ringPhase == .open, !ringDragging else { return }
+        guard ringPhase == .open else { return }
         stopRingSpring() // r36-8：弹簧没跑完就上手抓——先停弹簧再跟手，
         // 不然 display link 还在推角、手指也在推角，两边打架就是一顿一顿。
         ringDragging = true
@@ -1394,9 +1418,15 @@ final class HomeCoverRingModel: ObservableObject {
     /// 渲染服务器自己的计时，不是 1/240s 显式积分。现在初速度 v 直接
     /// 带进 startRingSpring（壳版 advanceRing 就是从 v 起步）。
     func ringDragEnded() {
-        guard ringPhase == .open else { return }
+        // r37-9：先清拖动旗、再判 phase——壳版 releaseRing 第一句就是
+        // `s.dragging = false`，不带 phase 守卫；旧写法守卫在前，phase 已
+        // 离开 .open 时（收回中/被打断）直接 return，ringDragging 永久置
+        // true，下一根手指的 ringDragStart 被 `!ringDragging` 守卫挡住，
+        // 换手后环再也滑不动。清旗在前，任何退出路径都到不了“旗子卡住”
+        // 这一种死法；后面的速度/弹簧/收回仍只在 .open 时算。
         ringDragging = false
         isRingDragging = false
+        guard ringPhase == .open else { return }
         let now = Date()
         var v: CGFloat = 0
         if ringSamples.count > 1 {
@@ -1421,6 +1451,16 @@ final class HomeCoverRingModel: ObservableObject {
             }
         }
         let targetAngle = -CGFloat(Int((-projected / ringStep).rounded())) * ringStep
+        // r37-1（00:42:43 纠正：3D 环卡滑动按套壳版一比一）：壳版 releaseRing
+        // 原式——松手速度方向与到目标槽位的方向不一致时速度清零
+        // （`s.velocity = (dist !== 0 && Math.sign(v) !== Math.sign(dist)) ? 0 : v`）；
+        // 旧写法把 v 原样带进弹簧：小甩刚越过槽位中心时，弹簧先带着反向初速度
+        // 冲过目标再拉回来，与壳版「直接稳住」手感不同。清零放在吸附分支判断
+        // 之前，与壳版同顺序（清零后再判 `|dist|<1e-6 && |v|<1` 直接钉死）。
+        let distToTarget = targetAngle - angle
+        if distToTarget != 0, v != 0, (v > 0) != (distToTarget > 0) {
+            v = 0
+        }
         if abs(targetAngle - angle) < 1e-6, abs(v) < 1 {
             angle = targetAngle
             stopRingSpring()
@@ -1854,6 +1894,18 @@ struct HomeCoverRingView: View {
     /// 搜索带传 playback.queueTitle，丢了它搜索置顶行就没了）。
     /// 每日推荐 / 榜单详情那路不传（nil）。
     var queueTitle: String? = nil
+    /// r37-1：面板卡片只放封面（默认 false；HomeView 每日推荐那路传 true，
+    /// 榜单详情那路也传 true——面板里的卡都走这条；歌单详情页那路不传，
+    /// 卡片仍带歌名/歌手）。true 时平面带卡片不画歌名/歌手（`FlatRingCard`），
+    /// 带高 = 卡宽（模型 `flatHeight`）；3D 环卡（`RingCardView`）不受
+    /// coverOnly 影响——00:42:43 纠正：1:1 复刻只限 3D 环卡，环卡按套壳版
+    /// （封面 + 歌名）显示，标题常在。
+    /// r37-1 追加（用户 2026-11-22 00:39 显示逻辑，长期规则）：
+    /// 封面没加载出来时卡片先显示歌名/标题文字占位（盖在封面框上，
+    /// 用户能先滑动、认出是哪首歌），封面加载出来后只渲染封面图、
+    /// 不显示歌名；占位只在封面未显示时出现，不变常驻标题。
+    /// 无封面 URL 的曲目永远无图可显，占位标题会一直显示（唯一能认出歌的办法）。
+    var coverOnly = false
     /// r36（用户 21:44）：榜单详情那路不显示入口提示行（「拖动展开 3D 环 ·
     /// 拖动旋转」）——详情页下面不加任何提示文字。每日推荐 / 搜索带
     /// 那路默认 false，提示行照旧。
@@ -1910,11 +1962,20 @@ struct HomeCoverRingView: View {
         .onChange(of: dailyTracks.map(\.id)) { _ in sync() }
         .onChange(of: playback.currentTrack) { _ in sync() }
         .onChange(of: isLoadingDaily) { _ in sync() }
+        // r37-6：旧 onChange 清单漏了 dailySpinnerVisible——ViewModel 在
+        // 加载开始 250ms 后才把它翻成 true，那时 isLoadingDaily 早已是
+        // true（无变化）、dailyTracks 也没变，没有任何一次 sync() 会把
+        // 新的 spinner 旗同步进模型，模型就一直以为 spinner 不可见；
+        // 反过来加载结束时若只有 spinner 旗变、其余字段不动，模型也会
+        // 残留旧的加载文案。补上这一行，加载态三件套（tracks/loading/
+        // spinner/reason）才算同步齐。
+        .onChange(of: dailySpinnerVisible) { _ in sync() }
         .onChange(of: dailyEmptyReason) { _ in sync() }
         .onChange(of: marqueeSpeed) { _ in sync() }
         .onChange(of: tier) { _ in sync() }
         .onChange(of: panelIsDark) { _ in sync() }
         .onChange(of: queueTitle) { _ in sync() }
+        .onChange(of: coverOnly) { _ in sync() }
         .accessibilityLabel("封面环")
     }
 
@@ -1932,7 +1993,8 @@ struct HomeCoverRingView: View {
             speed: marqueeSpeed,
             tier: tier,
             panelIsDark: panelIsDark,
-            queueTitle: queueTitle
+            queueTitle: queueTitle,
+            coverOnly: coverOnly
         )
     }
 
@@ -1978,7 +2040,7 @@ struct HomeCoverRingView: View {
                     ForEach(0..<2, id: \.self) { _ in
                         HStack(spacing: model.flatGap) {
                             ForEach(model.tracks.indices, id: \.self) { i in
-                                FlatRingCard(track: model.tracks[i], width: model.flatCard, isDark: model.panelIsDark) {
+                                FlatRingCard(track: model.tracks[i], width: model.flatCard, isDark: model.panelIsDark, coverOnly: model.coverOnly) {
                                     model.playTrack(at: i, store: playback)
                                 }
                             }
@@ -2116,6 +2178,10 @@ struct HomeCoverRingView: View {
 /// 平面带里的一张卡：封面 + 歌名 + 歌手（r28：卡宽按档走 180/190/209；
 /// 歌名 16pt、歌手 14pt，39.6s 新视频实测；颜色跟面板深场走——
 /// 深场白字 + 灰字，浅场墨字）。
+/// r37-1：coverOnly 时只放封面（歌名/歌手不画，带高 = 卡宽）；
+/// r37-1 追加（用户 2026-11-22 00:39 显示逻辑）：coverOnly 且封面还没
+/// 显示出来时，先盖歌名/歌手文字占位（白字盖在深色占位底上），用户能先滑、
+/// 认出是哪首歌；封面一到占位消失、只剩封面。占位盖在封面框里，不占带高。
 ///
 /// 不是 Button：带子的触摸层（`StripTouchView`，盖在卡片上方）统一接管点按；
 /// Button 和识别器的 tap 会双重触发。VoiceOver 激活走 `.accessibilityAction`。
@@ -2123,7 +2189,17 @@ private struct FlatRingCard: View {
     let track: Track
     let width: CGFloat
     let isDark: Bool
+    /// r37-1：只放封面（默认 false；歌单详情页 / 榜单详情页那路不传，
+    /// 卡片仍带歌名/歌手）。
+    let coverOnly: Bool = false
     let onTap: () -> Void
+
+    /// r37-1 追加：这张卡的封面图是否已显示（`CoverImageLoader` 进程内
+    /// 缓存观测；false = 占位底 + 歌名占位，true = 只剩封面）。
+    /// 观测与 `CoverImageView`（`ProxyImageView`）走同一份加载器、同一
+    /// 个在飞任务——不重复发请求；失败重试节拍（0.5s / 1.5s、最多 3 次）
+    /// 照抄 `ProxyImageView`，免得图到了占位还赖着不走。
+    @State private var coverLoaded = false
 
     /// r30：没封面（coverURL 为 nil）不摆白卡——深色默认封面（壳版
     /// `.mring__card.is-empty` 深色底 +「无封面」同款做法；原生占位图标
@@ -2140,23 +2216,65 @@ private struct FlatRingCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            coverArt
-                .frame(width: width, height: width)
-                .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
-            Text(track.title)
-                .font(.liziBody(size: LiziTokens.size16, weight: .medium))
-                .foregroundColor(isDark ? .white : LiziTokens.ink)
-                .lineLimit(1)
-            Text(track.artist)
-                .font(.liziBody(size: LiziTokens.size14))
-                .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
-                .lineLimit(1)
+            ZStack(alignment: .center) {
+                coverArt
+                    .frame(width: width, height: width)
+                    .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
+                // r37-1 追加：封面未显示时的歌名占位（只在 coverOnly 时出现；
+                // 无封面 URL 的曲目永远无图可显，占位一直显示——那是唯一能
+                // 认出歌的办法；有封面 URL 的图一到即消失，不变常驻标题）。
+                if coverOnly && !coverLoaded {
+                    VStack(alignment: .center, spacing: 2) {
+                        Text(track.title)
+                            .font(.liziBody(size: LiziTokens.size15, weight: .semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                        if !track.artist.isEmpty {
+                            Text(track.artist)
+                                .font(.liziBody(size: LiziTokens.size12))
+                                .foregroundColor(.white.opacity(0.75))
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .shadow(color: .black.opacity(0.6), radius: 6, x: 0, y: 1)
+                }
+            }
+            if !coverOnly {
+                Text(track.title)
+                    .font(.liziBody(size: LiziTokens.size16, weight: .medium))
+                    .foregroundColor(isDark ? .white : LiziTokens.ink)
+                    .lineLimit(1)
+                Text(track.artist)
+                    .font(.liziBody(size: LiziTokens.size14))
+                    .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
+                    .lineLimit(1)
+            }
         }
         .frame(width: width, alignment: .leading)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("播放：\(track.title)")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { onTap() }
+        .task(id: track.coverURL) {
+            // r37-1 追加：观测封面是否已显示（见 coverLoaded 注释）；
+            // coverOnly 为 false 时标题本来就画在卡下，不用观测。
+            // url 一变任务重开，coverLoaded 先归 false（旧图不顶替新卡）。
+            guard coverOnly else { return }
+            coverLoaded = false
+            guard let url = track.coverURL else { return }
+            var attempt = 0
+            while !Task.isCancelled, !coverLoaded {
+                if await CoverImageLoader.shared.image(for: url) != nil {
+                    coverLoaded = true
+                    break
+                }
+                attempt += 1
+                guard attempt <= 2 else { break }
+                try? await Task.sleep(nanoseconds: UInt64((attempt == 1 ? 0.5 : 1.5) * 1_000_000_000))
+            }
+        }
     }
 }
 
@@ -2742,6 +2860,16 @@ final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
                 // tap 不触发），不补定时器环就永远开着。
                 model.ringTouchEnded()
             }
+        case .failed:
+            // r37-9：识别器中途失败（被系统手势抢走等）——StripTouchView
+            // 的 .failed 同款出口，Ring 这边之前没有：失败后 .ended 再也
+            // 不来，dragStarted / ringDragging 双双卡住，换手后新拖动
+            // 接不上。没拖起来时什么都不做（手指还按着，环保持开着；
+            // 抬手后 tap 会走点卡/点空白那条路）。
+            if dragStarted {
+                dragStarted = false
+                model.ringDragEnded()
+            }
         default:
             break
         }
@@ -2761,6 +2889,20 @@ final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
             model?.ringDragEnded()
         } else {
             model?.ringTouchEnded()
+        }
+    }
+
+    /// r37-9：触摸层被拆掉时（收回完成 overlay 卸载、数据重载关环等），
+    /// 正在进行的手势随视图一起死，.ended 再也不会来；StripTouchView
+    /// 同款兜底，Ring 这边之前没有——移除瞬间把拖动会话清掉，否则新
+    /// 挂上的环继承一面卡住的 ringDragging，下一次拖动接不上。
+    /// 与 touchesCancelled 双重触发时：第二次 ringDragEnded 只会按同一份
+    /// 旧采样再排一个 1s 收回（代号 +1 作废前一个），结果不变，安全。
+    override func willMove(toSuperview newSuperview: UIView?) {
+        super.willMove(toSuperview: newSuperview)
+        if newSuperview == nil, dragStarted {
+            dragStarted = false
+            model?.ringDragEnded()
         }
     }
 

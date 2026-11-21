@@ -635,8 +635,11 @@ extension NativeBridge {
         guard let id = railString(d["id"]), !id.isEmpty else { return nil }
         let title = (d["name"] as? String) ?? (d["title"] as? String) ?? ""
         guard !title.isEmpty else { return nil }
+        // r37-4：封面键与 railPlaylistFrom 对齐（补 "coverUrl"/"img"；
+        // 专辑行个别平台用这两个键，旧链收不到就回黑底音符占位）。
         let cover = railFirstNonEmpty([d["cover"] as? String, d["coverImgUrl"] as? String,
-                                       d["picUrl"] as? String, d["pic"] as? String])
+                                       d["picUrl"] as? String, d["pic"] as? String,
+                                       d["coverUrl"] as? String, d["img"] as? String])
         var artist = ""
         if let a = d["artists"] as? [[String: Any]] {
             artist = a.compactMap { $0["name"] as? String }.filter { !$0.isEmpty }.joined(separator: " / ")

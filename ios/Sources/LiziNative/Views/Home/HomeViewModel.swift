@@ -62,6 +62,11 @@ final class HomeViewModel: ObservableObject {
     // MARK: - 持久化键（原生版全部加 lizi.native 前缀，与壳版 localStorage 隔离）
 
     private static let platformKey = "lizi.native.hall.platform"
+    /// r33 第 4 件：来源持久化键（存 HomeRailPage.rawValue Int；平台持久化
+    /// 同款做法）。RootView 按 nav.current 切页会销毁 HomeView、回首页
+    /// 新建 HomeViewModel，不持久化时 selectedSource 默认回 .daily，
+    /// 播完/回首页就跳回每日推荐。
+    private static let sourceKey = "lizi.native.hall.source"
     private static let lastTrackKey = "lizi.native.hall.lastTrack"
     /// 跑马带速度：壳版 localStorage['lizi.hall.marq.speed'] 同款语义，
     /// 0–100，默认 24；可调 UI 放 P3，这里只读值。
@@ -117,10 +122,15 @@ final class HomeViewModel: ObservableObject {
     /// daily 一条；initialLoad 也经这里起（r28 之前首加载是直接 await，
     /// dailyTask 是 nil，切台取消不到它，旧单只能走到代际守卫丢掉）。
     private var dailyTask: Task<Void, Never>?
+    /// 首页首加载防重入（r33 第 3 件 b）：HomeView .task 在视图重建时重跑，
+    /// 首加载只跑一次，重建视图不再重拉每日推荐。
+    private var didInitialLoad = false
 
     // MARK: - 启动
 
     func initialLoad() async {
+        guard !didInitialLoad else { return }
+        didInitialLoad = true
         loadPersistedSelection()
         loadLastTrack()
         // r28：首加载也进 dailyTask——之前是直接 await，dailyTask 是 nil，
@@ -147,6 +157,17 @@ final class HomeViewModel: ObservableObject {
 
     private func loadPersistedSelection() {
         selectedPlatform = Self.initialPlatform()
+        selectedSource = Self.initialSource()
+    }
+
+    /// 读持久化来源的唯一入口（声明初值 + loadPersistedSelection 共用）：
+    /// 键里有合法 rawValue 就用它，没有（新装 / 数据被清 / 旧值非法）才回落 .daily。
+    private static func initialSource() -> HomeRailPage {
+        if let raw = UserDefaults.standard.object(forKey: Self.sourceKey) as? Int,
+           let page = HomeRailPage(rawValue: raw) {
+            return page
+        }
+        return .daily
     }
 
     // MARK: - 平台 / 来源切换（切台只换数据：Moumusic 切台不碰
@@ -197,11 +218,13 @@ final class HomeViewModel: ObservableObject {
     /// 内容全部下掉；isLoadingDaily 置 true，等新 loadDaily 回来再落
     /// false / 空原因。
     /// r30：切台回到每日推荐（第 1 个来源），各栏缓存是分平台的、清掉重拉。
+    /// r33：切台回 .daily 时也写来源持久化键（与 selectSource 同款写点）。
     private func resetHomeContent() {
         daily = []
         dailyEmptyReason = nil
         isLoadingDaily = true
         selectedSource = .daily
+        UserDefaults.standard.set(HomeRailPage.daily.rawValue, forKey: Self.sourceKey)
         closeOpened()
         railResults = [:]
         railLoadingPages = []
@@ -226,15 +249,21 @@ final class HomeViewModel: ObservableObject {
     /// 不碰任何状态，只在“新加载已接管”时才成立，却没有任何代码核实
     /// 接管者真的在飞、真的会落下来。所以本函数改成 defer 结算：
     /// 五条返回路径（成功 / 空 / 超时 / 取消 / 代际守卫）都经过同一
-    /// 个落点；当前代际的加载一定落下，旧加载只在代际已变且 dailyTask
-    /// 已空（无接管者）时才落下，不抢新加载的状态。
+    /// 个落点；当前代际的加载一定落下，旧加载只在代际没变时才落下，
+    /// 代际已变（有更新的加载已接管）时不碰状态、不抢新加载的状态。
+    /// r33：defer 条件从「代际相等或 dailyTask 已空」改成
+    /// 「generation >= homeLoadGeneration」——无接管者时旧加载也落下，
+    /// 不再有不落的出口。
     func loadDaily(generation: Int? = nil) async {
         let platform = selectedPlatform
         let generation = generation ?? homeLoadGeneration
         isLoadingDaily = true
         dailyEmptyReason = nil
         defer {
-            if generation == homeLoadGeneration || dailyTask == nil {
+            // r33：任何返回路径都无条件落下，除非更新的加载已接管
+            // （代际比当前新，generation < homeLoadGeneration）。
+            // 铁律：最终状态一定落到有数据或带文案的空态，绝不停在加载中。
+            if generation >= homeLoadGeneration {
                 isLoadingDaily = false
             }
         }
@@ -274,7 +303,9 @@ final class HomeViewModel: ObservableObject {
     // MARK: - 面板来源（r30，见文件头）
 
     /// 当前来源（默认 `.daily` = 每日推荐；点平台条标题弹菜单切）。
-    @Published var selectedSource: HomeRailPage = .daily
+    /// r33 第 4 件：声明时就读持久化值（initialSource()），loadPersistedSelection
+    /// 再读一次同一份 helper，不另起事实来源（平台 initialPlatform() 同款）。
+    @Published var selectedSource: HomeRailPage = HomeViewModel.initialSource()
 
     /// 当前来源的标题（喜欢栏按平台取真名，唯一事实来源
     /// `RailKind.likedTitle(for:)`）。
@@ -283,9 +314,11 @@ final class HomeViewModel: ObservableObject {
     /// 切来源（菜单点选唯一入口；点当前来源也触发一次该栏拉取，
     /// 喜欢栏不缓存、每次切回都重拉，见 `loadRailPage`）。
     /// 切来源时关掉面板内打开的歌单/专辑（r31），回到该来源列表。
+    /// r33：切来源写来源持久化键（lizi.native.hall.source）。
     func selectSource(_ page: HomeRailPage) {
         closeOpened()
         selectedSource = page
+        UserDefaults.standard.set(page.rawValue, forKey: Self.sourceKey)
         loadRailPage(page)
     }
 

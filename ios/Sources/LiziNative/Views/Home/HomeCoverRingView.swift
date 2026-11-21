@@ -353,6 +353,91 @@ import UIKit
 /// - 不动：跟手 perPixel、110ms 采样 ±1400°/s、τ=1.08s 投影 + 弹簧 118
 ///   吸附、只露正面、收回时机、一次 3 张、展开手势（跑马带左右拖动）、
 ///   环锚点 = 跑马带中心（r31 前半段）。驱动见 verification/r31-ring.cjs §8–§11。
+///
+/// r33（2026-11-21，7.49s 新视频 ~/workspace/user/media_library/video/c3/
+/// c3dd1514…1a40.mp4，720×1566/30fps，逐帧 /tmp/ring-frames/f_001–f_030，
+/// 4fps；只修环的 5 条 + 用户 10:11/10:12 补的两条联动/过渡要求）：
+/// 逐帧实测（f_002/f_010/f_020/f_030 量取，360pt 坐标）：
+/// - 中心卡宽约 124pt，侧卡约 86–100pt（比值约 0.71 = cos40°×0.93，
+///   旋转与透视缩窄本身在起作用）；侧卡亮度只比中心卡低约 7%（壳版 flat
+///   shade 在 40° 只有 3.8%）；三张卡顶边齐平、无梯形、无渐变明暗——
+///   肉眼就是三张平铺窄矩形。底部 94% 高度处 30 帧全无提示字
+///   （y720–748 亮像素 0）；本地音乐文件夹副标题行（y758–765）倒是有一行
+///   「空文件夹 拖动旋转 · 点击播放 · 松手收回」，且 f_001（环闭合、
+///   覆盖层根本没挂）里一字不差——视频机型上的那行是静态页内容，
+///   不是覆盖层提示，与 r28–r32 全部快照对不上（快照里副标题只有
+///   「空文件夹」，提示只在覆盖层里）：视频 build 不是任一归档源码编的，
+///   见交回；源码侧副标题已是干净的，不动它。
+/// - 封面：f_001–f_008 大多有真封面，f_010 起灰占位越来越多，
+///   f_014–f_030 基本三张全是浅灰音符占位（白底 CoverImageView 占位经
+///   变暗后读作浅灰，不是深色 DefaultCoverArt）。
+/// - 环 0.25s 打开、转到 7.25s 没收（7 秒约 30 首）；f_001→f_002 一跳切过去。
+/// 1. 3D 形态（本轮）：cylinderZ / ringPerspective / projectedX 一直在
+///    环卡上起作用（实测侧卡 0.71 倍窄就是它们算出来的），丢的不是几何量、
+///    是视觉线索——正交旋转没有梯形、flat shade 只有 3.8%。修法：
+///    rotation3DEffect perspective 0 → 卡高/P（≈0.28，三档 0.27–0.29；
+///    SwiftUI perspective 是相对量、与 CSS px 无精确换算，0.5 已远超 P，
+///    0.28 是按卡高换算的近似值，真机确认梯形强度）；压暗改沿卡面横向渐变
+///    （近缘 0 → 远缘 `shadeFarEdge`，40° 槽位远缘 0.42，中心卡不压暗；
+///    壳版 3.8% 原值留作 `shadeOpacity` 对照）。旋转符号 +world、
+///    depthScale、projectedX、cylinderZ、一次 3 张、53%–71% 卡位、
+///    整页约 45% 变暗一律不动。
+/// 2. 封面（本轮）：根因不是门卡住——CoverFetchGate（Proxies.swift）max 4
+///    并发、FIFO、抛错/取消都还槽，工作正常；是吞吐追不上转速：门约 2 张/秒，
+///    环约 4.3 张/秒，7 秒转 30 首、每首只露约 0.7 秒，封面 1.5 秒+ 才到，
+///    且平面带挂载时就把全单 2n 张取图推进了门（同 URL 去重，顺序就是单序），
+///    环转到没取过的曲目就是占位。修法（只动本文件 + CoverImageView）：
+///    开环 + 中心槽位每变一次预取前后各 5 槽（`prefetchRingCovers`，
+///    每 URL 一个 detached 任务分头起取，不串行等）；环卡占位改深色
+///    （CoverImageView 新增 `darkPlaceholder`，默认 false 其余调用点不动，
+///    RingCardView 传 true；coverURL 为 nil 时本来就是深色 DefaultCoverArt）。
+///    冷页一次转 30 首仍会跑赢 4 并发门，见交回残留（提门限是 Proxies.swift
+///    的事，不在本轮文件范围里）。
+/// 3. 松手自动收（本轮）：视频本身坐实不了定时器坏——7 秒一直在拖，
+///    ringDragging=true 时 hold-close 的守卫本来就不该收；视频结束时离最后
+///    一次动作只有 0.24 秒，不到 1 秒保持期。代码查下来的真缺口是两条
+///    卡住路径（都只动覆盖层触摸层 + 一个模型方法）：① 手指落下（touchesBegan
+///    取消了待执行的收回）→ 晃 <5px → 抬手：pan 认出来了 tap 不触发、
+///    dragStarted 又是 false，handlePan .ended 什么都不干，环永远开着
+///    （补 `ringTouchEnded` 重排 1s 收回）；② 系统取消触摸（来电/锁屏/
+///    控制中心）时覆盖层没有 touchesCancelled 兜底（平面带有，覆盖层没有），
+///    同样断定时器（补 override，拖起来了走 ringDragEnded，没拖起来走
+///    ringTouchEnded）。scheduleHoldClose 本身（1 秒 + 代号守卫）不动。
+/// 4. 底部提示（本轮）：覆盖层提示从 VStack + Spacer + padding(.bottom,
+///    max(16, safeArea+10)) 改成按屏高 94% 定死的 `.position`
+///    （safeAreaInsets 在 ignoresSafeArea 的 GeometryReader 里读到 0 时
+///    只垫 16pt，提示沉到约 97%、贴 Home Indicator）；本地音乐文件夹
+///    副标题源码已是干净的「空文件夹」/「N 首」（LocalMusicView.swift:64，
+///    r28–r32 快照一致），本轮不动它，视频 build 与归档源码不符见上面实测。
+/// 5. 展开跳变（本轮，与用户 10:12 第 2 条同一件事）：根因不是动画参数——
+///    520ms easeOutQuint / 430ms / 变暗 0.26s 的参数一直是对的；是提交时序：
+///    openRing 里 phase=.open 与 entryT=1、overlayOpacity=1 在同一个同步块里，
+///    覆盖层首帧就是最终值，动画一次插值都不跑（f_002 在 0.25s 已满尺寸满变暗
+///    不是动画跑得快，是动画根本没跑）。修法：动画延后一显示帧
+///    （Task.sleep 16ms，entryGeneration 守卫；不能复用 closeGeneration，
+///    ringDragEnded/ringTouchBegan 也会 +1，会误杀还没跑的展开动画），
+///    首帧 entryT=0/opacity=0 先上屏、随后 520ms 逐帧展开；变暗 0.26s
+///    跟同一批跑。收回不用改：closeRing 时覆盖层已挂着
+///    （HomeView 挂载条件是 ringPhase != .closed，open 与 closing 都挂），
+///    closeT/overlayOpacity 有 from 态，430ms/220ms 插值正常跑。
+/// 联动（用户 10:11/10:12 第 1 条，环跟着下面那排卡片走）：环与带子共用
+/// 同一个当前索引（`ringCenterTrackIndex`）。拖动环时带子实时跟过去
+/// （ringDragMoved 里 `syncFlatOffsetToRingCenter`：带子中心对准环当前那首；
+/// 弹簧吸附阶段由覆盖层 onChange(of: angle) 跟过去）；环收回后带子从这首
+/// 继续自动滚，开关环不丢位置。环的位置本来就从带子派生（ringCenterY =
+/// stripCenter.y、横向 panel.centerX，r31；实测环中心 = 带子中心 + tiltDrop
+/// 约 20pt，对得上），本轮不动锚点。开环时不同步带子（0.26s 淡出里跳变会闪），
+/// 锚点仍是在播曲目/手指卡（用户 22:33 定稿）。冲突说明：带子自动滚时环
+/// 跟着转——环开着时带子是冻住的（tickFlat 的 ringPhase == .closed 守卫），
+/// 想让环边开边跟带子转就得让环自己转起来，与「环本身不自动转」的既有规矩
+/// 冲突，按用户 10:11 的冲突条款以既有规矩为准；且 24px/s 折到环上只有
+/// 约 4.7°/秒，1 秒保持期内只漂约 5°，放开也看不见——联动落在开环锚点 +
+/// 拖动跟随 + 收回交接三处，连续跟随留给以后一轮（angle 改从 flatOffsetX
+/// 派生是大重构，不在本轮做）。
+/// r33-marquee 的修补（syncInputs 带宽兜底、flat 看门狗 Timer、
+/// startFlatWatchdog）一字不动；HomeView.swift、HomeViewModel.swift、
+/// NativeBridge.swift、PlayerView.swift、Apple Music 相关文件一行不动；
+/// verification/*.cjs 不动（驱动由协调员写）。
 
 // MARK: - 状态机
 
@@ -401,6 +486,13 @@ final class HomeCoverRingModel: ObservableObject {
     /// 里注册，deinit 里注销；通知回调当场重算已建 link 的帧率上限）。
     private var frameRateObserver: NSObjectProtocol?
     private var flatLastTimestamp: CFTimeInterval = 0
+    /// r33-marquee 看门狗 Timer（与 rail 驱动同款，见 HomeView.swift）：
+    /// display link 之外的第二条命；0.1s 看一次，该走但偏移 3s 没变 →
+    /// 记诊断 + 清拖动旗 + dwell 归零 + 自己按速度推一步。
+    private var flatWatchdog: Timer?
+    private var flatLastOffsetX: CGFloat = 0
+    private var flatLastOffsetChange = Date()
+    private var flatWatchdogLoggedStuck = false
 
     /// 模型走时停掉自己的 display link（r26 补 Timer 版，r31 同款）：
     /// 不停，RunLoop 会一直强持它空转；停了，下次回首页新模型重新
@@ -410,6 +502,7 @@ final class HomeCoverRingModel: ObservableObject {
     /// 但每次回首页都会多攒一个空转订阅）。
     deinit {
         flatDisplayLink?.invalidate()
+        flatWatchdog?.invalidate()
         if let frameRateObserver { NotificationCenter.default.removeObserver(frameRateObserver) }
     }
     /// 平面带上的按压判定（非 Published：只在手势闭包里读写，不驱动渲染）。
@@ -447,8 +540,27 @@ final class HomeCoverRingModel: ObservableObject {
     var ringSamples: [(time: Date, angle: CGFloat)] = []
     /// 收回任务代号：新开环 / 新拖动即 +1，旧任务醒来发现代号变了就作废。
     var closeGeneration = 0
+    /// 展开动画代号（r33，第 5 条）：openRing +1，closeRing +1；deferred 的
+    /// 展开动画醒来时代号变了说明环已经关了，不跑动画。不能复用
+    /// closeGeneration——ringDragEnded / ringTouchBegan 也会 +1（取消松手
+    /// 收回），会把还没跑的展开动画误杀（手指开环后 16ms 内抬起就中招，
+    /// 环会一直 entryT=0 不可见、直到 1s 后收回）。
+    var entryGeneration = 0
+    /// 上次预取封面时的中心槽位（r33，第 2 条）：中心槽位没变不重复预取。
+    var lastPrefetchCenterSlot: Int?
 
     var isRingOpen: Bool { ringPhase == .open }
+
+    /// 环当前中心槽位（相对锚点的整数格，r33 联动用）：angle 除以槽距取整。
+    var ringCenterSlot: Int {
+        Int((-angle / ringStep).rounded())
+    }
+
+    /// 环当前中心曲目在列表里的下标（r33 联动用：环与带子共用的当前索引）。
+    var ringCenterTrackIndex: Int {
+        guard !tracks.isEmpty else { return 0 }
+        return mod(anchorIndex + ringCenterSlot, tracks.count)
+    }
 
     // MARK: 常量（壳版 ring.js 原值，见文件头）
 
@@ -509,6 +621,13 @@ final class HomeCoverRingModel: ObservableObject {
             if ringPhase != .closed { closeRing() }
             flatOffsetX = 0
             flatDwellUntil = Date().addingTimeInterval(Self.initialDwell)
+        }
+        // r33-marquee：带宽兜底（与 rail 的 ensureSetWidth 同款）：
+        // flatSetWidth 正常由 FlatSetWidthKey 偏好上报；偏好没到时 tickFlat
+        // 的 setWidth > 0 守卫永远拦住、带子永远停。只在 flatSetWidth == 0
+        // 且有曲目时按卡数补，与偏好公式同值（n×(卡宽+间距)）。
+        if flatSetWidth == 0, !tracks.isEmpty {
+            flatSetWidth = CGFloat(tracks.count) * (flatCard + flatGap)
         }
     }
 
@@ -603,6 +722,8 @@ final class HomeCoverRingModel: ObservableObject {
         link.add(to: .main, forMode: .common)
         flatLinkProxy = proxy
         flatDisplayLink = link
+        // r33-marquee：看门狗 Timer 与 link 同生（幂等，见 startFlatWatchdog）。
+        startFlatWatchdog()
         // 开关拨动时已建好的 link 当场重算上限：设置页拨完回首页，
         // 模型不一定重建（RootView 可能复用），只靠 start 时读一次会漏；
         // 订阅只注册一次（本函数幂等，guard 拦住重复进），deinit 注销。
@@ -660,6 +781,47 @@ final class HomeCoverRingModel: ObservableObject {
         flatOffsetX = normalizedFlat(flatOffsetX - marqueeSpeed * CGFloat(clamped))
     }
 
+    /// r33-marquee：看门狗 Timer 启动（幂等；与 startFlatTimer 同生同死，
+    /// deinit 一起停）。Timer 挂 RunLoop.main 的 .common 模式，页面滚动时也跳。
+    private func startFlatWatchdog() {
+        guard flatWatchdog == nil else { return }
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.flatWatchdogTick() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        flatWatchdog = timer
+    }
+
+    /// flat 带看门狗每 0.1s 一跳（与 rail 的 watchdogTick 同款，守卫与
+    /// tickFlat 一致，多 ringPhase == .closed——环开着时带子本就不该走）。
+    /// 不该走时只刷新基线，不误判；该走但偏移 3s 没变 → 记诊断 + 恢复并自己推一步。
+    private func flatWatchdogTick() {
+        guard !tracks.isEmpty, flatSetWidth > 0, !flatDragging,
+              ringPhase == .closed, Date() >= flatDwellUntil else {
+            flatLastOffsetX = flatOffsetX
+            flatLastOffsetChange = Date()
+            flatWatchdogLoggedStuck = false
+            return
+        }
+        if flatOffsetX != flatLastOffsetX {
+            flatLastOffsetX = flatOffsetX
+            flatLastOffsetChange = Date()
+            flatWatchdogLoggedStuck = false
+            return
+        }
+        guard Date().timeIntervalSince(flatLastOffsetChange) >= 3 else { return }
+        if !flatWatchdogLoggedStuck {
+            flatWatchdogLoggedStuck = true
+            DiagLog.shared.recordLog(category: "marquee", message: "flat belt stuck 3s, watchdog driving", fields: ["setWidth": flatSetWidth, "isDragging": flatDragging, "offsetX": flatOffsetX, "speed": marqueeSpeed])
+        }
+        flatDragging = false
+        flatDraggingSince = nil
+        stripPress = nil
+        flatDwellUntil = Date()
+        flatOffsetX = normalizedFlat(flatOffsetX - marqueeSpeed * 0.1)
+        flatLastOffsetX = flatOffsetX
+    }
+
     /// 把偏移收进 (-setWidth, 0]，两份循环无缝（DailyMarqueeView 同款）。
     func normalizedFlat(_ x: CGFloat) -> CGFloat {
         guard flatSetWidth > 0 else { return x }
@@ -674,6 +836,20 @@ final class HomeCoverRingModel: ObservableObject {
         guard !tracks.isEmpty, flatPitch > 0 else { return 0 }
         let pos = (x - flatCard / 2 - flatOffsetX) / flatPitch
         return mod(Int(pos.rounded()), tracks.count)
+    }
+
+    /// r33，第 4/11 件：带子点按命中校验——点按必须落在某张卡的矩形内才算
+    /// 点中那首歌；卡缝（flatGap 16pt）与带上空白处不播歌。之前缺这道校验：
+    /// 触摸层盖住整条带，任意点按都按最近卡播歌（点卡缝、点空白也播）。
+    /// 环覆盖层同款做法（`hitTestRingCard`：点空处只关环不播歌），带子
+    /// 这里补齐。中心算法与 `anchorNearestFlatCard` 同源（未取模的最近
+    /// 槽位中心，2n 复制带上的副本位置同样算得准）。
+    func isTapOnFlatCard(x: CGFloat) -> Bool {
+        guard !tracks.isEmpty, flatPitch > 0 else { return false }
+        let pos = (x - flatCard / 2 - flatOffsetX) / flatPitch
+        let nearest = Int(pos.rounded())
+        let centerX = flatOffsetX + CGFloat(nearest) * flatPitch + flatCard / 2
+        return abs(x - centerX) <= flatCard / 2
     }
 
     /// 平面带正中间那张卡的下标（r28：入口按钮已删，本函数暂无调用方，留作备用）。
@@ -802,14 +978,36 @@ final class HomeCoverRingModel: ObservableObject {
         isRingDragging = false
         ringOpenY = y
         closeGeneration += 1
-        // 展开 520ms（easeOutQuint 近似 timingCurve(0.22,1,0.36,1)），
+        entryGeneration += 1
+        // r33，第 5 条：展开 520ms（easeOutQuint 近似 timingCurve(0.22,1,0.36,1)），
         // 覆盖层 260ms 淡入（壳版 .mring transition opacity .26s）。
-        withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: Self.enterMs / 1000)) {
-            entryT = 1
+        // 动画必须等覆盖层以 entryT=0 首绘后再跑：同一事务里 phase=.open 与
+        // entryT=1 一起提交时，覆盖层首帧就是 entryT=1、overlayOpacity=1，
+        // 520ms 动画一次插值都不跑、环直接蹦出来（视频 f_001→f_002 的跳变根因；
+        // f_002 在 0.25s 时卡片已是环尺寸、变暗已满，不是动画跑得快，是动画
+        // 根本没跑）。下一显示帧之后再起动画：DispatchQueue.main.async 不够——
+        // 它和本次提交跑在同一帧里，覆盖层首帧仍是最终值；睡 16ms（约一帧）
+        // 保证 entryT=0 的首帧已经上屏，随后 520ms 逐帧展开。16ms 延迟肉眼
+        // 不可见（520ms 的 3%）。代号用 entryGeneration（见声明处），
+        // 不复用 closeGeneration。时长先取到局部量，闭包里不再碰 Self。
+        let entryGen = entryGeneration
+        let enterSec = Self.enterMs / 1000
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 16_000_000)
+            guard let self else { return }
+            guard entryGen == self.entryGeneration,
+                  self.ringPhase == .open else { return }
+            withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: enterSec)) {
+                self.entryT = 1
+            }
+            withAnimation(.easeOut(duration: 0.26)) {
+                self.overlayOpacity = 1
+            }
         }
-        withAnimation(.easeOut(duration: 0.26)) {
-            overlayOpacity = 1
-        }
+        // r33，第 2 条：开环即预取锚点前后各 5 槽的封面（约 1.2 秒转量），
+        // 不等卡片转进来才起取图。
+        lastPrefetchCenterSlot = ringCenterSlot
+        prefetchRingCovers(aroundCenterSlot: ringCenterSlot)
         // 展开这根手指不用抬起：直接记为拖动起点，继续拖就是转环。
         if beginDrag {
             ringDragStart(x: x)
@@ -822,6 +1020,7 @@ final class HomeCoverRingModel: ObservableObject {
         guard ringPhase == .open else { return }
         ringPhase = .closing
         closeGeneration += 1
+        entryGeneration += 1 // r33，第 5 条：还没跑的 deferred 展开动画作废
         ringDragging = false
         isRingDragging = false
         closeT = 0
@@ -853,6 +1052,17 @@ final class HomeCoverRingModel: ObservableObject {
         closeGeneration += 1
     }
 
+    /// 覆盖层手指抬起且没拖起来（r33，第 3 条）：touchesBegan 已经把待执行
+    /// 的松手收回取消了（closeGeneration+1），但这次触摸既没走
+    /// ringDragEnded（<5px 没起拖）、又没走点按（pan 认出来了，tap 的
+    /// require(toFail: pan) 不触发），不补一个收回定时器环就永远开着——
+    /// 松手 1s 自动收的定时器在这里断了。手指抬起 = 一次新的松手，重新排 1s 收回。
+    /// 纯点按不走这里（pan 没认出来 → tap 触发 → 点卡播歌/点空白快收）。
+    func ringTouchEnded() {
+        guard ringPhase == .open, !ringDragging else { return }
+        scheduleHoldClose()
+    }
+
     /// 环拖动的起点（r24：第 3 件后两个入口共用——平面带开环手指与
     /// 覆盖层新手指）。
     /// - `y`：拖动起点纵坐标（下滑退出用）；平面带入口不传，取开环点
@@ -879,6 +1089,15 @@ final class HomeCoverRingModel: ObservableObject {
         while ringSamples.count > 2,
               now.timeIntervalSince(ringSamples[0].time) > Self.sampleMs {
             ringSamples.removeFirst()
+        }
+        // r33 联动：拖动环时下面那排跟着动——带子偏移实时跟环中心走
+        // （同一当前索引；环收回后带子从这首继续自动滚，开关环不丢位置）。
+        syncFlatOffsetToRingCenter()
+        // r33，第 2 条：中心槽位变了就预取新中心前后各 5 槽的封面。
+        let cs = ringCenterSlot
+        if cs != lastPrefetchCenterSlot {
+            lastPrefetchCenterSlot = cs
+            prefetchRingCovers(aroundCenterSlot: cs)
         }
     }
 
@@ -922,6 +1141,14 @@ final class HomeCoverRingModel: ObservableObject {
                 angle = targetAngle
             }
         }
+        // r33，第 2 条：弹簧落点那首前后各 5 槽的封面提前取（落点槽位在
+        // 弹簧动画里才走到，onChange(of: angle) 的带子同步会跟过去；
+        // 封面预取按落点槽位先走，不等弹簧走完）。
+        let targetSlot = Int((-targetAngle / ringStep).rounded())
+        if targetSlot != lastPrefetchCenterSlot {
+            lastPrefetchCenterSlot = targetSlot
+            prefetchRingCovers(aroundCenterSlot: targetSlot)
+        }
         scheduleHoldClose()
     }
 
@@ -935,6 +1162,53 @@ final class HomeCoverRingModel: ObservableObject {
                   self.ringPhase == .open, !self.ringDragging else { return }
             self.closeRing()
         }
+    }
+
+    // MARK: 环 ↔ 平面带联动（r33，用户 10:11/10:12：环跟着下面那排卡片走）
+
+    /// 环封面预取（r33，第 2 条）：环每转到新槽位才起取图的话，4 并发门
+    /// （CoverFetchGate，见 Proxies.swift）约 2 张/秒的吞吐追不上 4 张/秒
+    /// 的转速——视频里环 7 秒转约 30 首，f_010 起封面全丢（f_001–f_008
+    /// 的封面是开环前平面带挂载时就取到的，环转到没取过的曲目就只剩占位）。
+    /// 开环 + 中心槽位每变一次，提前把前后各 5 槽（约 1.2 秒转量）的封面
+    /// 推进 CoverImageLoader：同一 URL 只拉一次、在飞任务复用、进缓存，
+    /// 已缓存/在飞的调用是空操作，不重复烧流量；每 URL 一个 detached 任务
+    /// 分头起取，不串行等（串行等的话 11 张图要 20 秒才排完队）。
+    /// 门本身没卡住（max 4 并发、FIFO、抛错/取消都还槽，见 Proxies.swift），
+    /// 只是吞吐追不上转速——预取 + 深色占位是本文件内能做的两件；
+    /// 冷页一次转 30 首仍会跑赢 4 并发门，见交回诚实残留。
+    func prefetchRingCovers(aroundCenterSlot cs: Int, radius: Int = 5) {
+        guard !tracks.isEmpty else { return }
+        let center = mod(anchorIndex + cs, tracks.count)
+        var urls: [URL] = []
+        urls.reserveCapacity(radius * 2 + 1)
+        for d in -radius...radius {
+            let idx = mod(center + d, tracks.count)
+            if let url = tracks[idx].coverURL { urls.append(url) }
+        }
+        for url in urls {
+            Task.detached { _ = await CoverImageLoader.shared.image(for: url) }
+        }
+    }
+
+    /// 把平面带的偏移同步到环中心（r33 联动：环与带子共用同一个当前索引）：
+    /// 带子中心对准环当前那首。拖动环时带子实时跟过去（ringDragMoved 调），
+    /// 弹簧吸附时由覆盖层的 onChange(of: angle) 跟过去；环收回后带子从这首
+    /// 继续自动滚（closeResumeMs 后 tickFlat 接着走），开关环不丢位置。
+    /// 开环时不同步——带子在 0.26s 淡出里跳变会闪一下；环中心开环锚点
+    /// （在播曲目/手指卡）与带子中心本来就允许不同，拖起来再合流。
+    /// 带子宽还没量到（stripSize = 0）时跳过，不写脏偏移。
+    /// 覆盖层没淡入满（overlayOpacity < 0.99，刚开环 0.26s 内）也不动——
+    /// 带子还没藏好，中心差几首时一次跳几百 pt 会闪给用户看；淡入满后
+    /// 带子已不可见，随便跳。弹簧阶段同步时淡入早已满，不受影响。
+    func syncFlatOffsetToRingCenter() {
+        guard !tracks.isEmpty, flatSetWidth > 0, stripSize.width > 0,
+              overlayOpacity >= 0.99 else { return }
+        let k = ringCenterTrackIndex
+        let target = stripSize.width / 2 - flatCard / 2 - CGFloat(k) * flatPitch
+        let next = normalizedFlat(target)
+        guard abs(next - flatOffsetX) > 0.01 else { return }
+        flatOffsetX = next
     }
 
     // MARK: 点播
@@ -1017,9 +1291,38 @@ final class HomeCoverRingModel: ObservableObject {
         return 1
     }
 
-    /// 远端压暗（壳版：0.55·((1-facing)/2)^1.25）。
+    /// 远端压暗（壳版：0.55·((1-facing)/2)^1.25）。保留作壳版对照值——
+    /// r33 起环卡不再用它直接盖一层平色，见 shadeFarEdge。
     func shadeOpacity(facing: CGFloat) -> Double {
         0.55 * pow(Double((1 - facing) / 2), 1.25)
+    }
+
+    /// 侧卡远缘压暗（r33，第 1 条：沿卡面横向渐变的远缘黑度，近缘 0 → 远缘本值）。
+    /// 壳版 flat shade 在 40° 槽位只有 3.8%（0.55·((1−cos40°)/2)^1.25），
+    /// 壳版靠 CSS 透视梯形补立体感所以够用；原生 r31 的正交旋转没有梯形，
+    /// 3.8% 肉眼不可见——实测 f_010 侧卡亮度只比中心卡低约 7%（音符占位
+    /// 本身也有明暗），三张卡看着就是平铺重叠。圆柱面的明暗本来就该沿
+    /// 卡面渐变（远缘更暗），这里按 (1−facing) 线性拉到 40° 槽位远缘 0.42：
+    /// 中心卡 facing=1 → 0 不压暗；40° 侧卡近缘 0、远缘 0.42、平均约 0.21，
+    /// 肉眼可辨、又不至于把封面盖死。不是壳版原值（原值 3.8% 见 shadeOpacity），
+    /// 是原生缺梯形时的视觉补偿，真机确认强度，见 r33.cjs 断言建议。
+    func shadeFarEdge(facing: CGFloat) -> Double {
+        guard facing < 1 else { return 0 }
+        let unit = (1 - Double(facing)) / (1 - cos(40 * .pi / 180))
+        return min(0.42, 0.42 * unit)
+    }
+
+    /// 卡内透视（r33，第 1 条）：rotation3DEffect 的 perspective 参数，
+    /// 目标是壳版透视距离 P=3.2R（标准档 ≈697pt）——侧卡按这个距离再压一次
+    /// 近大远小，近缘比远缘宽约 12%，梯形就是圆柱感。r31 用 0（正交）是
+    /// 因为 0.5 远超 P、梯形变折叠；这里取 perspective ≈ 卡高 / P
+    /// （标准档 195/697 ≈ 0.28，三档都在 0.27–0.29）：SwiftUI 的 perspective
+    /// 是相对量、与 CSS perspective:px 没有精确等价换算（见 r31 注），
+    /// 0.5 已远超 P，0.28 是按卡高换算的近似值——布局尺寸不受影响
+    /// （rotation3DEffect 只改渲染不改布局），错也不会崩版，只会梯形
+    /// 稍强或稍弱，真机确认强度，见 r33.cjs 断言建议。
+    var ringCardPerspective: CGFloat {
+        ringCardHeight / ringPerspective
     }
 
     /// 透视缩放（r31 真圆柱）：scale = P/(P−z)，与 projectedX 共用同一个
@@ -1464,15 +1767,19 @@ struct HomeRingOverlayView: View {
                 .opacity(model.isRingDragging ? 1 : 0)
                 // 圆柱环。
                 ringLayer(screenWidth: geo.size.width, screenHeight: geo.size.height)
-                // 底部提示（视频原字；壳版 .mring__hint：bottom max(16, safe+10)）。
-                VStack {
-                    Spacer()
-                    Text("拖动旋转 · 点击播放 · 松手收回")
-                        .font(.system(size: 11))
-                        .foregroundColor(.white.opacity(0.74))
-                        .shadow(color: .black.opacity(0.5), radius: 8, x: 0, y: 1)
-                        .padding(.bottom, max(16, geo.safeAreaInsets.bottom + 10))
-                }
+                // 底部提示（视频原字；位置约 94% 屏高、居中）。
+                // r33，第 4 条：原来是 VStack + Spacer + padding(.bottom,
+                // max(16, safeArea+10))——safeAreaInsets 在 ignoresSafeArea
+                // 的 GeometryReader 里读到 0 时只垫 16pt，提示会沉到约 97%
+                // 屏高、贴着 Home Indicator，甚至与底下的本地音乐文件夹
+                // 副标题行叠在一起（视频 f_001–f_030 的提示行就叠在那行上，
+                // 30 帧里 94% 高度处一个亮像素都没有）。改成按屏高 94%
+                // 定死位置，不依赖 safeArea 读数；横屏竖屏同一套。
+                Text("拖动旋转 · 点击播放 · 松手收回")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.74))
+                    .shadow(color: .black.opacity(0.5), radius: 8, x: 0, y: 1)
+                    .position(x: geo.size.width / 2, y: geo.size.height * 0.94)
                 // r24：触摸层（RingTouchView，UIKit，文件尾）盖在最上层——
                 // 整块覆盖层的触摸都归它：拖动转环、点卡播歌、点空白收回、
                 // 下滑退出（ring.js onOverlayDown + window pointer 监听同款）。
@@ -1492,6 +1799,10 @@ struct HomeRingOverlayView: View {
             .opacity(model.overlayOpacity)
         }
         .ignoresSafeArea()
+        // r33 联动：弹簧吸附阶段 angle 还在动（ringDragMoved 不再调），
+        // 每帧把带子偏移跟到环中心；拖动阶段 ringDragMoved 里已同步，
+        // 这里重复调是空操作（syncFlatOffsetToRingCenter 里有 0.01 阈值守卫）。
+        .onChange(of: model.angle) { _ in model.syncFlatOffsetToRingCenter() }
     }
 
     private func radialScrim(size: CGSize, centerX: CGFloat, centerY: CGFloat) -> some View {
@@ -1522,9 +1833,9 @@ struct HomeRingOverlayView: View {
     /// P = 3.2R），再绕 Y 轴转 +world（切于圆柱面朝外，与壳版槽位
     /// rotateY(+base) translateZ(R) 同款；r30 的 -world 是播放页 CoverFlow
     /// 的朝内转法抄过来的，右卡右缘朝前、看着就是折过去），卡内旋转透视
-    /// 参数为 0——透视只走显式 3.2R 投影，不由 SwiftUI 的 0.5 再算一次
-    /// （SwiftUI perspective 与 CSS perspective:px 没有精确等价换算，
-    /// 见 CoverFlowView 文件头诚实注；卡内梯形透视是已知残留，见文件头）。
+    /// r33 起按壳版 P=3.2R 走（`ringCardPerspective` ≈ 卡高/P ≈ 0.28；
+    /// r31 的 perspective 0 是正交旋转、侧卡只是等比窄矩形没有梯形，
+    /// 看着是平铺——视频 f_010 的三张卡就是这副样子，见第 1 条）。
     /// r26-3D：纵向锚点走 `ringCenterY`（r31 起不夹取，环中心 = 带子中心）；每张卡再
     /// 下坠各自的 `tiltDrop`（相机 -5°，正前方约 20pt、两侧渐小）——
     /// 相机 -5° 全由 tiltDrop 表达，容器整体 rotateX(-5°) 已删（r30 的
@@ -1549,13 +1860,18 @@ struct HomeRingOverlayView: View {
                 RingCardView(
                     track: track,
                     width: model.ringCard,
-                    shadeOpacity: model.shadeOpacity(facing: facing)
+                    world: slot.world,
+                    shadeFar: model.shadeFarEdge(facing: facing)
                 )
                 .scaleEffect(model.depthScale(forWorld: slot.world) * cam)
                 .rotation3DEffect(
                     .degrees(Double(slot.world)),
                     axis: (x: 0, y: 1, z: 0),
-                    perspective: 0
+                    // r33，第 1 条：perspective 0 → 卡高/P（≈0.28）——正交旋转
+                    // 的侧卡只是等比窄矩形、没有梯形，看着是平铺；按壳版 P=3.2R
+                    // 再压一次近大远小，近缘比远缘宽约 12%，才是绕圆柱转圈。
+                    // 见 model.ringCardPerspective 注释（近似换算，真机确认强度）。
+                    perspective: model.ringCardPerspective
                 )
                 .opacity(model.facingOpacity(facing: facing))
                 .position(x: screenWidth / 2 + model.projectedX(forWorld: slot.world), y: layerHeight / 2 + model.tiltDrop(facing: facing))
@@ -1576,16 +1892,42 @@ struct HomeRingOverlayView: View {
 private struct RingCardView: View {
     let track: Track
     let width: CGFloat
-    let shadeOpacity: Double
+    /// 该槽的世界角（度）：正 = 右侧卡，负 = 左侧卡；决定渐变压暗的远缘方向。
+    let world: CGFloat
+    /// 远缘黑度（0…0.42，模型 `shadeFarEdge` 算出；中心卡为 0）。
+    let shadeFar: Double
 
     /// r30：没封面（coverURL 为 nil）不摆白卡——深色默认封面（见 FlatRingCard
-    /// coverArt 注释；URL 有但加载失败的白占位在 CoverImageView.swift 里）。
+    /// coverArt 注释）。r33，第 2 条：URL 有但加载失败/还没到时也不摆白卡——
+    /// CoverImageView 走深色占位（`darkPlaceholder`），环里绝不留浅灰音符占位。
     @ViewBuilder
     private var coverArt: some View {
         if track.coverURL == nil {
             DefaultCoverArt(iconSize: 48)
         } else {
-            CoverImageView(url: track.coverURL, placeholderIconSize: 48)
+            CoverImageView(url: track.coverURL, placeholderIconSize: 48, darkPlaceholder: true)
+        }
+    }
+
+    /// 圆柱面明暗（r33，第 1 条）：沿卡面横向渐变，近缘 0 → 远缘 shadeFar。
+    /// 右侧卡（world > 0）远缘在右，渐变左清右黑；左侧卡反之；中心卡不压暗。
+    /// 旧的整面平色 3.8%（壳版公式原值）在正交旋转下肉眼不可见，见 shadeFarEdge 注释。
+    private var shadeGradient: LinearGradient {
+        if world > 0 {
+            return LinearGradient(
+                colors: [.black.opacity(0), .black.opacity(shadeFar)],
+                startPoint: .leading, endPoint: .trailing
+            )
+        } else if world < 0 {
+            return LinearGradient(
+                colors: [.black.opacity(shadeFar), .black.opacity(0)],
+                startPoint: .leading, endPoint: .trailing
+            )
+        } else {
+            return LinearGradient(
+                colors: [.black.opacity(0), .black.opacity(0)],
+                startPoint: .leading, endPoint: .trailing
+            )
         }
     }
 
@@ -1600,7 +1942,7 @@ private struct RingCardView: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
-                        .fill(Color.black.opacity(shadeOpacity))
+                        .fill(shadeGradient)
                 )
                 .shadow(color: .black.opacity(0.8), radius: 26, x: 0, y: 12)
             Text(track.title)
@@ -1768,6 +2110,9 @@ final class StripTouchUIView: UIView, UIGestureRecognizerDelegate {
     @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
         guard let model, recognizer.state == .ended else { return }
         let location = recognizer.location(in: self)
+        // r33，第 4/11 件：点按必须落在卡上才播（见 isTapOnFlatCard）——
+        // 卡缝/空白处的点按直接丢弃，不按最近卡播歌。
+        guard model.isTapOnFlatCard(x: location.x) else { return }
         onTapCard?(model.anchorNearestFlatCard(x: location.x))
     }
 }
@@ -1905,9 +2250,32 @@ final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
             if dragStarted {
                 dragStarted = false
                 model.ringDragEnded()
+            } else {
+                // r33，第 3 条：没拖起来（<5px 晃一下就抬手）也要补一个
+                // 松手收回——touchesBegan 已经取消了待执行的收回定时器，
+                // 这次触摸既没走 ringDragEnded、又没走点按（pan 认出来了，
+                // tap 不触发），不补定时器环就永远开着。
+                model.ringTouchEnded()
             }
         default:
             break
+        }
+    }
+
+    /// 系统取消触摸（r33，第 3 条；来电、锁屏、控制中心等）：
+    /// touchesBegan 已经取消了待执行的收回定时器，取消后 pan 不一定
+    /// 再走 .cancelled——这里按同一套收尾：拖起来了走 ringDragEnded，
+    /// 没拖起来走 ringTouchEnded（重排 1s 收回）。StripTouchView 同款
+    /// 兜底（见该文件 touchesCancelled），覆盖层之前没有。
+    /// 与 pan .cancelled 双重触发时：第二次 ringDragEnded 会再排一个 1s
+    /// 定时器（代号 +1 作废前一个，只剩后一个），结果不变，安全。
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesCancelled(touches, with: event)
+        if dragStarted {
+            dragStarted = false
+            model?.ringDragEnded()
+        } else {
+            model?.ringTouchEnded()
         }
     }
 

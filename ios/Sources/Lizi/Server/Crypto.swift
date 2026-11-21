@@ -203,11 +203,13 @@ enum NetEaseCrypto {
         return (params, encSecKey)
     }
 
-    /// eapi header：上游按它判断客户端。deviceId 进程内随机生成一次并复用；
+    /// eapi header：上游按它判断客户端。r33：deviceId 固定 "kumone"
+    /// （Moumusic 同款固定值；进程内随机 id 会被网易当不可信客户端）。
+    /// 旧写法是进程内随机生成一次并复用。注意：这个值不在 NetEase.swift
+    /// 里——NetEase.eapiRequest 只调 NetEaseCrypto.eapi()，header 在这里
+    /// 的 eapiHeader() 内拼好再加密，NetEase.swift 本身无处可改。
     /// buildver / requestId 每次调用都重新生成，不可缓存。
-    private static let eapiDeviceId: String = {
-        (0..<16).map { _ in String(format: "%02X", UInt8.random(in: 0...255)) }.joined()
-    }()
+    private static let eapiDeviceId: String = "kumone"
 
     static func eapiHeader(csrf: String = "") -> [String: Any] {
         let nowMs = Int(Date().timeIntervalSince1970 * 1000)

@@ -99,7 +99,7 @@ import UIKit
 /// 两块高度分配，松手停在哪就是哪（不回弹、不吸附、不贴靠档位）；Hero 与
 /// 面板高度之和 ≤ contentH（r28：面板按内容封顶后余下是本地音乐，见 body），
 /// 尺寸按方向分别持久化，见下面
-/// heroFractionPortraitKey / heroFractionLandscapeKey（竖屏默认 0.215、
+/// heroFractionPortraitKey / heroFractionLandscapeKey（竖屏默认 0.206、
 /// 横屏默认 9/16）；拖动中只改 @State、不写 UserDefaults，松手才写当前
 /// 方向的 key。上下限见 body 里 minHeroH / minPanelH 的注释（数都从
 /// HeroCardView / PlatformStripView / HomeCoverRingView
@@ -121,11 +121,11 @@ import UIKit
 ///    照用户 04:51 截图量）；横屏：行顶就是屏顶（横屏顶上没有灵动岛，
 ///    品牌中心 = 32pt）。横屏左列按 leading 安全区（灵动岛在侧边）往里收，
 ///    按钮不被屏幕圆角裁掉（用户 05:08「设置和搜索按钮要画完整」）。
-/// 2. 竖屏按壳版视频排（r28；402×874 档）：顶栏区 95 + 间距 46 +
-///    Hero 152 + 间隙 27 + 面板（内容封顶 407）= 727，余下是本地音乐
+/// 2. 竖屏按壳版视频排（r28；402×874 档）：顶栏区 95 + 间距 14 +
+///    Hero 152 + 间隙 27 + 面板（内容封顶 407）= 695，余下是本地音乐
 ///    （壳版视频里本地音乐就露在首屏）；横屏 Hero 横幅 + 面板上下叠
 ///    （932×430 档：顶栏 64 + 间距 26 + Hero 180 + 间距 20 + 面板 140 = 430）。
-///    Hero 高 = contentH × fraction（竖屏默认 0.215，见 loadHeroFraction），
+///    Hero 高 = contentH × fraction（竖屏默认 0.206，见 loadHeroFraction），
 ///    面板取剩下那份再按内容封顶（竖屏 flatCard+217，横屏 (屏高−110)×7/16）。
 ///    面板内容（条 48 + 栏头 28 + 环带 242 + 提示行 27）比横屏面板 140 高，
 ///    差额由面板内竖滑消化，不硬凑；竖屏面板封顶后内容正好放下。
@@ -197,6 +197,20 @@ import UIKit
 /// 蒙版为什么是浅色不是深色压暗：全站文字是深色墨字，深色压暗会反让
 /// 顶栏品牌/齿轮/搜索看不清（见 BackgroundView.swift 文件头）。
 /// Hero/面板/本地音乐本身是不透明卡片，不受背景层影响。
+///
+/// r33-download-entry（用户 2026-11-21 10:25 取消）：首页不放下载管理入口，
+/// 这里的卡已删；下载管理功能本身（DownloadsView）不动，入口只剩设置页
+/// 「存储与下载」分区与播放页底部下载键。
+///
+/// r33-home-hero-up（用户 2026-11-21 真机截图：顶栏与 Hero 之间约 80pt
+/// 空米色带，Hero 顶离屏顶约 141pt）：竖屏 gapTop 46→14，Hero 顶收到
+/// 顶栏下 14pt（109pt）；默认 fraction 0.215→0.206，contentH 738 档
+/// Hero 仍约 152pt；gapMid 27 不动，面板跟着上移 32pt（顶 320→288pt，
+/// 高仍封顶 407）。横屏 gapTop 26 不动；顶栏不动；拖动改尺寸、持久化
+/// key、min/max 夹值一律不动，已存 fraction 不受影响。
+/// 下滑停止点（用户 10:18 截图：滑到底面板顶贴在顶栏下、约 97pt）：
+/// homeBottomPad 公式 +8pt 越过量改 −2pt，最大滚动量把面板顶送到
+/// 顶栏下沿之下 2pt 即停，不再多滑出空白；横屏仍 50、不变。
 struct HomeView: View {
     @EnvironmentObject var playback: PlaybackStore
     @EnvironmentObject var nav: AppNavigation
@@ -225,12 +239,13 @@ struct HomeView: View {
     private static let heroFractionLandscapeKey = "lizi.native.home.heroFraction.landscape"
 
     /// 读存值：读不到（double(forKey:) 缺键回 0）或非法（非有限、≤0、≥1）
-    /// 回落默认——竖屏 0.215（r28：39.6s 视频 Hero 约 152pt，
-    /// contentH 706 档 152/706 ≈ 0.215；旧 0.5 已作废）、横屏 9/16
+    /// 回落默认——竖屏 0.206（r28：39.6s 视频 Hero 约 152pt，
+    /// contentH 706 档 152/706 ≈ 0.215；r33：gapTop 46→14 后 contentH
+    /// 738 档 152/738 ≈ 0.206，Hero 仍约 152pt；旧 0.5 已作废）、横屏 9/16
     /// （0.5625，与 r23 前的模板公式同值）。
     /// 读出后在 body 里再按当前 contentH 与上下限夹一次（见 minFrac / maxFrac）。
     private static func loadHeroFraction(landscape: Bool) -> CGFloat {
-        let fallback: CGFloat = landscape ? 9.0 / 16.0 : 0.215
+        let fallback: CGFloat = landscape ? 9.0 / 16.0 : 0.206
         let raw = UserDefaults.standard.double(
             forKey: landscape ? heroFractionLandscapeKey : heroFractionPortraitKey)
         guard raw.isFinite, raw > 0, raw < 1 else { return fallback }
@@ -285,7 +300,9 @@ struct HomeView: View {
             // 7 个平台同一套固定顶栏。
             // 模板 v2 几何（屏顶坐标；上下安全区都已忽略，outer.size = 整屏）：
             // r28：竖屏按壳版视频排——顶栏区 95 + 间距 46 + Hero 152 +
-            // 间隙 27 + 面板（内容封顶 407）= 727，余下是本地音乐
+            // 间隙 27 + 面板（内容封顶 407）= 727，余下是本地音乐；
+            // r33-home-hero-up：竖屏间距 46→14（Hero 顶 141→109pt），
+            // 顶栏区 95 + 间距 14 + Hero 152 + 间隙 27 + 面板 407 = 695。
             // （壳版视频里本地音乐就露在首屏）；横屏：顶栏 64，
             // 间距 26，Hero 横幅 (430−110)×9/16 = 180，间距 20，
             // 面板 (430−110)×7/16 = 140，底边同样是屏底边。
@@ -295,7 +312,7 @@ struct HomeView: View {
             let isLandscape = outer.size.width > outer.size.height
             let topPad: CGFloat = isLandscape ? 0 : 31
             let topBarH: CGFloat = 64
-            let gapTop: CGFloat = isLandscape ? 26 : 46
+            let gapTop: CGFloat = isLandscape ? 26 : 14
             let gapMid: CGFloat = isLandscape ? 20 : 27
             let contentH = outer.size.height - topPad - topBarH - gapTop - gapMid
             // r24 两卡高度分配：heroH = contentH × fraction（按方向取各自的
@@ -372,7 +389,7 @@ struct HomeView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         // r28：竖屏 Hero + 面板 + 本地音乐按壳版视频排
-                        // （顶栏 95 + 间距 46 + Hero 152 + 间隙 27 + 面板 407，
+                        // （顶栏 95 + 间距 14 + Hero 152 + 间隙 27 + 面板 407，
                         // 本地音乐露在首屏；旧「两块拼满、本地音乐不露首屏」
                         // 已作废，见文件头 r28 节）。
                         VStack(alignment: .leading, spacing: gapMid) {
@@ -470,8 +487,13 @@ struct HomeView: View {
                                 }
                         }
 
-                        // 面板之下：本地音乐区（r28：竖屏露在首屏，不再是
+                        // 面板之下：下载管理卡 + 本地音乐区（r28：竖屏露在首屏，不再是
                         // 「下滑才看到」；见文件头 r28 节）。
+                        // r33-download-entry：下载管理卡从 LocalMusicSectionView
+                        // 搬到这里、本地音乐区块的正上方（紧贴本地音乐，还是
+                        // 「本地音乐附近」），原来在 LocalMusicSectionView 最末、
+                        // 首屏之外、滑到底才看得见；现在一眼见。卡放在
+                        // `if localMusicShown` 之外，本地音乐开关关了它也一直在。
                         // 本地音乐排在最末；段间距 24 与上面同档。
                         // r26：首屏之下的 rail 行随来源 chips 一起删掉
                         // （RailRowView + 「我的专辑」入口卡），只剩本地音乐。
@@ -510,19 +532,24 @@ struct HomeView: View {
                     // 就看这一行）。measured 含当前 homeBottomPad；
                     // 不含底边距的最大偏移 = measured − homeBottomPad − 视口高；
                     // 面板顶到顶栏下需要 gapTop + heroH + gapMid 的偏移。
-                    // 差多少就把底边距补多少（+8pt 越过量，让面板顶能贴进
-                    // 顶栏下沿）；行程够了就缩回 50。
+                    // 差多少就把底边距补多少（−2pt：面板顶停在顶栏下沿之
+                    // 下 2pt、约 97pt，见 r33-home-hero-up；r31 的 +8pt
+                    // 越过量会让面板顶顶进顶栏下面 8pt，已撤掉）；行程够了
+                    // 就缩回 50。
                     // 公式是幂等的：补完再算一次得出的还是同一个值，不震荡；
                     // 内容变高（本地音乐展开/有歌了）或旋转后自动重算。
-                    // 数（390×844 竖屏标准档）：视口 749、面板顶 218.3、
-                    // 不含底边距的最大偏移 62.3 → 底边距 164.0（比 50 多补 114.0）；
-                    // 402×874：底边距 194.0；横屏 844×390：不含底边距的最大偏移
-                    // 已够（186.0，面板顶 203.5 + 8 越过量 = 211.5 < 236.0），
+                    // 数（390×844 竖屏标准档）：视口 749、面板顶 186.8、
+                    // 不含底边距的最大偏移 30.8 → 底边距 154.0（比 50 多补 104.0）；
+                    // 402×874：底边距 183.8；横屏 844×390：不含底边距的最大偏移
+                    // 已够（186.0，面板顶 203.5 − 2 = 201.5 < 236.0），
                     // 底边距仍是 50。见 verification/r31-landscape.cjs §3。
+                    // r33：停止点从 r31 的 +8pt 越过量改成 −2pt（面板顶停在
+                    // 顶栏下沿之下 2pt、约 97pt，用户 10:18 截图位置）；底边距
+                    // 跟着少补 10pt（164.0→154.0、194.0→183.8），横屏仍 50。
                     let viewportH = outer.size.height - topPad - topBarH
                     let maxOffsetWithoutPad = measured - homeBottomPad - viewportH
                     let need = gapTop + heroH + gapMid
-                    let target = max(50, need - maxOffsetWithoutPad + 8)
+                    let target = max(50, need - maxOffsetWithoutPad - 2)
                     if abs(target - homeBottomPad) > 0.5 {
                         homeBottomPad = target
                     }
@@ -844,12 +871,16 @@ struct HomeView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .onAppear {
-                // r31-starred：从播放页点完星标/取消星标回来，喜欢栏要看到
-                // 新状态——喜欢栏不缓存（loadRailPage 每次切回都重拉），
-                // 这里在面板每次出现时也重拉一次喜欢栏；其它栏不动。
-                // 只在已经拉过一次后重拉（首次进入由 selectSource 拉，
-                // 在飞的由 railLoadingPages 守卫挡，不会双拉）。
-                if page == .liked, viewModel.railResults[.liked] != nil {
+                // r33-marquee：喜欢栏只在星标变了之后重拉一次——
+                // PlaybackStore.toggleLike 置旗（lizi.native.liked.needsRefresh），
+                // 这里消费并清旗。r31 之前是每次出现都 force 重拉，而加载态会切走
+                // entriesView（带子消失）→ 加载完再出现 → 又重拉，无限重取循环，
+                // 带子反复被拆、看着像冻住；r31-starred 的原意（从播放页点完星标
+                // 回来看到新状态）由这面旗子保留，不用每次出现都拉。
+                // 首次进入由 selectSource 拉，在飞的由 railLoadingPages 守卫挡，不会双拉。
+                if page == .liked, viewModel.railResults[.liked] != nil,
+                   UserDefaults.standard.bool(forKey: PlaybackStore.likedNeedsRefreshKey) {
+                    UserDefaults.standard.set(false, forKey: PlaybackStore.likedNeedsRefreshKey)
                     viewModel.loadRailPage(.liked, force: true)
                 }
             }
@@ -1179,12 +1210,68 @@ struct HomeView: View {
         /// 里注册，deinit 里注销；通知回调当场重算已建 link 的帧率上限）。
         private var frameRateObserver: NSObjectProtocol?
         private var lastTimestamp: CFTimeInterval = 0
+        /// r33-marquee 看门狗 Timer（display link 之外的第二条命）：
+        /// link 死了或守卫卡住了，linkFired 里的 10s 看门狗也跟着死——
+        /// 带子永远停。0.1s 看一次：该走（setWidth > 0、没拖动、dwell 已过）
+        /// 但偏移 3s 没变 → 记一次诊断 + 清拖动旗 + dwell 归零 + 自己按
+        /// 速度推一步（2.4px/步；link 活着时偏移每帧都在变，不会触发，
+        /// 绝不与 link 打架）。deinit 停表。
+        private var marqueeWatchdog: Timer?
+        private var lastOffsetX: CGFloat = 0
+        private var lastOffsetChange = Date()
+        private var watchdogLoggedStuck = false
 
-        init() { start() }
+        init() { start(); startWatchdog() }
 
         deinit {
             displayLink?.invalidate()
+            marqueeWatchdog?.invalidate()
             if let frameRateObserver { NotificationCenter.default.removeObserver(frameRateObserver) }
+        }
+
+        /// r33-marquee：带宽兜底——setWidth 正常由 RailMarqueeView 的
+        /// GeometryReader 偏好上报；偏好万一没到（视图没布局完就进守卫），
+        /// linkFired 的 setWidth > 0 守卫永远不满足、带子永远停。
+        /// 卡数×(卡宽+间距) 与偏好公式同值（偏好 = 内层宽 + 16 = n×(卡宽+16)），
+        /// 只在 setWidth == 0 时补，不与偏好打架。
+        func ensureSetWidth(cardCount: Int, cardWidth: CGFloat) {
+            guard setWidth == 0, cardCount > 0 else { return }
+            setWidth = CGFloat(cardCount) * (cardWidth + 16)
+        }
+
+        private func startWatchdog() {
+            let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.watchdogTick() }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            marqueeWatchdog = timer
+        }
+
+        /// 看门狗每 0.1s 一跳：不该走时（拖动中 / dwell 未过 / 没内容）
+        /// 只刷新基线，不误判；该走但偏移 3s 没变 → 记诊断 + 恢复并自己推一步。
+        private func watchdogTick() {
+            guard setWidth > 0, !isDragging, Date() >= dwellUntil else {
+                lastOffsetX = offsetX
+                lastOffsetChange = Date()
+                watchdogLoggedStuck = false
+                return
+            }
+            if offsetX != lastOffsetX {
+                lastOffsetX = offsetX
+                lastOffsetChange = Date()
+                watchdogLoggedStuck = false
+                return
+            }
+            guard Date().timeIntervalSince(lastOffsetChange) >= 3 else { return }
+            if !watchdogLoggedStuck {
+                watchdogLoggedStuck = true
+                DiagLog.shared.recordLog(category: "marquee", message: "rail belt stuck 3s, watchdog driving", fields: ["setWidth": setWidth, "isDragging": isDragging, "offsetX": offsetX, "speed": speed])
+            }
+            isDragging = false
+            draggingSince = nil
+            dwellUntil = Date()
+            offsetX = normalized(offsetX - speed * 0.1)
+            lastOffsetX = offsetX
         }
 
         func start() {
@@ -1346,13 +1433,17 @@ struct HomeView: View {
             }
             .onAppear {
                 driver.speed = speed
+                driver.ensureSetWidth(cardCount: cards.count, cardWidth: cardWidth)
                 driver.noteContentChanged()
             }
             // r31-marquee：视图被拆掉时清掉可能残留的拖动旗（切来源/切平台/
             // 打开歌单/专辑、分支切加载态都走这里拆视图；DragGesture.onEnded
             // 在视图被拆时到不了，见 `RailMarqueeDriver.dragCancelled`）。
             .onDisappear { driver.dragCancelled() }
-            .onChange(of: cards.map(\.id)) { _ in driver.noteContentChanged() }
+            .onChange(of: cards.map(\.id)) { _ in
+                driver.ensureSetWidth(cardCount: cards.count, cardWidth: cardWidth)
+                driver.noteContentChanged()
+            }
             .onChange(of: speed) { _ in driver.speed = speed }
         }
 

@@ -802,16 +802,24 @@ final class KuwoService {
                            "total": scNum(d["total"]) != 0 ? scNum(d["total"]) : list.count])
     }
 
+    /// 推荐歌单（r33：上游改 wapi getRcmPlayList，order 必须是文字 hot/new；
+    /// 旧 www rcm/index 在部分环境回空。VM 实测：order=hot 回 code 200、
+    /// total 1756、30 条；order=5（数字）回 200 但 data 空）。
+    /// 详情复用已有的 playlist/tracks（playListInfo，pid=裸数字 id；
+    /// 上游项带的 digest 字段（如 "8"）是歌单类型标记，详情不拼前缀，
+    /// 沿用 kuwoPlaylist 的裸 id——若真机详情取空，再试 digest_id 形式）。
     private func recommendPlaylists(_ req: HttpRequest) async throws -> HttpResponse {
         let limit = scClamp(req.int("limit", 12), 1, 50)
-        let id = req.string("id").isEmpty ? "37" : req.string("id")
-        let r = try await www("/api/www/rcm/index/playlist?id=\(scURLEncode(id))&pn=1&rn=\(limit)&httpsStatus=1")
-        let j = scParseJSONObject(r.text)
+        guard let url = URL(string: "https://wapi.kuwo.cn/api/pc/classify/playlist/getRcmPlayList?loginUid=0&loginSid=0&appUid=76039576&pn=1&rn=\(limit)&order=hot") else {
+            return .json(200, ["code": 502, "source": "kuwo", "playlists": [],
+                               "error": "酷我推荐歌单请求构造失败"])
+        }
+        let j = try await Upstream.fetchJSON(url, headers: ["User-Agent": Self.uaWeb], timeout: 20) as? [String: Any] ?? [:]
         guard scNum(j["code"]) == 200 else {
             return .json(200, ["code": upstreamCode(j), "source": "kuwo", "playlists": [],
                                "error": upstreamError(j, "取推荐歌单失败")])
         }
-        let list = scArr(scDict(j, "data"), "list")
+        let list = scArr(scDict(j, "data"), "data")
         let playlists = list.compactMap { kuwoPlaylist($0) }.filter { !($0["name"] as? String ?? "").isEmpty }
         return .json(200, ["code": 200, "source": "kuwo", "playlists": playlists])
     }

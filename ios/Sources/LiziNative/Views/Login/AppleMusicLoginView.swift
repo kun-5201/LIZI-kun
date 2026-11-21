@@ -5,8 +5,10 @@ import SwiftUI
 /// 后端事实（AppleMusic.swift，不改）：
 /// - GET /api/applemusic/status（或 login/status）：
 ///   loggedIn = 开发者 token 经 catalog 校验有效；vip = 订阅有效
-///   （另需 user token）；无 token 时 loggedIn=false，但搜索/推荐/歌单/
-///   歌词走公开 API，播放是 30 秒试听。
+///   （另需 user token）；tokenSource = pasted（用户粘贴的）/ web
+///   （网页播放器 token 兜底）/ ""（两种都没有）。r33 起：无已贴 token
+///   时先用网页 token 兜底校验，两种 token 都没有时 loggedIn=false，
+///   但搜索/推荐/歌单/歌词走公开 API，播放是 30 秒试听。
 /// - POST /api/applemusic/login/token，body 字段 token（可另带 userToken）：
 ///   只做 JWT 三段格式校验，真校验走 status 的 catalog 调用；空 token、
 ///   非 JWT 格式都回 loggedIn:false + error。
@@ -35,6 +37,10 @@ struct AppleMusicLoginView: View {
     @State private var tokenValid = false
     @State private var subscriptionValid = false
     @State private var statusError = ""
+    // r33：token 来源（后端 status 的 tokenSource：pasted / web / ""），
+    // 决定上段文案与登出后的提示（网页 token 兜底时登出后 tokenValid 仍
+    // 为 true，不能再报「登出后 token 仍有效，请重试」）。
+    @State private var tokenSource = ""
     // r29 task 1：Apple ID 登录态（user token 在盘上即 true；订阅现验）。
     @State private var appleIDLoggedIn = false
     @State private var appleIDSubscribed = false
@@ -58,6 +64,13 @@ struct AppleMusicLoginView: View {
                         .foregroundStyle(.secondary)
                     if !savedTokenPrefix.isEmpty {
                         Text("已保存 token（\(savedTokenPrefix)…）")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if tokenSource == "web" {
+                        // r33：没粘贴过自己的 token，当前是网页播放器 token
+                        // 在兜底校验——不要写成「已保存开发者 token」，会让
+                        // 用户以为自己存过一个 token。
+                        Text("当前用网页播放器 token 校验（未粘贴自己的 token）")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
@@ -91,8 +104,9 @@ struct AppleMusicLoginView: View {
 
             Divider()
 
-            // 中段：Apple ID 登录（r29 task 1；开发者 token 仍是 MusicKit
-            // 必须的部分，粘贴区在下面原样保留）。
+            // 中段：Apple ID 登录（r29 task 1；r33 起开发者 token 不再必须
+            // 粘贴——没贴时 App 用网页播放器 token 兜底校验，粘贴区在下面
+            // 原样保留）。
             VStack(alignment: .leading, spacing: 6) {
                 Text("Apple ID 登录")
                     .font(.subheadline)
@@ -130,7 +144,7 @@ struct AppleMusicLoginView: View {
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .textFieldStyle(.roundedBorder)
-                Text("开发者 token 是 ES256 JWT（kid + iss，6 个月有效期），用 Apple Developer 门户创建的 MusicKit key（.p8）签发，需要付费开发者账号。token 只存本机，不上传、不写日志；界面上最多显示前 4 位。没有 token 也可以用：留空，公开 API 照样能用。")
+                Text("开发者 token 是 ES256 JWT（kid + iss，6 个月有效期），用 Apple Developer 门户创建的 MusicKit key（.p8）签发，需要付费开发者账号。token 只存本机，不上传、不写日志；界面上最多显示前 4 位。没有自己的 token 也不用贴：订阅校验用公开的网页播放器 token，留空就行；自己的 token 是可选项，只有公开 token 失效/过期时才需要贴；公开 API 照样能用。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button("保存 token") { Task { await saveToken() } }
@@ -165,6 +179,7 @@ struct AppleMusicLoginView: View {
             tokenValid = (d["loggedIn"] as? Bool) ?? false
             subscriptionValid = (d["vip"] as? Bool) ?? false
             statusError = (d["error"] as? String) ?? ""
+            tokenSource = (d["tokenSource"] as? String) ?? ""
         }
     }
 
@@ -259,9 +274,17 @@ struct AppleMusicLoginView: View {
         await MainActor.run {
             appleIDLoggedIn = false
             appleIDSubscribed = false
-            if tokenValid {
+            // r33：登出后 tokenValid 仍为 true 有两种可能——粘贴的 token
+            // 没清掉（后端登出失败，要重试），或当前是网页 token 兜底
+            // （粘贴的 token 已清，网页 token 不是用户存的、清不掉也不用清）。
+            // 用 tokenSource 区分，不误报。
+            if tokenSource == "pasted" {
                 message = "登出后 token 仍有效，请重试"
                 messageIsError = true
+            } else if tokenValid {
+                savedTokenPrefix = ""
+                message = "已登出，Apple ID 登录态已清除；网页 token 仍用于匿名校验"
+                messageIsError = false
             } else {
                 savedTokenPrefix = ""
                 message = "已登出，token 已清除"

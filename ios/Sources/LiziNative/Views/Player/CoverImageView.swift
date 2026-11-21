@@ -6,21 +6,31 @@ import SwiftUI
 /// 见 `CoverImageLoader.swift`）；无封面或加载失败时用白色占位
 /// （MEMORY：没有封面用白色，不用金色；绝不用 ♪ 冒充内容 —— 占位只是一个
 /// 静音的 music.note 图标，不是歌词也不是封面本身）。
+/// r33：环内（`RingCardView`）传 `darkPlaceholder: true`——加载中/失败时
+/// 画深色默认封面（`DefaultCoverArt`），不摆白底音符（环在变暗的覆盖层里，
+/// 白占位一转就满屏浅灰，见 HomeCoverRingView 第 2 条）；默认 false，
+/// 其余调用点一律不动。
 struct CoverImageView: View {
     let url: URL?
     /// 占位图标大小（调用方按容器尺寸传）。
     var placeholderIconSize: CGFloat = 28
+    /// 深色占位（只给环内用）：加载中/失败画深色默认封面，不摆白底音符。
+    var darkPlaceholder: Bool = false
 
     var body: some View {
         ProxyImageView(url: url) { placeholder }
     }
 
     private var placeholder: some View {
-        ZStack {
-            Color.white
-            Image(systemName: "music.note")
-                .font(.system(size: placeholderIconSize, weight: .regular))
-                .foregroundStyle(PlayerTokens.ink3)
+        if darkPlaceholder {
+            DefaultCoverArt(iconSize: placeholderIconSize)
+        } else {
+            ZStack {
+                Color.white
+                Image(systemName: "music.note")
+                    .font(.system(size: placeholderIconSize, weight: .regular))
+                    .foregroundStyle(PlayerTokens.ink3)
+            }
         }
     }
 }

@@ -210,12 +210,20 @@ final class AppleMusicService {
     }
 
     private func statusBody() async -> [String: Any] {
-        let hasDev = !devToken.isEmpty
+        // r33：开发者 token 三路取用（已贴 > 缓存网页 > 现抠，与 catalogToken
+        // 同款链）；任一可用即 hasDev，订阅就能验。token 只在这里解析一次，
+        // 下面的两个校验共用，不重复抠（现抠成功会写盘缓存，见 scrapeWebToken）。
+        // tokenSource 供 UI 区分：pasted = 用户粘贴的，web = 网页播放器 token
+        // 兜底，"" = 两种都没有。网页 token 只用于只读的订阅/catalog 校验，
+        // 不写任何状态、不改登录态。
+        let token = await catalogToken()
+        let hasDev = !token.isEmpty
+        let tokenSource = hasDev ? (!devToken.isEmpty ? "pasted" : "web") : ""
         var valid = false
         if hasDev {
             if Date().timeIntervalSince(tokenVerifiedAt) < 300 {
                 valid = tokenValid
-            } else if let ok = await verifyDevToken() {
+            } else if let ok = await verifyDevToken(token) {
                 valid = ok; tokenValid = ok; tokenVerifiedAt = Date()
             } else {
                 tokenValid = false; tokenVerifiedAt = Date()
@@ -225,7 +233,7 @@ final class AppleMusicService {
         if valid && !userToken.isEmpty {
             if Date().timeIntervalSince(userTokenVerifiedAt) < 300 {
                 sub = userTokenValid
-            } else if let ok = await verifyUserToken() {
+            } else if let ok = await verifyUserToken(devToken: token) {
                 sub = ok; userTokenValid = ok; userTokenVerifiedAt = Date()
             } else {
                 userTokenValid = false; userTokenVerifiedAt = Date()
@@ -233,18 +241,25 @@ final class AppleMusicService {
         }
         return ["code": 200, "loggedIn": valid, "vip": sub,
                 "nickname": valid ? "Apple Music" : "",
+                "tokenSource": tokenSource,
                 "error": hasDev ? (valid ? "" : "开发者 token 无效或已过期（catalog 校验失败）")
-                                : "未配置开发者 token：搜索/推荐走公开 API，播放是 30 秒试听；整首要 Apple Developer 账号的 MusicKit 开发者 token"]
+                                : "未配置开发者 token，网页 token 也抠不到（检查网络后重试，公开 token 回来订阅校验就恢复）：搜索/推荐走公开 API，播放是 30 秒试听；也可以贴自己的 MusicKit 开发者 token（可选）"]
     }
 
     /// 开发者 token 校验：catalog 读一首已知曲目（公开文档端点，200 = token 有效）。
-    /// 不传参时验已存盘的 token（statusBody 用）；传参验候选 token（loginToken
+    /// 不传参时验三路取用链解析出的 token（statusBody 用）；传参验候选 token（loginToken
     /// 落盘前先验，r25 U8）。返回 nil = 其它状态码（限流/网络）不定论，不清登录态。
+    /// r33：网页 token 在 api.music.apple.com 上必须带 Origin，否则 401
+    /// （VM 实测 2026-11-21：无 Origin → 401，有 Origin → 200；
+    /// catalogSearch 同款要求）；已贴的正式开发者 token 多一个 Origin 头
+    /// 不受影响。
     private func verifyDevToken(_ candidate: String? = nil) async -> Bool? {
-        let token = candidate ?? devToken
-        guard let url = URL(string: "https://api.music.apple.com/v1/catalog/tw/songs/\(Self.catalogSongId)") else { return nil }
+        let token = candidate ?? await catalogToken()
+        guard !token.isEmpty,
+              let url = URL(string: "https://api.music.apple.com/v1/catalog/tw/songs/\(Self.catalogSongId)") else { return nil }
         do {
-            let (_, resp) = try await Upstream.fetch(url, headers: ["Authorization": "Bearer \(token)"], timeout: 15)
+            let (_, resp) = try await Upstream.fetch(url, headers: ["Authorization": "Bearer \(token)",
+                                                                    "Origin": "https://music.apple.com"], timeout: 15)
             if resp.statusCode == 200 { return true }
             if resp.statusCode == 401 || resp.statusCode == 403 { return false }
             return nil // 其它状态码（限流/网络）不定论，不清登录态
@@ -252,11 +267,16 @@ final class AppleMusicService {
     }
 
     /// 订阅校验：library 读一首（要 user token；200 = 订阅有效）。
-    private func verifyUserToken() async -> Bool? {
-        guard let url = URL(string: "https://api.music.apple.com/v1/me/library/songs?limit=1") else { return nil }
+    /// r33：开发者 token 由调用方（statusBody）按三路取用链解析后传入，
+    /// 不再只认已贴 token；网页 token 同样要带 Origin（同 verifyDevToken）。
+    /// 只读校验：不写任何状态、不改登录态。
+    private func verifyUserToken(devToken token: String) async -> Bool? {
+        guard !token.isEmpty, !userToken.isEmpty,
+              let url = URL(string: "https://api.music.apple.com/v1/me/library/songs?limit=1") else { return nil }
         do {
-            let (_, resp) = try await Upstream.fetch(url, headers: ["Authorization": "Bearer \(devToken)",
-                                                                    "Music-User-Token": userToken], timeout: 15)
+            let (_, resp) = try await Upstream.fetch(url, headers: ["Authorization": "Bearer \(token)",
+                                                                    "Music-User-Token": userToken,
+                                                                    "Origin": "https://music.apple.com"], timeout: 15)
             if resp.statusCode == 200 { return true }
             if resp.statusCode == 401 || resp.statusCode == 403 { return false }
             return nil

@@ -2741,21 +2741,76 @@ extension QQService {
                             "restriction": NSNull()])
     }
 
+    /// 推荐歌单（r33：POST 信封改 GET + data query 项——POST 在某些地区
+    /// 回空歌单对象；GET 形式 VM 实测通：GET u.y.qq.com/cgi-bin/musicu.fcg?
+    /// data={comm:{cv:1602,ct:20},playlist:{method:get_playlist_by_tag,
+    /// param:{id:10000000,sin:0,size,order:5热门/2最新,cur_page:1},module:
+    /// playlist.PlayListPlazaServer}}，回 {playlist:{data:{v_playlist}}}}）。
+    /// v_playlist 项的 id 是 tid、封面是 cover_url_big、创建者是
+    /// creator_info.nick（与 PlaylistSquare 的 basic 形状不同，这里内联映射，
+    /// 不动 qqPlaylist）。登录态不影响这条（匿名 GET 即通）。
+    /// tid 即歌单 disstid，详情复用已有的 playlist/detail（disstid 取曲）。
     private func recommendPlaylists(req: HttpRequest) async -> HttpResponse {
         let limit = min(20, max(3, req.int("limit", 9)))
+        let order = req.int("order", 5)
+        let dataObj: [String: Any] = [
+            "comm": ["cv": 1602, "ct": 20],
+            "playlist": [
+                "method": "get_playlist_by_tag",
+                "param": ["id": 10000000, "sin": 0, "size": limit,
+                          "order": order, "cur_page": 1],
+                "module": "playlist.PlayListPlazaServer",
+            ],
+        ]
+        guard let dataJson = qqJSONData(dataObj),
+              let dataStr = String(data: dataJson, encoding: .utf8) else {
+            return .json(200, ["code": 502, "source": "qq", "playlists": [],
+                               "error": "QQ 推荐歌单请求构造失败"])
+        }
+        var comps = URLComponents(string: qqMusicuURL) ?? URLComponents()
+        comps.queryItems = [URLQueryItem(name: "data", value: dataStr)]
+        guard let url = comps.url else {
+            return .json(200, ["code": 502, "source": "qq", "playlists": [],
+                               "error": "QQ 推荐歌单请求构造失败"])
+        }
         do {
-            let authed = await ensureCredential() != nil
-            let param: [String: Any] = ["From": 0, "Size": limit]
-            let data = try await (authed
-                ? musicuAuth(module: "music.playlist.PlaylistSquare", method: "GetRecommendFeed", param: param)
-                : musicuAnon(module: "music.playlist.PlaylistSquare", method: "GetRecommendFeed", param: param))
-            let list = (data["List"] as? [[String: Any]] ?? []).compactMap {
-                ($0["Playlist"] as? [String: Any])?["basic"] as? [String: Any]
+            let (respData, resp) = try await Upstream.fetch(
+                url,
+                headers: ["Referer": "https://y.qq.com/",
+                          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"],
+                timeout: 25)
+            guard resp.statusCode == 200, let obj = Upstream.jsonObject(respData) else {
+                return .json(200, ["code": 502, "source": "qq", "playlists": [],
+                                   "error": "QQ 推荐歌单失败"])
             }
-            return .json(200, ["code": 200, "source": "qq", "playlists": list.compactMap { qqPlaylist($0) }])
+            guard scInt(obj, "code") == 0 else {
+                return .json(200, ["code": 502, "source": "qq", "playlists": [],
+                                   "error": "QQ 推荐歌单上游错误"])
+            }
+            let pl = scDict(obj, "playlist")
+            guard scInt(pl, "code") == 0 else {
+                return .json(200, ["code": 502, "source": "qq", "playlists": [],
+                                   "error": "QQ 推荐歌单上游错误"])
+            }
+            let items = scArr(scDict(pl, "data"), "v_playlist")
+            let playlists: [[String: Any]] = items.compactMap { it in
+                let id = scStrOrNum(it, "tid")
+                guard !id.isEmpty else { return nil }
+                let creator = scDict(it, "creator_info")
+                let name = scStr(it, "title")
+                return [
+                    "id": id, "source": "qq",
+                    "name": name.isEmpty ? "未命名歌单" : name,
+                    "cover": qqFirstStr(it, ["cover_url_big", "cover_url_medium", "cover_url_small"]),
+                    "trackCount": (it["song_ids"] as? [Any])?.count ?? 0,
+                    "playCount": scNum(it["access_num"]),
+                    "creator": ["nickname": scStr(creator, "nick")],
+                ]
+            }
+            return .json(200, ["code": 200, "source": "qq", "playlists": playlists])
         } catch {
-            return .json(200, ["code": (error as? QQUpstreamError)?.code ?? 502, "source": "qq",
-                                "playlists": [], "error": (error as? QQUpstreamError)?.message ?? "QQ 推荐歌单失败"])
+            return .json(200, ["code": 502, "source": "qq", "playlists": [],
+                               "error": "QQ 推荐歌单失败"])
         }
     }
 

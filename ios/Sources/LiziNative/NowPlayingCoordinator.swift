@@ -104,6 +104,26 @@ final class NowPlayingCoordinator: ObservableObject {
                 Task { @MainActor in self.writeNowPlaying() }
             }
             .store(in: &cancellables)
+        // r33：设置里「动画插图」开关（lizi.animatedArtwork）拨动时立刻重写
+        // Now Playing——之前 bind 只订阅切歌/播放/进度，暂停时拨开关没有任何
+        // 写操作：关掉后旧动态键一直挂在 nowPlayingInfo 里（播放时最多等 5 秒
+        // 进度复写才掉，暂停时永远不掉），开/关都不同步。UserDefaults 变化就
+        // 全量重写一次：writeNowPlaying 从空字典重建 info，关时动态键自然掉、
+        // 静态图挂上；开时已就绪的动态视频重新挂上（没就绪的顺手补启动一次，
+        // maybeKick 内部有 startedTrackId + 每首只启动一次的去重，不会多跑）。
+        // 重写是幂等的：封面已到货时不重拉（lastArtwork 非空 + lastTrackId 未变
+        // 不触发 fetchArtwork），远程命令也有 5 秒节流。
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in
+                    self.writeNowPlaying()
+                    if let track = self.store?.currentTrack, self.animatedArtworkEnabled {
+                        self.maybeKickAnimatedPrepares(for: track)
+                    }
+                }
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Now Playing
@@ -288,19 +308,22 @@ final class NowPlayingCoordinator: ObservableObject {
             // 两条 prepare 都没跑；lastTrackId 已推进、lastArtwork 非空时
             // 后续 writeNowPlaying 再也不会重拉——整首歌静态，且无任何记录；
             // 壳版 ContentView 同样位置是记 DiagLog + 上默认图兜底）。
-            // 现在：记一笔诊断；静态图清掉（别留上一首的封面）；路线 A 用
-            // 默认白图生成兜底视频（路线 B 已在上面并行准备，不依赖封面）；
-            // 10 秒后重试一次封面（仍是这首歌才拉，最多一次）。
+            // 现在：记一笔诊断；静态图上默认白图（别留上一首的封面，也别留空——
+            // r33：开关关时锁屏要点专辑铺满，静态图不能为空；之前这里 lastArtwork
+            // 置 nil，关掉动画插图后锁屏根本没有专辑图可点）；路线 A 用默认白图
+            // 生成兜底视频（路线 B 已在上面并行准备，不依赖封面）；10 秒后重试
+            // 一次封面（仍是这首歌才拉，最多一次），重试成功真封面会盖掉白图。
             DiagLog.shared.recordLog(category: "animated-artwork",
                 message: "cover download failed, fallback to default animated video track=\(track.title) platform=\(track.platform) host=\(url.host ?? "")",
                 fields: ["lane": "cover-download-failed", "host": url.host ?? "", "platform": track.platform])
-            // 先立失败标记再补写：writeNowPlaying 里 lastArtwork == nil 会触发
-            // 重拉，标记必须在这之前立好，否则补写会立刻再拉一次、失败再补写，
-            // 无限循环。重试只排一次：第二次失败（重试那次）不再排。
+            // 先立失败标记再补写：标记是“只重试一次”的开关（shouldRetry 靠它
+            // 区分首次失败与重试失败），必须在补写之前立好；补写后 lastArtwork
+            // 已非空（默认白图），后续 5 秒进度复写不再触发重拉，不会无限循环。
             let shouldRetry = coverFailedTrackId != track.id
             coverFailedTrackId = track.id
-            lastArtwork = nil
-            lastArtworkTrackId = nil
+            let defaultSized = Self.lockScreenSized(defaultCoverImage())
+            lastArtwork = MPMediaItemArtwork(boundsSize: defaultSized.size) { _ in defaultSized }
+            lastArtworkTrackId = track.id
             lastCoverKey = AnimatedArtworkManager.defaultKey
             lastCoverImage = nil
             lastCoverImageTrackId = track.id
@@ -392,20 +415,30 @@ final class NowPlayingCoordinator: ObservableObject {
         }
     }
 
-    /// 锁屏静态图尺寸（照抄壳版 ContentView.lockScreenSized）：最长边压到
-    /// 1000px 再交给系统（全屏铺满要大图，但 3000px 原图没必要）；小图原样
-    /// 返回——上游给的 240/300px 小封面（QQ 300）在这里不放大，
-    /// 放大也补不出细节；全屏清晰度要靠上游给大图或动态视频（720x960）。
+    /// 锁屏静态图尺寸（r33：不再照抄壳版只压不放）：
+    /// 全屏铺满时系统拿这张静态图当整屏背景，图太小（QQ 300px）即使能展开也糊、
+    /// 还可能不够系统展开的门槛，所以最长边归一到 [1200, 1600]：小于 1200 放大
+    /// 到 1200，大于 1600 压到 1600，中间原样返回。放大补不出细节，但能让系统
+    /// 拿到一张全屏尺寸的图（iPhone 屏宽约 1170–1320px）；1600 上限控内存。
+    /// 默认白图 720x720 也走这里，放大到 1200x1200。scale 固定 1.0（与旧的
+    /// UIGraphicsBeginImageContextWithOptions(..., 1.0) 同义）：sized.size 的
+    /// 点数就是像素数，MPMediaItemArtwork 的 boundsSize 与像素一致。
     private static func lockScreenSized(_ image: UIImage) -> UIImage {
-        let maxEdge: CGFloat = 1000
+        let minEdge: CGFloat = 1200
+        let maxEdge: CGFloat = 1600
         let longest = max(image.size.width, image.size.height)
-        guard longest > maxEdge, longest > 0 else { return image }
-        let scale = maxEdge / longest
+        guard longest > 0 else { return image }
+        guard longest < minEdge || longest > maxEdge else { return image }
+        let targetEdge = min(max(longest, minEdge), maxEdge)
+        let scale = targetEdge / longest
         let target = CGSize(width: image.size.width * scale, height: image.size.height * scale)
-        UIGraphicsBeginImageContextWithOptions(target, false, 1.0)
-        defer { UIGraphicsEndImageContext() }
-        image.draw(in: CGRect(origin: .zero, size: target))
-        return UIGraphicsGetImageFromCurrentImageContext() ?? image
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: target, format: format)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: target))
+        }
     }
 
     // MARK: - 远程命令（照抄壳版 ContentView.reassertRemoteCommands）

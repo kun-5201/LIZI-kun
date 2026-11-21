@@ -25,6 +25,9 @@ import UniformTypeIdentifiers
 ///   DownloadsView（正在下载进度 / 已下载点播 / 左滑删除）。Lizi 没有
 ///   独立的「我的」页，首页就是我的 hub，这张卡就是我的页面那行的落点；
 ///   下载不混进本地音乐清单（见 DownloadStore 文件头），这张卡只放入口。
+/// - r33-download-entry：上面那张卡已搬走——现在在 HomeView 面板之下
+///   VStack、本地音乐区块正上方、`if localMusicShown` 之外（开关关了
+///   它也一直在、首屏一眼见）；本文件里不再有下载管理入口，不留两个。
 /// - 空态用壳版原文（`LocalMusicPlaceholderView` 旧文案，原样搬过来）：
 ///   「还没有导入本地音频。在文件 App 里选音频文件，导入后出现在这里。」
 ///   不编假文件，文件夹里没歌就是空态。
@@ -38,12 +41,6 @@ struct LocalMusicSectionView: View {
     @State private var isExpanded = false
     @State private var isPickerPresented = false
     @State private var statusLine: String? = nil
-    /// r31-download：下载管理行读下载清单（数量/大小当场刷新）。
-    @ObservedObject private var downloads = DownloadStore.shared
-    /// r31-download：下载管理页 sheet 开关（Lizi 没有独立的「我的」页，
-    /// 首页就是我的 hub：我的歌单 / 我喜欢 / 本地音乐都在这里，
-    /// 「下载管理」行落在这里，与设置「存储与下载」分区同进 DownloadsView）。
-    @State private var showDownloads = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -124,36 +121,6 @@ struct LocalMusicSectionView: View {
             }
             .accessibilityLabel("导入本地音乐")
 
-            // r31-download：下载管理行（与上面本地音乐文件夹卡片同款 60 高）：
-            // 点进 DownloadsView（正在下载进度 / 已下载点播 / 左滑删除）；
-            // 摘要实读下载清单。下载不混进本地音乐清单——这里只放入口，
-            // 下的歌不在上面那个文件夹里出现。
-            Button(action: { showDownloads = true }) {
-                HStack(spacing: 12) {
-                    Image(systemName: "arrow.down.circle.fill")
-                        .font(.system(size: 22))
-                        .foregroundColor(.blue)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("下载管理")
-                            .font(.liziBody(size: 16, weight: .semibold))
-                            .foregroundColor(LiziTokens.ink)
-                        Text(downloads.summaryText)
-                            .font(.liziBody(size: 12))
-                            .foregroundColor(LiziTokens.ink2)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(LiziTokens.ink2)
-                }
-                .padding(.horizontal, 16)
-                .frame(height: 60)
-                .background(LiziTokens.paper2)
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("下载管理 \(downloads.summaryText)")
-
             if let statusLine {
                 Text(statusLine)
                     .font(.liziBody(size: 12))
@@ -175,9 +142,6 @@ struct LocalMusicSectionView: View {
                 },
                 onCancel: { isPickerPresented = false }
             )
-        }
-        .sheet(isPresented: $showDownloads) {
-            DownloadsView()
         }
     }
 

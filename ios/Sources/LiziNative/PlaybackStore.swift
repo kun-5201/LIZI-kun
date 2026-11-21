@@ -206,6 +206,11 @@ final class PlaybackStore: ObservableObject {
     /// 保证兼容——P2 之前点的星标只有 id、没有曲目详情，恢复不出来，
     /// 不编假曲目；重新点一次星标（取消再点）后才有完整记录。
     private static let likedTracksKey = "lizi.native.likedTracks"
+    /// r33-marquee：喜欢栏需刷新旗——点星标/取消星标后，首页喜欢栏下次出现时
+    /// 重拉一次（见 HomeView RailSourceListView.onAppear）；平时不重拉。
+    /// r31 之前是每次出现都 force 重拉，加载态会切走 entriesView（带子消失）
+    /// → 加载完再出现 → 又重拉，无限重取循环，带子反复被拆、看着像冻住。
+    static let likedNeedsRefreshKey = "lizi.native.liked.needsRefresh"
     /// r22：随机与循环重启后保留（与队列面板头部同一套状态，控制行两端按钮共用）。
     private static let repeatModeKey = "lizi.native.repeatMode"
     private static let shuffleKey = "lizi.native.isShuffled"
@@ -658,6 +663,8 @@ final class PlaybackStore: ObservableObject {
             tracks.removeAll { $0.id == track.id && $0.platform == track.platform }
         }
         Self.saveLikedTracks(tracks)
+        // r33-marquee：星标变了，喜欢栏下次出现时重拉一次（置旗，首页消费并清旗）。
+        UserDefaults.standard.set(true, forKey: Self.likedNeedsRefreshKey)
     }
 
     /// 已喜欢的完整曲目列表（按点星标顺序；调用方按 platform 过滤）。

@@ -344,8 +344,9 @@ final class LoginStore: ObservableObject {
     ///   vip: Bool?, isSuperVIP, vipKnown }`（资料接口实算：任一会员字段 > 0
     ///   即会员，svip_level / svip > 0 即 SVIP；全 0 再补查 union_vip；
     ///   查不到回 null = 未知）。
-    /// - Apple Music `/api/applemusic/status`：`{ loggedIn, vip, nickname, error }`
-    ///   （nickname 是服务端原样回的 "Apple Music"，不是本类编的）。
+    /// - Apple Music `/api/applemusic/status`：`{ loggedIn, vip, nickname, error,
+    ///   tokenSource }`（tokenSource = pasted / web / ""，r33 起网页 token
+    ///   兜底校验；nickname 是服务端原样回的 "Apple Music"，不是本类编的）。
     /// 酷我 / Apple Music / 汽水 / 波点没有会员校验接口（Moumusic 也没有）：
     /// 这里不编 vipInfo，vipKnown 恒为 false，显示为「未知」。
     static func parse(platform: String, dict: [String: Any]) -> LoginState {

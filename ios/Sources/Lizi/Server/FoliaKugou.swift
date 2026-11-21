@@ -1029,6 +1029,8 @@ actor FoliaKugouService {
                 return try await personalFm()
             case "recommend/songs":
                 return try await recommendSongs(req)
+            case "recommend/playlists":
+                return try await recommendPlaylists(req)
             case "fm/class":
                 return try await fmClass()
             case "fm/songs":
@@ -1652,6 +1654,29 @@ actor FoliaKugouService {
         let items = Self.firstListArray(res.json, keys: ["special_list", "list", "lists"])
         let playlists = items.compactMap { Self.kugouCollection($0, type: "playlist") }
         return .json(200, ["code": 200, "source": "kugou", "playlists": playlists])
+    }
+
+    /// 推荐歌单（r33 新增；yueku 热门歌单，t=6 热门）：
+    /// GET http://www2.kugou.kugou.com/yueku/v9/special/getSpecial?
+    /// is_ajax=1&cdn=cdn&t=6&c=&p=1，回 {special_db:[{specialid,
+    /// global_collection_id, specialname, img, ...}]}；歌单 id 取
+    /// global_collection_id（kugouCollection 同款），详情复用已有的
+    /// playlist/detail + playlist/tracks（playlistTracks 按
+    /// global_collection_id 取曲）。注意：https 不通（VM 实测 000），
+    /// 只能 http；旧推荐端点 everyday_recommend 很可能已废弃（回 error
+    /// 200101），每日推荐主腿先保留，合成腿只作它回空时的兜底。
+    private func recommendPlaylists(_ req: HttpRequest) async throws -> HttpResponse {
+        let limit = scClamp(req.int("limit", 12), 1, 50)
+        guard let url = URL(string: "http://www2.kugou.kugou.com/yueku/v9/special/getSpecial?is_ajax=1&cdn=cdn&t=6&c=&p=1") else {
+            return .json(200, ["code": 502, "source": "kugou", "playlists": [], "error": "酷狗推荐歌单请求构造失败"])
+        }
+        let (data, _) = try await Upstream.fetch(url, headers: ["User-Agent": "Mozilla/5.0"], timeout: 20)
+        guard let json = Upstream.jsonObject(data) else {
+            return .json(200, ["code": 502, "source": "kugou", "playlists": [], "error": "酷狗推荐歌单返回无法解析"])
+        }
+        let items = Self.firstListArray(json, keys: ["special_db", "list", "lists"])
+        let playlists = items.compactMap { Self.kugouCollection($0, type: "playlist") }
+        return .json(200, ["code": 200, "source": "kugou", "playlists": Array(playlists.prefix(limit))])
     }
 
     /// 私人 FM（`module/personal_fm.js`）：POST /v2/personal_recommend，

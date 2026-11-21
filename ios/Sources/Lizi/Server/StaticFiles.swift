@@ -174,11 +174,40 @@ enum Upstream {
         req.httpBody = (method.uppercased() == "GET") ? nil : body
         // r31-cookie：走私有 session（见本文件 `session` 注释），不用
         // URLSession.shared——共享罐的旧 cookie 会跟显式 Cookie 头一起发出。
-        let (data, resp) = try await session.data(for: req)
-        guard let http = resp as? HTTPURLResponse else {
-            throw NSError(domain: "LiziUpstream", code: -1, userInfo: [NSLocalizedDescriptionKey: "no http response"])
+        // r33：幂等 GET 重试——QQ/酷狗 3 次、其他 2 次，间隔 180ms×失败次数
+        // （第 1 次重试前 180ms，第 2 次前 360ms）；空 200（200 但 body 为空）
+        // 与 5xx 也重试；4xx 不重试（重试也没用）；取消立即抛，不重试。
+        // 次数按 host 定：*.qq.com / *.kugou.com（含 u.y.qq.com、
+        // www2.kugou.kugou.com、网关域）3 次，其余 2 次；非 GET 只跑一次。
+        let isGet = method.uppercased() == "GET"
+        let host = (url.host ?? "").lowercased()
+        let isRetryHost = host == "qq.com" || host.hasSuffix(".qq.com")
+            || host == "kugou.com" || host.hasSuffix(".kugou.com")
+        let maxAttempts = isGet ? (isRetryHost ? 3 : 2) : 1
+        var lastError: Error?
+        for attempt in 0..<maxAttempts {
+            if attempt > 0 {
+                try await Task.sleep(nanoseconds: UInt64(180 * attempt) * 1_000_000)
+            }
+            do {
+                let (data, resp) = try await session.data(for: req)
+                guard let http = resp as? HTTPURLResponse else {
+                    throw NSError(domain: "LiziUpstream", code: -1, userInfo: [NSLocalizedDescriptionKey: "no http response"])
+                }
+                let empty200 = http.statusCode == 200 && data.isEmpty
+                if (empty200 || http.statusCode >= 500), attempt + 1 < maxAttempts {
+                    lastError = NSError(domain: "LiziUpstream", code: http.statusCode,
+                                        userInfo: [NSLocalizedDescriptionKey: empty200 ? "empty 200" : "http \(http.statusCode)"])
+                    continue
+                }
+                return (data, http)
+            } catch {
+                lastError = error
+                if Task.isCancelled || attempt + 1 >= maxAttempts { throw error }
+            }
         }
-        return (data, http)
+        throw lastError ?? NSError(domain: "LiziUpstream", code: -1,
+                                   userInfo: [NSLocalizedDescriptionKey: "upstream fetch failed"])
     }
 
     static func fetchJSON(_ url: URL, headers: [String: String] = [:], timeout: TimeInterval = 20,

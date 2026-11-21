@@ -6,8 +6,11 @@ import MediaPlayer
 /// 为什么用它：catalog API 只回 30 秒试听；iPhone 的 WKWebView 没有 EME，
 /// MusicKit JS 在应用内播不了整首；applicationMusicPlayer 是系统级
 /// Apple Music 播放器，不需要 MusicKit entitlement、不需要 App 自带
-/// 开发者账号的 MusicKit 能力——只要用户 Apple ID 有订阅 + 有 user token
-/// （AppleMusicAuth），按 store id 建队列就能播整首。
+/// 开发者账号的 MusicKit 能力——只要设备上的 Apple ID 有订阅，按 store id
+/// 建队列就能播整首（r36：App 不再预先查订阅、也不要求 user token；
+/// 整首还是试听由系统按设备订阅自己决定，play() 回 true 只代表
+/// prepareToPlay 成功，不代表放的是整首——试听疑似由 PlaybackStore
+/// 的 onProgress 按系统报的时长记诊断）。
 ///
 /// 归属：只播 Apple Music 的歌。队列由 PlaybackStore 拼（从当前下标起
 /// 连续的、有 store id 的 Apple Music 曲目）；播完一段、切到非 AM 的歌、
@@ -73,7 +76,9 @@ final class AppleMusicPlayer {
     var currentPlaybackTime: TimeInterval { player.currentPlaybackTime }
 
     /// 按 store id 建队列并起播。返回 false = 起播失败（prepareToPlay
-    /// 报错），调用方回落到 30 秒试听链。
+    /// 报错），调用方回落到 30 秒试听链。返回 true 只代表已起播，
+    /// 不代表系统放的是整首（无订阅时系统可能只放 30 秒试听——
+    /// 那条由 PlaybackStore 的 onProgress 按时长记诊断，不在这里判）。
     func play(storeIDs: [String], startAt index: Int) async -> Bool {
         guard !storeIDs.isEmpty, storeIDs.indices.contains(index) else { return false }
         suppressEndedCallback = false

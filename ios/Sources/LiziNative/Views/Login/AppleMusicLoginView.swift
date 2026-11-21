@@ -16,8 +16,10 @@ import SwiftUI
 ///   门户创建的 MusicKit key（.p8）签发，要付费开发者账号。
 /// - r29 task 1：Apple ID 登录（r31 起 AppleMusicAuth 只走 StoreKit：先预读
 ///   授权状态，已授权直接取 user token，未定才弹框，被拒直接提示）+ 整首播放
-///   （AppleMusicPlayer：applicationMusicPlayer 按 store id 建队列）。登录且
-///   订阅有效时 Apple Music 的歌播整首，否则仍是 30 秒试听。
+///   （AppleMusicPlayer：applicationMusicPlayer 按 store id 建队列）。
+///   r36：播放不再设订阅门槛——Apple Music 的歌直接走原生播放器试播整首，
+///   整首还是试听由系统按该设备的订阅自己决定，起播失败才回落 30 秒试听；
+///   本页的订阅行只作显示（“未确认”≠“无订阅”），不拦播放。
 /// - logout（/api/applemusic/logout）清掉开发者 token 和 user token；
 ///   本视图登出时还调 AppleMusicAuth.signOut() 清内存里的 user token。
 ///
@@ -59,7 +61,7 @@ struct AppleMusicLoginView: View {
                 if tokenValid {
                     Text("开发者 token 有效（catalog 校验通过）")
                         .font(.caption)
-                    Text(subscriptionValid ? "订阅有效" : "未验证到订阅")
+                    Text(subscriptionValid ? "订阅有效" : "订阅未确认")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if !savedTokenPrefix.isEmpty {
@@ -80,13 +82,13 @@ struct AppleMusicLoginView: View {
                     }
                     Text(appleIDLoggedIn && appleIDSubscribed
                         ? "已登录 Apple ID 且订阅有效：Apple Music 的歌走原生播放器播整首。"
-                        : "搜索走 Apple Music catalog；播放仍是 30 秒试听，整首播放需要 Apple ID 登录 + 有效订阅（见下）。")
+                        : "Apple Music 的歌直接走原生播放器试播整首（系统按该 Apple ID 的订阅决定整首还是试听）；播不了时回落 30 秒试听。订阅行只作显示，不拦播放。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
                     Text("未配置开发者 token（匿名可用）")
                         .font(.caption)
-                    Text("可搜索、看推荐/歌单、看歌词；播放是 30 秒试听。整首播放需要 Apple ID 登录 + 有效订阅（见下）。")
+                    Text("可搜索、看推荐/歌单、看歌词；Apple Music 的歌直接走原生播放器试播整首，播不了时回落 30 秒试听。订阅行只作显示，不拦播放。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if !statusError.isEmpty {
@@ -114,11 +116,11 @@ struct AppleMusicLoginView: View {
                 if appleIDLoggedIn {
                     Text("Apple ID 已登录")
                         .font(.caption)
-                    Text(appleIDSubscribed ? "订阅有效，可整首播放" : "未验证到订阅（整首播放不可用）")
+                    Text(appleIDSubscribed ? "订阅有效，可整首播放" : "订阅未确认（不影响播放：点歌会直接试播整首）")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("未登录（整首播放需要 Apple ID 登录 + 有效订阅）")
+                    Text("未登录（登录后订阅行会显示校验结果；不登录也能试播整首，系统按该设备的订阅决定整首还是试听）")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("直接向系统请求 Apple Music 访问授权（StoreKit；MusicKit 路已停用，未签名 IPA 没有 MusicKit 能力）。授权被拒时直接提示，不会闪退。登录只在本机存 user token，不上传、不显示完整值。")

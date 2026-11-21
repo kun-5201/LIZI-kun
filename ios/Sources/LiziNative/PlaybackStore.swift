@@ -197,6 +197,10 @@ final class PlaybackStore: ObservableObject {
     /// 首次进度回调是否已记过面包屑（每首歌在 startItem 里清零；它是
     /// “声音真的出来了”的唯一落盘证据——play called 只证明调了 play）。
     private var didRecordFirstTimeUpdate = false
+    /// r36：AM 试听疑似检查是否已做过（每首 AM 全曲起播 / 队列内自动切歌时
+    /// 清零；只记一次诊断，不拦播放——见 wireAppleMusicCallbacks 的
+    /// onProgress）。
+    private var didCheckAMPreview = false
 
     private static let likedKey = "lizi.native.likedTrackIds"
     /// 喜欢身份 = id + platform 复合键（r25-B2：单用曲目 id 时跨平台数字 id
@@ -865,17 +869,20 @@ final class PlaybackStore: ObservableObject {
             self.currentLyricIndex = LyricsParser.currentLineIndex(lines: parsed.lines, atMs: 0)
         }
 
-        // r29 task 1：Apple Music 全曲播放（条件：applemusic + 订阅有效 +
-        // store id 非空；readyForFullPlayback 里订阅先查本机能力
-        // .musicCatalogPlayback，查不到才走服务端 vip——r34 起登录态不再是
-        // 硬门槛）。起播成功直接 return，不走 30 秒试听链；失败（起播失败等）回落到现有
-        // resolveURL → AVPlayer 试听流程，绝不崩、绝不卡在 isLoading。
-        // r30（D2 限流）：AM 分支只在 Apple Music 平台才进——非 AM 的歌
-        // 连 readyForFullPlayback 都不调；停 AM 引擎也只在上一首真走
-        // AM 引擎时（usingAppleMusicPlayer）才调。非 AM 点播路径至此
+        // r36：Apple Music 整首播放不再设订阅门槛——r35 的
+        // readyForFullPlayback（本机 requestCapabilities 回 false 即定论、
+        // 服务端兜底还要求 user token 在盘上）在未签名 IPA 上把有订阅的
+        // 用户锁死在试听（根因见 AppleMusicAuth.verifySubscription 注释）。
+        // 新规则：applemusic + store id 非空就直接用 applicationMusicPlayer
+        // 试播整首，整首还是试听由系统按该设备的订阅自己决定（prepareToPlay
+        // 成功不等于整首，见 startAppleMusicTrack 与 onProgress 的试听疑似
+        // 记录）；只有真正起播失败（startAppleMusicTrack 回 false）时才回落
+        // 到现有 resolveURL → AVPlayer 试听流程，绝不崩、绝不卡在 isLoading。
+        // r30（D2 限流）：AM 分支只在 Apple Music 平台才进；停 AM 引擎也只在
+        // 上一首真走 AM 引擎时（usingAppleMusicPlayer）才调。非 AM 点播路径至此
         // 与 r28 一字相同，全程不碰 MediaPlayer。
         if track.platform == "applemusic",
-           await AppleMusicAuth.shared.readyForFullPlayback(track: track) {
+           !AppleMusicAuth.storeID(for: track).isEmpty {
             if await startAppleMusicTrack(track: track, gen: gen) { return }
             DiagLog.shared.recordPlaybackStep("am fulltrack fallback to preview source=\(track.platform) id=\(track.id) gen=\(gen)")
         }
@@ -1021,6 +1028,7 @@ final class PlaybackStore: ObservableObject {
         activateSessionOnce()
         startedTrackId = track.id
         didRecordFirstTimeUpdate = false
+        didCheckAMPreview = false
         isLoading = false
         isPlaying = true
         DiagLog.shared.recordPlaybackStep("am player started source=\(track.platform) id=\(track.id) gen=\(gen)")
@@ -1044,6 +1052,18 @@ final class PlaybackStore: ObservableObject {
                 }
                 self.progress = time
                 if dur.isFinite, dur > 0 { self.duration = dur }
+                // r36：试听疑似记录（只记诊断，不拦播放、不改状态）：
+                // 系统播放器自己按设备订阅决定整首还是 30 秒试听，
+                // play() 回 true 只代表 prepareToPlay 成功。第一次拿到
+                // 系统报的时长时，若曲目本身应有 60 秒以上、系统却只给
+                // ≤35 秒，大概率是系统只放了试听，记一条进 DiagLog 供
+                // 真机诊断；分不清（时长未知 / 短歌）时不记、不编结论。
+                if !self.didCheckAMPreview, dur.isFinite, dur > 0 {
+                    self.didCheckAMPreview = true
+                    if let expected = self.currentTrack?.durationSeconds, expected > 60, dur <= 35 {
+                        DiagLog.shared.recordPlaybackStep("am preview-only suspected systemDuration=\(Int(dur)) expected=\(Int(expected)) id=\(self.currentTrack?.id ?? "-")")
+                    }
+                }
                 let idx = LyricsParser.currentLineIndex(lines: self.lyrics, atMs: Int(time * 1000))
                 if idx != self.currentLyricIndex { self.currentLyricIndex = idx }
             }
@@ -1068,6 +1088,7 @@ final class PlaybackStore: ObservableObject {
                 self.isLiked = self.likedIds.contains(Self.likeKey(for: track))
                 self.startedTrackId = track.id
                 self.didRecordFirstTimeUpdate = false
+                self.didCheckAMPreview = false
                 // r31：AM 队列内自动切歌也是换歌——单曲覆盖清掉，回默认档；
                 // AM 全曲不填实际档位（播放器不回），原文标签与降级提示也清掉。
                 self.trackQualityOverride = nil

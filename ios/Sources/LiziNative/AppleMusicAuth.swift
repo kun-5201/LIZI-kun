@@ -45,6 +45,22 @@ import StoreKit
 /// → .musicCatalogPlayback 是本机能不能播整首的权威答案（本机判断，不走
 /// 服务器、不耗 token）；查不到（出错）时才走后端 status 的 vip 兜底。
 /// 起播准入不再硬要 user token（本机能力确认有订阅时，token 丢了也能播整首）。
+/// r36（用户 2026-11-21 20:55 报“有订阅仍只能播试听”，r34 修过一次没生效）：
+/// r34 的门本身就是 bug，已整条拆掉——播放路径不再调任何订阅校验
+/// （readyForFullPlayback 已删；PlaybackStore.playCurrent 只看平台 +
+/// store id 非空，直接走 applicationMusicPlayer 试播整首，整首还是试听由
+/// 系统按设备订阅自己决定；起播失败才回落 30 秒试听链）。订阅校验
+/// （hasCatalogPlayback / verifySubscription）只留作登录页 / 设置里的
+/// 订阅行显示。verifySubscription 的 D 分支假阴性也修了：本机能力回
+/// false 不再当定论（未签名 IPA 上 requestCapabilities 可能回空能力集），
+/// 只有 true 才定论，false 继续走服务端再确认；false 的含义是“未确认”，
+/// 不是“无订阅”。仍有两条假阴性链 VM 验不了（真机待确认）：① 服务端兜底
+/// 要求 user token 在盘上，未签名 IPA 重装清 UserDefaults 即丢；
+/// ② 服务端 verifyUserToken 走 /v1/me/library/songs，网页 token 在该端点
+/// 上从没验过（r33 只验过 catalog 端点 200），401 即判 vip=false。
+/// 另：play() 回 true 只代表 prepareToPlay 成功，不代表系统放的是整首；
+/// 系统只放 30 秒试听时，PlaybackStore 的 onProgress 用系统报的时长
+/// （应 >60 秒的歌只报 ≤35 秒）记一条 "am preview-only suspected" 诊断。
 ///
 /// VM 上没有 Apple ID、没有订阅、没有真机：登录与整首播放的真机验证只能
 /// 由用户在手机上做（见 verification/r29-task1.cjs 末尾的真机清单）。
@@ -60,8 +76,8 @@ final class AppleMusicAuth {
     static let webTokenKey = "lizi.applemusic.webtoken"
     static let webTokenExpKey = "lizi.applemusic.webtoken.exp"
 
-    /// 订阅校验缓存（内存态；重启后失效，下次播放前 `readyForFullPlayback`
-    /// 会重新验——UserDefaults 里的 user token 还在，不用重新登录）。
+    /// 订阅校验缓存（内存态；重启后失效，r36 起只供登录页 / 设置里的订阅行
+    /// 显示时复用，不再参与播放决策）。
     private(set) var subscriptionValid = false
     private var subscriptionVerifiedAt: Date = .distantPast
     private static let subscriptionCacheTTL: TimeInterval = 300
@@ -256,18 +272,21 @@ final class AppleMusicAuth {
         DiagLog.shared.recordPlaybackStep("am signin ok method=\(method) subscriptionValid=\(sub)")
         return SignInResult(success: true, subscriptionValid: sub, method: method,
                             message: sub ? "Apple ID 登录成功，订阅有效，可整首播放"
-                                         : "Apple ID 登录成功，但未验证到有效订阅（整首播放仍不可用，请确认该 Apple ID 有 Apple Music 订阅）")
+                                         : "Apple ID 登录成功，但订阅未确认（播放不受影响：点歌会直接试播整首，系统按该 Apple ID 的订阅决定整首还是试听）")
     }
 
     // MARK: - 订阅校验
 
-    /// 本机能不能播 Apple Music 整首目录（r34）：StoreKit 能力查询，本机判断。
-    /// requestCapabilities → capabilities 含 .musicCatalogPlayback = 该设备
-    /// 的 Apple ID 有订阅、可播目录。这是 applicationMusicPlayer 能不能出声
-    /// 的权威答案——不依赖服务端 /v1/me/library/songs（网页 token 在 library
-    /// 端点上从没验过；r33 只验过 catalog 端点 200）。本地 IPC 调用，无网络、
-    /// 不耗 token、不弹框；出错回 nil（不定论），调用方走服务端兜底。
-    /// 300 秒内复用缓存（与订阅缓存同 TTL；错误结果不缓存，下次重查）。
+    /// 本机能不能播 Apple Music 整首目录（r34 建，r36 改语义）：StoreKit
+    /// 能力查询，本机判断。requestCapabilities → capabilities 含
+    /// .musicCatalogPlayback = 该设备的 Apple ID 有订阅、可播目录。
+    /// r36 更正：它不是“权威答案”——未签名 IPA 上它可能回空能力集
+    /// （false），r35 把这个 false 当定论就是本轮根因。所以只有 true
+    /// 才是定论；false 与出错（nil）一样是不定论，调用方必须继续走
+    /// 服务端再确认（见 verifySubscription），绝不许拿 false 直接判
+    /// “无订阅”。本地 IPC 调用，无网络、不耗 token、不弹框。
+    /// 300 秒内复用缓存（与订阅缓存同 TTL；错误结果不缓存，下次重查；
+    /// 缓存的 false 只是“上次查的结果”，不是定论）。
     func hasCatalogPlayback() async -> Bool? {
         if let cached = catalogPlaybackCapable,
            Date().timeIntervalSince(catalogPlaybackCheckedAt) < Self.subscriptionCacheTTL {
@@ -292,17 +311,27 @@ final class AppleMusicAuth {
         return result
     }
 
-    /// 验订阅（r34：本机能力优先，服务端兜底；300 秒内复用缓存）。
-    /// 先查本机能力：能播目录就直接算订阅有效（系统播放器认的是设备订阅，
-    /// 不是我们存的 user token；token 丢了——比如重装——也不该把有订阅的
-    /// 用户挡在试听外）。本机能力查不到（出错）时才走老路：调后端
-    /// /api/applemusic/status 读 vip（没 user token 直接回 false，不发请求）。
+    /// 验订阅（r36：只作显示用，不作播放门槛；播放路径已不再调它）。
+    /// 根因（r35 的 bug，用户 2026-11-21 20:55 报“有订阅仍只能播试听”）：
+    /// 旧版 `if let capable = await hasCatalogPlayback() { return capable }`
+    /// 把本机能力回的 false 当成定论直接返回——requestCapabilities 在
+    /// 未签名 IPA 上回空能力集（false，不是 nil）时，服务端兜底根本不跑，
+    /// 一次假阴性就把有订阅的用户锁死在试听；false 还会被缓存 300 秒。
+    /// 新版：只有本机能力明确 true 才是定论；false / 查不到都继续走服务端
+    /// 再确认一次（后端 /api/applemusic/status 读 vip）。返回值 false 的
+    /// 含义是“未确认有订阅”，不是“确认无订阅”——调用方文案必须写“未确认”，
+    /// 不许写成“无订阅 / 播放不可用”。
+    /// 仍有两条已知的假阴性（VM 验不了，真机待确认，见文件头 r36 段）：
+    /// 服务端兜底要求 user token 在盘上（重装清 UserDefaults 即丢）；
+    /// 服务端 verifyUserToken 走 /v1/me/library/songs，网页 token 在该端点
+    /// 上从没验过（r33 只验过 catalog 端点 200），401 即判 vip=false。
     func verifySubscription() async -> Bool {
-        if let capable = await hasCatalogPlayback() {
-            subscriptionValid = capable
+        if let capable = await hasCatalogPlayback(), capable {
+            subscriptionValid = true
             subscriptionVerifiedAt = Date()
-            return capable
+            return true
         }
+        // 本机能力 false 或查不到：不下定论，走服务端再确认一次。
         guard !userToken.isEmpty else { return false }
         if Date().timeIntervalSince(subscriptionVerifiedAt) < Self.subscriptionCacheTTL {
             return subscriptionValid
@@ -313,17 +342,6 @@ final class AppleMusicAuth {
         subscriptionValid = (d["vip"] as? Bool) ?? false
         subscriptionVerifiedAt = Date()
         return subscriptionValid
-    }
-
-    /// 整首播放准入（PlaybackStore.playCurrent 起播前调）：applemusic +
-    /// store id 非空 + 订阅有效（verifySubscription：本机能力优先，服务端兜底）。
-    /// r34：登录态不再是硬门槛——本机能力确认有订阅时，没有 user token
-    /// 也能播整首（系统播放器认设备订阅；token 丢了也不该挡在试听外）。
-    /// 任一条件不满足回 false，调用方走现有 30 秒试听链，行为与现在一致。
-    func readyForFullPlayback(track: Track) async -> Bool {
-        guard track.platform == "applemusic" else { return false }
-        guard !Self.storeID(for: track).isEmpty else { return false }
-        return await verifySubscription()
     }
 
     // MARK: - 登出

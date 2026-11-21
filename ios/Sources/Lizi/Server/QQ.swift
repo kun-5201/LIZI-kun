@@ -3406,7 +3406,7 @@ extension QQService {
 
     /// 一页 GetDetail：回（榜名，totalNum，song 行）。
     /// musicu 返回的 data 里还有一层 data（req_0.data.data），别认错层。
-    private func rankDetailPage(topId: Int, offset: Int, period: String) async throws -> (String, Int, [[String: Any]]) {
+    private func rankDetailPage(topId: Int, offset: Int, period: String) async throws -> (title: String, totalNum: Int, songs: [[String: Any]]) {
         let d = try await musicuAnon(module: "musicToplist.ToplistInfoServer",
                                      method: "GetDetail",
                                      param: ["topId": topId, "offset": offset, "num": 100, "period": period])

@@ -112,7 +112,13 @@ final class LiveActivityCoordinator: ObservableObject {
         if let activity = currentActivity {
             lastPushedState = state
             lastUpdateAt = now
-            Task { await activity.update(state, staleDate: Date().addingTimeInterval(900)) }
+            Task {
+                // r35-11 修正：Activity.update 没有 (state, staleDate:) 这个重载，
+                // staleDate 要包进 ActivityContent（壳版 LiveActivityManager.swift:151
+                // 同款写法，run 44901749397 编译错的根因）。
+                let content = ActivityContent(state: state, staleDate: Date().addingTimeInterval(900))
+                await activity.update(content)
+            }
         } else {
             lastPushedState = state
             lastUpdateAt = now

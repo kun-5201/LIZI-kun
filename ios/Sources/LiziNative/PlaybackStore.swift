@@ -1276,8 +1276,8 @@ final class PlaybackStore: ObservableObject {
             DiagLog.shared.recordPlaybackStep("resolve local-download ok source=\(track.platform) id=\(track.id) via=local quality=\(record.quality)")
             return NativeBridge.SongURLResult(url: record.fileURL,
                                               actualQuality: record.actualQuality,
-                                              servedLabel: record.qualityLabel,
-                                              via: "local")
+                                              via: "local",
+                                              servedLabel: record.qualityLabel)
         }
         let requested = forceQuality ?? quality ?? preferredQuality
         let mode = SettingsStore.storedPlaybackSourceMode()

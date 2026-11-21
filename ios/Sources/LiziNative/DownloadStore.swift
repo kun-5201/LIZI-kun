@@ -333,6 +333,10 @@ final class DownloadStore: NSObject, ObservableObject {
     /// 删除一条已下载记录（管理页左滑删除）：在飞任务取消、文件删除、
     /// 记录删除、清单回写。r27 旧下载不进管理页，不会走到这里；
     /// 万一传进来旧记录，只清旧映射、不动本地音乐的文件。
+    /// r31 第三推构建修：run 44844080035 编译失败——`cancel(key:)` 是
+    /// @MainActor，同步非隔离的 `delete` 调它报错；唯一调用方是 SwiftUI
+    /// 管理页（已在主线程），直接把 `delete` 也标 @MainActor。
+    @MainActor
     func delete(_ record: Record) {
         cancel(key: record.id)
         if record.legacyFileURL != nil {

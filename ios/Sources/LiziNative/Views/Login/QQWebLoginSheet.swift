@@ -172,7 +172,7 @@ struct ProviderWebLoginSheet: View {
             if merged[c.name] == nil { keys.append(c.name) }
             merged[c.name] = c.value
         }
-        return keys.map { "\($0)=\($0.value)" }.joined(separator: "; ")
+        return keys.map { "\($0)=\(merged[$0] ?? "")" }.joined(separator: "; ")
     }
 }
 

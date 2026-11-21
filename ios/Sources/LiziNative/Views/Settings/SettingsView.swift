@@ -620,14 +620,22 @@ struct SettingsView: View {
         }
     }
 
-    /// 相册选视频（PhotosPicker，matching: .videos）：`loadFileRepresentation`
+    /// 相册选视频（PhotosPicker，matching: .videos）：`NSItemProvider.loadFileRepresentation`
     /// 拿到的临时文件原样交 BackgroundStore.saveVideoFile 拷进沙盒
     /// （不转码）；拷失败写明原因，不静默、不弹 Notice。
+    /// r31 第三推构建修：run 44844080035 编译失败——`PhotosPickerItem` 没有
+    /// `loadFileRepresentation`（那是 NSItemProvider 的方法），改走
+    /// `item.itemProvider` + continuation 包回调，行为不变（仍拿临时文件 URL）。
     private func handleVideoPick(_ item: PhotosPickerItem?) async {
         guard let item else { return }
         do {
-            guard let url = try await item.loadFileRepresentation(
-                forTypeIdentifier: UTType.movie.identifier) else {
+            let url: URL? = try await withCheckedThrowingContinuation { cont in
+                _ = item.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { url, error in
+                    if let error { cont.resume(throwing: error) }
+                    else { cont.resume(returning: url) }
+                }
+            }
+            guard let url else {
                 backgroundStatus = "选视频失败：读不到这个视频。"
                 return
             }

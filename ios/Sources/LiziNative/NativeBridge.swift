@@ -211,8 +211,8 @@ let streamType = (item["type"] as? String) ?? ""
 let neteaseClaimed = AudioQuality.canon(platform: "netease", served: served)
 return SongURLResult(url: streamURL,
 actualQuality: AudioQuality.verified(claimed: neteaseClaimed, url: streamURL, bitrate: br, format: streamType),
-servedLabel: neteaseClaimed == nil && !served.isEmpty ? served : nil,
-isTrial: isTrial, reason: "", via: "platform", bitrate: br)
+isTrial: isTrial, reason: "", via: "platform", bitrate: br,
+servedLabel: neteaseClaimed == nil && !served.isEmpty ? served : nil)
 case "qq":
 let d = await call(path: "/api/qq/song/url",
 query: ["mid": key, "quality": param])
@@ -278,9 +278,9 @@ let streamFormat = (d["format"] as? String) ?? ""
 let sidecarClaimed = AudioQuality.canon(platform: platform, served: served)
 return SongURLResult(url: streamURL,
 actualQuality: AudioQuality.verified(claimed: sidecarClaimed, url: streamURL, format: streamFormat.isEmpty ? nil : streamFormat),
-servedLabel: sidecarClaimed == nil && !served.isEmpty ? served : nil,
 isTrial: preview, isPreview: preview,
-reason: "", via: "platform", clipStartMs: clipStartMs)
+reason: "", via: "platform", clipStartMs: clipStartMs,
+servedLabel: sidecarClaimed == nil && !served.isEmpty ? served : nil)
 }
 
 // MARK: - 取链：个人云盘（网易「我的云盘」+ 酷狗「我的云盘」）
@@ -579,8 +579,8 @@ let streamURL = Upstream.url(from: urlString).map { Upstream.upgradedAudioURL($0
 let lxClaimed = AudioQuality.canon(platform: "lx", served: served)
 return SongURLResult(url: streamURL,
 actualQuality: AudioQuality.verified(claimed: lxClaimed, url: streamURL),
-servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil,
-reason: "", via: "lx")
+reason: "", via: "lx",
+servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
 }
 
 // MARK: - 会员态（r31 已删：R1/R2）

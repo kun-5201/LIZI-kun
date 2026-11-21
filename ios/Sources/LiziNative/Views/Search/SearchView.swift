@@ -452,6 +452,9 @@ struct SearchView: View {
 
     /// 点行播放：同队列同位置（当前在播的同一首）点则 toggle 播放/暂停；
     /// 否则把整列设为队列并从该位置开始播。
+    /// r35-3：顺手给这次搜索立歌单名「搜索：\(query)」（单平台模式传
+    /// viewModel.tracks 全列，分组模式传该平台的 group.tracks——传什么
+    /// list，setQueue 就立什么 list，别另拼；标题只取当前搜索词，不持久化）。
     private func trackRow(_ track: Track, in list: [Track]) -> some View {
         let isCurrent = playback.currentTrack?.id == track.id
             && playback.currentTrack?.platform == track.platform
@@ -465,7 +468,9 @@ struct SearchView: View {
             } else if let index = list.firstIndex(where: {
                 $0.id == track.id && $0.platform == track.platform
             }) {
-                playback.setQueue(list, startAt: index)
+                let keyword = viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines)
+                playback.setQueue(list, startAt: index,
+                                  title: keyword.isEmpty ? nil : "搜索：\(keyword)")
             }
         }
     }

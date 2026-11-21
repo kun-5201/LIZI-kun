@@ -211,6 +211,36 @@ import UIKit
 /// 下滑停止点（用户 10:18 截图：滑到底面板顶贴在顶栏下、约 97pt）：
 /// homeBottomPad 公式 +8pt 越过量改 −2pt，最大滚动量把面板顶送到
 /// 顶栏下沿之下 2pt 即停，不再多滑出空白；横屏仍 50、不变。
+/// （r35-5 起这条作废，见下。）
+/// r35-4（用户 2026-11-21 18:42「修复这个下面卡片无法滑到顶部的问题」，
+/// 澄清是下面每日推荐那张卡片；18:43 补「要能把上面正在播放的卡片拖消失」）：
+/// 分界手柄往上拖，Hero 高一路收到 0（整张消失），面板顶到内容顶
+/// （顶栏下 gapTop + gapMid，竖屏 41pt、屏 y 136）；往下拖回来，Hero
+/// 再出来。松手停在哪就是哪，不回弹、不吸附；Hero 消失时正在播的歌不停
+/// （只收卡片，不动 PlaybackStore；播放钮在卡片里，卡片收起来就看不见，
+/// 播放在后台继续，点面板里别的入口还能回去）。
+/// 两处改动：① minHeroH 131pt 死下限删掉，改成 0——旧下限是按 Hero 内
+/// 边距 + 顶行 + 底行算出来的「卡片内容完整高」，拖到底 Hero 还剩 131pt，
+/// 面板顶永远到不了顶部，就是拦路的那块；② loadHeroFraction 接受存过的
+/// 0（double(forKey:) 缺键与存 0 都回 0.0，先拿 object(forKey:) 判有没有
+/// 存过，不然拖到 0、杀掉重进又变回默认 0.206）。Hero 高为 0 时
+/// HeroCardView 自身的 clipShape 把内容裁成 0 高、不溢出面板；
+/// 持久化照旧（松手写当前方向的 key，0 也写）。
+/// r35-5（用户 2026-11-21 18:44「还有这个下滑太长了」，「确保能滑动到
+/// 显示本地音乐就行」）：往下滑到底，本地音乐（标题 + 文件夹卡 +
+/// 导入按钮）完整显示就停，下面不再多出一大片空白。根因就是 r31 的
+/// homeBottomPad 重算：标准档补到 154pt，滑到底时导入钮下面正好多出
+/// 154pt 空白（导入钮在视口 y 551–595，视口 749）。修法：底边距固定
+/// 50 不再重算（量内容实高的 GeometryReader + onPreferenceChange +
+/// HomeContentHeightKey 一并删掉）；滑到底导入钮在视口 y 655–699，
+/// 下面只剩 50pt（16 净空 + 34 Home Indicator）。
+/// 两件是同一块底边距的两面：面板顶要贴顶栏下（约 97pt），底边距非补到
+/// 154 不可——不变性：需补的边距 = 视口 − 面板 − 24 − 本地音乐 − 2，
+/// 与 Hero 高无关（Hero 收小多少，need 与内容同减多少，154 一分不少；
+/// Hero 收到 0 也一样）。所以 97pt 那条线与「下面没空白」不能同时要：
+/// r35 起面板到顶的路只走分界手柄（Hero 拖到 0，面板顶到内容顶），
+/// 不再靠底边距撑滚动行程；r31/r33 的「最大滚动量把面板顶送到顶栏下」
+/// 与 −2pt 停止点随重算一起作废。驱动见 verification/r35.cjs §K/§L。
 struct HomeView: View {
     @EnvironmentObject var playback: PlaybackStore
     @EnvironmentObject var nav: AppNavigation
@@ -238,17 +268,21 @@ struct HomeView: View {
     private static let heroFractionPortraitKey = "lizi.native.home.heroFraction.portrait.r28"
     private static let heroFractionLandscapeKey = "lizi.native.home.heroFraction.landscape"
 
-    /// 读存值：读不到（double(forKey:) 缺键回 0）或非法（非有限、≤0、≥1）
+    /// 读存值：没存过（object(forKey:) 为 nil）或非法（非有限、<0、≥1）
     /// 回落默认——竖屏 0.206（r28：39.6s 视频 Hero 约 152pt，
     /// contentH 706 档 152/706 ≈ 0.215；r33：gapTop 46→14 后 contentH
     /// 738 档 152/738 ≈ 0.206，Hero 仍约 152pt；旧 0.5 已作废）、横屏 9/16
     /// （0.5625，与 r23 前的模板公式同值）。
+    /// r35-4：存过 0 就是 0（Hero 被拖到消失），不再当成「没存过」回落默认——
+    /// double(forKey:) 缺键与存 0 都回 0.0，分不清，所以先拿 object(forKey:)
+    /// 判有没有存过；0 是合法值（Hero 整张消失，面板顶到内容顶）。
     /// 读出后在 body 里再按当前 contentH 与上下限夹一次（见 minFrac / maxFrac）。
     private static func loadHeroFraction(landscape: Bool) -> CGFloat {
         let fallback: CGFloat = landscape ? 9.0 / 16.0 : 0.206
-        let raw = UserDefaults.standard.double(
-            forKey: landscape ? heroFractionLandscapeKey : heroFractionPortraitKey)
-        guard raw.isFinite, raw > 0, raw < 1 else { return fallback }
+        let key = landscape ? heroFractionLandscapeKey : heroFractionPortraitKey
+        guard UserDefaults.standard.object(forKey: key) != nil else { return fallback }
+        let raw = UserDefaults.standard.double(forKey: key)
+        guard raw.isFinite, raw >= 0, raw < 1 else { return fallback }
         return CGFloat(raw)
     }
 
@@ -260,20 +294,14 @@ struct HomeView: View {
     @State private var heroFractionLandscape: CGFloat = HomeView.loadHeroFraction(landscape: true)
     /// 正在拖分界手柄：外层 ScrollView `.scrollDisabled(dragging)` 停滚。
     @State private var dividerDragging = false
-    /// r31-landscape：首页底部留白（不是固定 50，见 body 里
-    /// `.onPreferenceChange(HomeContentHeightKey.self)` 的重算）：
-    /// 底数 50 = 16 净空 + 34 Home Indicator（r28 原值）；行程不够时
-    /// 在此基础上补——面板顶要滑到顶栏下，需要 gapTop + heroH + gapMid
-    /// 的偏移，内容不够高就补底边距凑行程（见根因注释，文件头 r31 节）。
+    /// r35-5：首页底部留白固定 50（16 净空 + 34 Home Indicator，r28 原值），
+    /// 不再重算——r31 的重算（量内容实高、行程不够就补底边距凑到「面板顶
+    /// +8pt / −2pt」）已删：补出来的那 104pt（标准档 154−50）就是往下滑
+    /// 到底时本地音乐下面的一大片空白；行程与空白是同一笔账（见文件头
+    /// r35 节的不变性：面板顶要贴顶栏下，底边距非补到 154 不可，与 Hero
+    /// 高无关），不能同时要。面板顶到顶部的路改走分界手柄（r35-4：Hero
+    /// 拖到 0，面板顶到内容顶），不再靠底边距撑行程。
     @State private var homeBottomPad: CGFloat = 50
-    /// r31-landscape：外层 ScrollView 内容实高（见 body 里
-    /// `.background(GeometryReader…preference…)` 的量取点）。
-    private struct HomeContentHeightKey: PreferenceKey {
-        static var defaultValue: CGFloat = 0
-        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-            value = nextValue()
-        }
-    }
     /// 本次拖动的起始 Hero 高（onChanged 第一次进来时记，松手清掉；
     /// translation 是从手势起点累计的，必须配一个固定的起点算 newHeroH）。
     @State private var dragStartHeroH: CGFloat?
@@ -321,23 +349,17 @@ struct HomeView: View {
             let tier = PlayerTokens.sizeTier(for: outer.size, topInset: outer.safeAreaInsets.top)
             // r24 上下限（数都从代码量出来，见各行注释；fraction 的合法夹取
             // 区间就是 [minHeroH, maxHeroH] 换算成的比例）：
-            // - minHeroH：Hero 内上下内边距 20+20（HeroCardView
-            //   `.padding(.vertical, 20)`）+ 顶行 30（锁钮 30×30 圆钮，
-            //   徽章 13pt 字行高约 16，取大者 30；无歌时顶行是空的，
-            //   按有歌的最坏情况算）+ 底行：歌名行高 ≈ titleSize×1.25
-            //   （PlayerTokens 文件头同款行高约定）+ 间距 8
-            //   （底行 VStack spacing 8）+ 副标题行高 ≈ 15×1.3 ≈ 20
-            //   （播放钮 ⌀40 小于底行高，不计）；顶行与底行之间的 Spacer
-            //   可压到 0，不计。r28 titleSize 26：
-            //   40+30+32.5+8+20 = 130.5→131（横竖屏同值）。
-            //   封面是铺满的底图、无固定高，不占下限。
+            // - minHeroH：r35-4 起为 0——分界手柄往上拖可以把 Hero 一路
+            //   收到 0（整张消失），面板顶到内容顶；往下拖回来，Hero 再出来。
+            //   旧 131pt 下限（Hero 内上下内边距 20+20 + 顶行 30 + 底行
+            //   歌名行高 titleSize×1.25 + 间距 8 + 副标题行高 20 =
+            //   130.5→131）已删：它是面板滑不到顶部的拦路石，拖到底 Hero
+            //   还剩 131pt，面板顶永远到不了顶部。Hero 高为 0 时
+            //   HeroCardView 自身的 clipShape 把内容裁成 0 高、不溢出；
+            //   只收卡片、不停播（播放钮在卡片里，收起来就看不见，
+            //   播放在后台继续）。
             let titleSize: CGFloat = 26
-            // r24 构建修（run 44646659508）：原来 `ceil(40 + 30 + titleSize * 1.25 + 8 + 17)`
-            // 一整串混着 Int 字面量 + Double 字面量 1.25，编译器报
-            // "unable to type-check this expression in reasonable time"。
-            // 拆成两步、每步只有一个 CGFloat 锚点，字面量跟着它推断。
-            let titleLineH: CGFloat = titleSize * 1.25
-            let minHeroH: CGFloat = ceil(40 + 30 + titleLineH + 8 + 20)
+            let minHeroH: CGFloat = 0
             // - 平面带一排封面卡宽（HomeCoverRingView 分档表：compact 180 /
             //   standard 190 / large 209，≈0.486vw，39.6s 视频量），minPanelH 按 tier 走。
     /// r24 构建修（run 44656645107）：`let flatCard` + `switch` 语句在
@@ -362,10 +384,10 @@ struct HomeView: View {
                 ? ceil(20 + 48 + 8 + ringPeek)
                 : 20 + 48 + 8 + flatCard
             // - maxHeroH = contentH − minPanelH。内容极矮时两条下限打架：
-            //   保 Hero 下限（歌名 + 播放钮必须完整），面板取剩下的
-            //   （仍有条 + 一角封面），不让区间倒挂（r28：667×375 档
-            //   contentH 265 ≥ minHeroH 131 + minPanelH 129 = 260，
-            //   已不打架；max() 只是兜底）。
+            //   r35-4：Hero 下限已是 0，不再保 Hero（歌名 + 播放钮可以整张
+            //   收起来），面板取剩下的，不让区间倒挂（r28：667×375 档
+            //   contentH 265 ≥ minHeroH 0 + minPanelH 129；
+            //   max() 只是兜底，内容再矮 Hero 也能收到 0）。
             let maxHeroH = max(minHeroH, contentH - minPanelH)
             let minFrac = minHeroH / contentH
             let maxFrac = maxHeroH / contentH
@@ -506,54 +528,20 @@ struct HomeView: View {
                             }
                         }
                         .padding(.top, 24)
-                        // r31-landscape：底部留白是 `homeBottomPad`（底数 50 =
-                        // 16 净空 + 34 Home Indicator，底部安全区已忽略，
-                        // 见 ignoresSafeArea；滑到底时本地音乐导入钮离
-                        // Home Indicator 还有 16pt 净空）。行程不够时
-                        // onPreferenceChange 会把它补大（见 ScrollView 后的
-                        // 重算），让面板顶能滑到顶栏下；行程够了就缩回 50。
+                        // r35-5：底部留白固定 `homeBottomPad` = 50（16 净空 +
+                        // 34 Home Indicator，底部安全区已忽略，见 ignoresSafeArea；
+                        // 滑到底时本地音乐导入钮离 Home Indicator 还有 16pt 净空，
+                        // 下面不再多出一大片空白）。r31 的重算已删（见文件头 r35 节）。
                         .padding(.bottom, homeBottomPad)
                     }
-                    // r31-landscape：量外层内容实高（供 homeBottomPad 重算；
-                    // background 里的 GeometryReader 量的是整个内容 VStack，
-                    // 含底边距，见 onPreferenceChange 里的公式）。
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear.preference(key: HomeContentHeightKey.self, value: geo.size.height)
-                        }
-                    )
                 }
                 // r24：拖分界手柄时外层整页 ScrollView 不许跟着滚
                 // （dividerDragging 只在竖向拖动里置 true，松手清掉；
                 // minOS 16.2 可用，本项目已有 LyricsPanelView 同款用法）。
                 .scrollDisabled(dividerDragging)
-                .onPreferenceChange(HomeContentHeightKey.self) { measured in
-                    // r31-landscape：底部留白重算（面板顶能不能滑到顶栏下，
-                    // 就看这一行）。measured 含当前 homeBottomPad；
-                    // 不含底边距的最大偏移 = measured − homeBottomPad − 视口高；
-                    // 面板顶到顶栏下需要 gapTop + heroH + gapMid 的偏移。
-                    // 差多少就把底边距补多少（−2pt：面板顶停在顶栏下沿之
-                    // 下 2pt、约 97pt，见 r33-home-hero-up；r31 的 +8pt
-                    // 越过量会让面板顶顶进顶栏下面 8pt，已撤掉）；行程够了
-                    // 就缩回 50。
-                    // 公式是幂等的：补完再算一次得出的还是同一个值，不震荡；
-                    // 内容变高（本地音乐展开/有歌了）或旋转后自动重算。
-                    // 数（390×844 竖屏标准档）：视口 749、面板顶 186.8、
-                    // 不含底边距的最大偏移 30.8 → 底边距 154.0（比 50 多补 104.0）；
-                    // 402×874：底边距 183.8；横屏 844×390：不含底边距的最大偏移
-                    // 已够（186.0，面板顶 203.5 − 2 = 201.5 < 236.0），
-                    // 底边距仍是 50。见 verification/r31-landscape.cjs §3。
-                    // r33：停止点从 r31 的 +8pt 越过量改成 −2pt（面板顶停在
-                    // 顶栏下沿之下 2pt、约 97pt，用户 10:18 截图位置）；底边距
-                    // 跟着少补 10pt（164.0→154.0、194.0→183.8），横屏仍 50。
-                    let viewportH = outer.size.height - topPad - topBarH
-                    let maxOffsetWithoutPad = measured - homeBottomPad - viewportH
-                    let need = gapTop + heroH + gapMid
-                    let target = max(50, need - maxOffsetWithoutPad - 2)
-                    if abs(target - homeBottomPad) > 0.5 {
-                        homeBottomPad = target
-                    }
-                }
+                // r35-5：r31 的底部留白重算已删（见文件头 r35 节）：底边距
+                // 固定 50，不再量内容实高补行程；面板顶到顶部的路改走
+                // 分界手柄（r35-4）。
                 // r31-imagebg：滚动区底色改透明——背景层在 GeometryReader
                 // 的 .background 里（HomeBackgroundView），滚动内容之上
                 // 不再盖一层纸色，图片/视频背景才能露出来；默认模式下
@@ -578,9 +566,8 @@ struct HomeView: View {
         // GeometryReader 原点 = 屏顶、size = 整屏（390×844 档 viewHeight
         // 从 781 变 874，Hero 高随之变，见驱动 2b；sizeTier 只看宽度，
         // 不受影响；"liziHome" 坐标系与环覆盖层同系，相对位置不变）。
-        // 底部留白由内容自己留（`homeBottomPad`，底数 50 = 16 净空 +
-        // 34 Home Indicator，行程不够时自动补，见 r31-landscape），
-        // 不靠系统安全区。
+        // 底部留白由内容自己留（`homeBottomPad` 固定 50 = 16 净空 +
+        // 34 Home Indicator，r35-5 起不再重算补行程），不靠系统安全区。
         .ignoresSafeArea(edges: [.top, .bottom])
         .task {
             // r26：首页启动只拉每日推荐。原来这里还刷一次登录态

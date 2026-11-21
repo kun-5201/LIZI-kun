@@ -49,6 +49,11 @@ final class PlaybackStore: ObservableObject {
     @Published private(set) var currentTrack: Track?
     /// 播放队列（当前曲目在其中；QueueItem 带 queueId，同一首歌可重复入队）。
     @Published private(set) var queue: [QueueItem] = []
+    /// 当前队列的标题（r35-3：搜索点歌立的「搜索：\(query)」歌单名，只在
+    /// 内存里——不写 UserDefaults、不进「我的歌单」，队列面板有标题时把这份
+    /// 队列画成卡片跑马带；其他来源点歌不传标题，标题为 nil，面板保持原来的
+    /// 列表。setQueue 整队替换时跟着换；clearQueue / 队列删空 / 单首替换时清掉。）
+    @Published private(set) var queueTitle: String?
     /// 「下一首播放」待播队列（r31）：按点的顺序存待插队项的 queueId。
     /// 只记 queueId 不记下标——删行/切歌后下标会变，queueId 全程稳定；
     /// 队列面板按它给插进去的歌打「下一首」徽章。
@@ -351,9 +356,13 @@ final class PlaybackStore: ObservableObject {
 
     /// 整队替换并从指定下标开始播（搜索结果 / 歌单点歌用）。
     /// 整队换掉：旧的「下一首」待播全部作废（那些 queueId 已不在新队列里）。
-    func setQueue(_ tracks: [Track], startAt index: Int) {
+    /// r35-3：可选标题（默认 nil，其他调用点不动）：搜完点歌传
+    /// 「搜索：\(query)」，队列就立为这次搜索的歌单列表；别的来源不传，
+    /// 标题跟着清掉（搜新词点新歌时 setQueue 整队替换，标题也换成新的）。
+    func setQueue(_ tracks: [Track], startAt index: Int, title: String? = nil) {
         playNextQueueIds = []
         queue = tracks.map { QueueItem(track: $0) }
+        queueTitle = queue.isEmpty ? nil : title
         currentIndex = queue.indices.contains(index) ? index : (queue.isEmpty ? -1 : 0)
         if queue.indices.contains(currentIndex) {
             play(queueItem: queue[currentIndex])
@@ -378,6 +387,7 @@ final class PlaybackStore: ObservableObject {
         let item = QueueItem(track: track)
         guard !queue.isEmpty, currentIndex >= 0, queue.indices.contains(currentIndex) else {
             playNextQueueIds = []
+            queueTitle = nil
             queue.insert(item, at: 0)
             currentIndex = 0
             DiagLog.shared.recordPlaybackStep("playnext insert empty-queue play-now source=\(track.platform) id=\(track.id)")
@@ -421,6 +431,7 @@ final class PlaybackStore: ObservableObject {
         playNextQueueIds.removeAll { $0 == removedId }
         queue.remove(at: index)
         if queue.isEmpty {
+            queueTitle = nil
             stop()
             return
         }
@@ -433,10 +444,12 @@ final class PlaybackStore: ObservableObject {
         }
     }
 
-    /// 清空队列并停止（待播的下一首一并清掉）。
+    /// 清空队列并停止（待播的下一首一并清掉；r35-3：队列标题跟着清掉，
+    /// 搜索歌单列表随之消失）。
     func clearQueue() {
         stop()
         queue = []
+        queueTitle = nil
         currentIndex = -1
         playNextQueueIds = []
     }
@@ -479,8 +492,10 @@ final class PlaybackStore: ObservableObject {
             // 这首若是待播的下一首项，起播即摘掉待播标记（它已经是当前首了）。
             playNextQueueIds.removeAll { $0 == queue[idx].queueId }
         } else {
-            // 队列被单首替换：旧的待播全部作废。
+            // 队列被单首替换：旧的待播全部作废，r35-3：队列标题也清掉
+            //（这首不再是那份搜索歌单列表里的一首）。
             playNextQueueIds = []
+            queueTitle = nil
             queue = [QueueItem(track: track)]
             currentIndex = 0
         }

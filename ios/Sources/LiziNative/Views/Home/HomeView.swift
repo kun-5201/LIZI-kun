@@ -942,9 +942,9 @@ struct HomeView: View {
                     marqueeSpeed: viewModel.marqSpeedPxPerSecond,
                     tier: tier,
                     panelIsDark: isDark,
-                    screenWidth: screenWidth, // r39-5：第 5 件（成员初始化器顺序：panelIsDark 在 screenWidth 前）
                     coverOnly: true,
-                    hideEntryHint: true
+                    hideEntryHint: true,
+                    screenWidth: screenWidth // r39-5：第 5 件（成员初始化器顺序：screenWidth 是末位存储属性，调用点必须放最后）
                 )
             } else if rankDetailLoading {
                 HStack {
@@ -1157,9 +1157,9 @@ struct HomeView: View {
             marqueeSpeed: viewModel.marqSpeedPxPerSecond,
             tier: tier,
             panelIsDark: panelTone.isDark,
-            screenWidth: screenWidth, // r39-5：第 5 件（成员初始化器顺序：panelIsDark 在 screenWidth 前）
             queueTitle: nil, // r38-1：每日推荐不带队列标题
-            coverOnly: true
+            coverOnly: true,
+            screenWidth: screenWidth // r39-5：第 5 件（成员初始化器顺序：screenWidth 是末位存储属性，调用点必须放最后）
         )
     }
 
@@ -1183,9 +1183,9 @@ struct HomeView: View {
             marqueeSpeed: viewModel.marqSpeedPxPerSecond,
             tier: tier,
             panelIsDark: panelTone.isDark,
-            screenWidth: screenWidth, // r39-5：第 5 件（成员初始化器顺序：panelIsDark 在 screenWidth 前）
             queueTitle: playback.queueTitle,
-            coverOnly: true
+            coverOnly: true,
+            screenWidth: screenWidth // r39-5：第 5 件（成员初始化器顺序：screenWidth 是末位存储属性，调用点必须放最后）
         )
     }
 

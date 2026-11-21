@@ -103,8 +103,8 @@ struct PlaylistDetailView: View {
                         marqueeSpeed: 24,
                         tier: PlayerTokens.sizeTier(for: UIScreen.main.bounds.size, topInset: 0),
                         panelIsDark: false,
-                        screenWidth: geo.size.width, // r39-5：第 5 件——实测宽，不回落旧分档（成员初始化器顺序：panelIsDark 在 screenWidth 前）
-                        hideEntryHint: true
+                        hideEntryHint: true,
+                        screenWidth: geo.size.width // r39-5：第 5 件——实测宽，不回落旧分档（成员初始化器顺序：screenWidth 是末位存储属性，调用点必须放最后）
                     )
                     .padding(.horizontal, 16)
                     .padding(.top, 12)

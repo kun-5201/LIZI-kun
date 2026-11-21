@@ -2191,22 +2191,12 @@ private struct FlatRingCard: View {
     let isDark: Bool
     /// r37-1：只放封面（默认 false；歌单详情页 / 榜单详情页那路不传，
     /// 卡片仍带歌名/歌手）。
-    let coverOnly: Bool = false
+    /// r37-9fix：必须是 `var` 不能是 `let`——`let` 带默认值时，默认值就算
+    /// 一次初始化，成员初始化器不含它、显式 init 里再赋值会报
+    /// immutable value may only be initialized once（run 44928276799）；
+    /// `var` 带默认值才能进成员初始化器、调用方才能传 `coverOnly:`。
+    var coverOnly: Bool = false
     let onTap: () -> Void
-
-    /// r37-9fix：显式初始化器——编译器给出的成员初始化器是
-    /// `init(track:width:isDark:onTap:)`（run 44927178729），带默认值的
-    /// `coverOnly` 没进成员初始化器，调用方传 `coverOnly:` 会报
-    /// extra arguments；这里显式声明（coverOnly 带默认值），
-    /// 旧调用 `(track:width:isDark:onTap:)` 与新调用
-    /// `(track:width:isDark:coverOnly:onTap:)` 都能走。
-    init(track: Track, width: CGFloat, isDark: Bool, coverOnly: Bool = false, onTap: @escaping () -> Void) {
-        self.track = track
-        self.width = width
-        self.isDark = isDark
-        self.coverOnly = coverOnly
-        self.onTap = onTap
-    }
 
     /// r37-1 追加：这张卡的封面图是否已显示（`CoverImageLoader` 进程内
     /// 缓存观测；false = 占位底 + 歌名占位，true = 只剩封面）。

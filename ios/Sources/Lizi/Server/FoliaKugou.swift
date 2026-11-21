@@ -1025,6 +1025,10 @@ actor FoliaKugouService {
                 return try await topSongs(req)
             case "top/playlists":
                 return try await topPlaylists(req)
+            case "rank/list":
+                return await rankList()
+            case "rank/song":
+                return await rankTracks(req)
             case "personal/fm":
                 return try await personalFm()
             case "recommend/songs":
@@ -1677,6 +1681,91 @@ actor FoliaKugouService {
         let items = Self.firstListArray(json, keys: ["special_db", "list", "lists"])
         let playlists = items.compactMap { Self.kugouCollection($0, type: "playlist") }
         return .json(200, ["code": 200, "source": "kugou", "playlists": Array(playlists.prefix(limit))])
+    }
+
+    /// 排行榜目录（r35-10：mobilecdnbj rank/list，Moumusic kg/leaderboard.js
+    /// getBoardsData 同款；VM 实测 2026-11-21：https 不通（000）、
+    /// gateway.kugou.com 转发 502，只有 http 通（200，56 个榜、1 个
+    /// isvol != 1）。所以这里走 http://mobilecdnbj.kugou.com，
+    /// ATS 例外见 project.yml LiziNative 的 NSExceptionDomains
+    /// （只放 mobilecdnbj.kugou.com 这一个 host，不放任意加载）。
+    /// 回 { code, source, playlists: [{ id: rankid, name: rankname,
+    /// cover: album_img_9 ?? banner_9（{size} 换 1024、http 升 https，
+    /// 走 coverOf）}] }；只收 isvol == 1 的榜（Moumusic 同款过滤）。
+    private func rankList() async -> HttpResponse {
+        guard let url = URL(string: "http://mobilecdnbj.kugou.com/api/v5/rank/list?version=9108&plat=0&showtype=2&parentid=0&apiver=6&area_code=1&withsong=1") else {
+            return .json(200, ["code": 502, "source": "kugou", "playlists": [], "error": "酷狗榜单目录请求构造失败"])
+        }
+        do {
+            let (data, resp) = try await Upstream.fetch(url, headers: ["User-Agent": "Mozilla/5.0"], timeout: 20)
+            guard (200...299).contains(resp.statusCode),
+                  let json = Upstream.jsonObject(data) as? [String: Any],
+                  scNum(json["errcode"]) == 0 else {
+                return .json(200, ["code": 502, "source": "kugou", "playlists": [], "error": "酷狗榜单目录取不到"])
+            }
+            let info = scArr(Self.dataDict(json), "info")
+            let playlists = info.compactMap { item -> [String: Any]? in
+                guard scInt(item, "isvol") == 1 else { return nil }
+                let rankId = scStrOrNum(item, "rankid")
+                let name = scStr(item, "rankname")
+                guard !rankId.isEmpty, !name.isEmpty else { return nil }
+                let rawCover = scStr(item, "album_img_9").isEmpty ? scStr(item, "banner_9") : scStr(item, "album_img_9")
+                return ["id": rankId, "name": name, "cover": Self.coverOf(["sizable_cover": rawCover]),
+                        "source": "kugou"]
+            }
+            return .json(200, ["code": 200, "source": "kugou", "playlists": playlists])
+        } catch {
+            return .json(200, ["code": 502, "source": "kugou", "playlists": [], "error": "酷狗榜单目录取不到"])
+        }
+    }
+
+    /// 榜单曲目（r35-10：mobilecdnbj rank/song，Moumusic kg/leaderboard.js
+    /// getList 同款；VM 实测 2026-11-21：http 通，total 500（TOP500）。
+    /// 一页最多 100 首，翻页由 NativeBridge.playlistAllTracks 做到 total
+    /// 为止（最多 10 页）。回 { code, source, id, total, tracks }。
+    private func rankTracks(_ req: HttpRequest) async -> HttpResponse {
+        let rankId = req.string("id")
+        guard !rankId.isEmpty else { return .json(400, ["code": 400, "error": "id required"]) }
+        let page = max(1, req.int("page", 1))
+        let limit = scClamp(req.int("limit", 100), 1, 100)
+        guard let url = URL(string: "http://mobilecdnbj.kugou.com/api/v3/rank/song?version=9108&ranktype=1&plat=0&pagesize=\(limit)&area_code=1&page=\(page)&rankid=\(scURLEncode(rankId))&with_res_tag=0&show_portrait_mv=1") else {
+            return .json(200, ["code": 502, "source": "kugou", "id": rankId, "tracks": [], "total": 0, "error": "酷狗榜单请求构造失败"])
+        }
+        do {
+            let (data, resp) = try await Upstream.fetch(url, headers: ["User-Agent": "Mozilla/5.0"], timeout: 20)
+            guard (200...299).contains(resp.statusCode),
+                  let json = Upstream.jsonObject(data) as? [String: Any],
+                  scNum(json["errcode"]) == 0 else {
+                return .json(200, ["code": 502, "source": "kugou", "id": rankId, "tracks": [], "total": 0, "error": "酷狗榜单取不到"])
+            }
+            let d = Self.dataDict(json)
+            let tracks = scArr(d, "info").compactMap { Self.kugouRankTrack($0) }
+            return .json(200, ["code": 200, "source": "kugou", "id": rankId,
+                               "total": scInt(d, "total"), "tracks": tracks])
+        } catch {
+            return .json(200, ["code": 502, "source": "kugou", "id": rankId, "tracks": [], "total": 0, "error": "酷狗榜单取不到"])
+        }
+    }
+
+    /// 榜单曲目归一化：filename「歌手 - 歌名」拆歌手/歌名、320hash/sqhash
+    /// 映射音质 hash、album_sizable_cover 作封面——Moumusic
+    /// kg/leaderboard.js filterData 同款；其余字段走现成的 kugouTrack
+    ///（它已处理 filename 拆分与 hash；album_sizable_cover 与 remark
+    /// 先换成它认的键再调）。
+    private static func kugouRankTrack(_ raw: [String: Any]) -> [String: Any]? {
+        var shaped = raw
+        let cover = strField(raw, "album_sizable_cover")
+        if !cover.isEmpty { shaped["sizable_cover"] = cover }
+        let remark = strField(raw, "remark")
+        if !remark.isEmpty { shaped["album_name"] = remark }
+        guard var track = kugouTrack(shaped) else { return nil }
+        // 音质 hash 原样透传（取链按档位调 /v5/url 时用 base hash；
+        // 320/sq 档的 hash 留给以后按档位直取，不编）。
+        for key in ["320hash", "sqhash", "hash_high"] {
+            let v = strField(raw, key)
+            if !v.isEmpty { track[key] = v }
+        }
+        return track
     }
 
     /// 私人 FM（`module/personal_fm.js`）：POST /v2/personal_recommend，

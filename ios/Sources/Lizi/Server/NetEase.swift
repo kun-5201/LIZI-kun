@@ -199,6 +199,12 @@ final class NetEaseService {
         "personalized": Route(path: "/personalized/newsong", channel: "weapi"),
         "recommend/songs": Route(path: "/v1/discovery/recommend/songs", channel: "weapi"),
         "top/playlist": Route(path: "/personalized/playlist", channel: "weapi"),
+        // 排行榜目录（r35-10：Moumusic iOS officialToplists 同款 eapi /toplist，
+        // 匿名可调；VM 实测 2026-11-21：code 200、65 个榜，项有 id/name/
+        // coverImgUrl/trackCount。详情复用 /api/playlist/detail，榜单 id
+        // 即歌单 id；热歌榜只回 10 首预览时服务端 playlist/detail 已从
+        // trackIds 按组补齐，不用这里再补）。
+        "toplist": Route(path: "/toplist", channel: "eapi"),
         "artist/:id": Route(path: "/v1/artist/:id", channel: "weapi"),
         "artist/albums/:id": Route(path: "/artist/albums/:id", channel: "weapi"),
         "artist/songs": Route(path: "/v1/artist/songs", channel: "weapi"),
@@ -707,6 +713,17 @@ extension NetEaseService {
                         "tracks": int(p, "trackCount")]
             }
             return ["code": code, "more": (data["more"] as? Bool) ?? (data["hasMore"] as? Bool) ?? false, "playlists": lists]
+        case "toplist":
+            // 排行榜目录：eapi /toplist 回 { code, list: [{ id, name,
+            // coverImgUrl, trackCount, ... }] }（VM 实测 65 个榜）。
+            // 榜单 id 即歌单 id，详情走 /api/playlist/detail。
+            let lists = arr(data, "list").compactMap { p -> [String: Any]? in
+                guard p["id"] != nil, !str(p, "name").isEmpty else { return nil }
+                let cover = str(p, "coverImgUrl").isEmpty ? (str(p, "picUrl").isEmpty ? str(p, "pic") : str(p, "picUrl")) : str(p, "coverImgUrl")
+                return ["id": p["id"] as Any, "name": str(p, "name"), "cover": cover,
+                        "tracks": int(p, "trackCount")]
+            }
+            return ["code": code, "playlists": lists]
         case "song/wiki":
             let blocks = arr(dict(data, "data"), "blocks").isEmpty ? arr(data, "blocks") : arr(dict(data, "data"), "blocks")
             let basic = blocks.first { str($0, "code") == "SONG_PLAY_ABOUT_SONG_BASIC" } ?? [:]

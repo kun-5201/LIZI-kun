@@ -19,10 +19,17 @@ enum AppView: Hashable {
     case search
     case player
     /// 舞台页（P3-A）：formId 为空时用上次的形态（`StageCatalog.savedFormId()`）。
-    case stage(formId: String? = nil)
+    /// r35-7：openSettings 为真时进页即打开设置浮层（传统横屏「舞台控制」钮）；
+    /// 默认 false，进页不自动开浮层（旧行为一字不动）。
+    case stage(formId: String? = nil, openSettings: Bool = false)
     /// 歌单详情：platform 为平台 id；isRank 为真时酷我走榜单接口
     /// /api/kuwo/rank/tracks（见 NativeBridge.playlistDetail）。
-    case playlist(platform: String, id: String, isRank: Bool = false)
+    /// r35-10：title / coverURL 是排行榜块点卡时传的种子（详情页第一
+    /// 阶段先用它们显示头部，第二阶段回来保留真名真封面只补曲目，
+    /// 见 PlaylistDetailViewModel）；showRankNumbers 为真时行首显示
+    /// 排名数字（榜单详情页）。三个都是可选参数，旧调用点走默认值不动。
+    case playlist(platform: String, id: String, isRank: Bool = false,
+                  title: String? = nil, coverURL: URL? = nil, showRankNumbers: Bool = false)
     /// 歌手页（P2-B）。
     case artist(platform: String, id: String)
     /// 专辑页（P2-B）。

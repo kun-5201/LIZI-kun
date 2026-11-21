@@ -68,8 +68,12 @@ struct StageView: View {
 
     private let initialFormId: String?
 
-    init(initialFormId: String? = nil) {
+    /// r35-7：openSettings 为真时进页即打开设置浮层（传统横屏「舞台控制」钮
+    /// 直达 StageSettingsView，不新造面板；panelSpec 是异步取的，浮层在
+    /// spec 到达后才出现，与页内齿轮点开同一条路；默认 false，旧行为不动）。
+    init(initialFormId: String? = nil, openSettings: Bool = false) {
         self.initialFormId = initialFormId
+        _showSettings = State(initialValue: openSettings)
         _bridge = StateObject(wrappedValue: StageBridge(initialFormId: initialFormId))
     }
 

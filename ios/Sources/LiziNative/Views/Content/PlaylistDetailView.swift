@@ -13,9 +13,11 @@ import SwiftUI
 ///   NativeBridge.playlistDetail / playlistMeta 的注释）：
 ///   网易/QQ 的 detail 端点回全量（名/封面/曲数/曲目）；波点/酷狗/汽水
 ///   detail 只回名/封面/曲数、曲目另调 tracks 合并；酷我非榜单 tracks
-///   接口本身带名/封面/总数；只有酷我榜单是 tracks-only，标题为空时显示
-///   「〈平台名〉歌单」通用名（不是真实歌单名），封面用白色底 + 音符占位，
-///   曲目数显示已加载数；Apple Music tracks 回包带 name/cover（r25-B4：
+///   接口本身带名/封面/总数；酷我榜单是 tracks-only（r35-10 起排行榜块
+///   点卡时传目录卡片的榜单名/封面当种子，第一阶段先用种子显示头部，
+///   第二阶段回来保留真名真封面只补曲目；没种子的旧入口仍显示
+///   「〈平台名〉歌单」通用名，封面用白色底 + 音符占位，曲目数显示
+///   已加载数）；Apple Music tracks 回包带 name/cover（r25-B4：
 ///   服务端 playlistTracks 透 iTunes lookup 首条的歌单名/封面），显示真名真封面。
 /// - 标题与曲目同时为空 = 接口没有返回数据或请求失败（两种情况桥接层无法区分，
 ///   空态文案把两种可能都写清，不谎称是哪一种）。
@@ -24,17 +26,21 @@ struct PlaylistDetailView: View {
     let platform: String
     let id: String
     let isRank: Bool
+    /// 行首显示排名数字（r35-10 P0-3：排行榜块点卡进详情时为 true）。
+    let showRankNumbers: Bool
 
     @EnvironmentObject private var playback: PlaybackStore
     @StateObject private var viewModel: PlaylistDetailViewModel
     @Environment(\.horizontalSizeClass) private var sizeClass
 
-    init(platform: String, id: String, isRank: Bool = false) {
+    init(platform: String, id: String, isRank: Bool = false,
+         title: String? = nil, coverURL: URL? = nil, showRankNumbers: Bool = false) {
         self.platform = platform
         self.id = id
         self.isRank = isRank
+        self.showRankNumbers = showRankNumbers
         _viewModel = StateObject(wrappedValue: PlaylistDetailViewModel(
-            platform: platform, id: id, isRank: isRank))
+            platform: platform, id: id, isRank: isRank, title: title, coverURL: coverURL))
     }
 
     private var isCompact: Bool { sizeClass == .compact }
@@ -194,6 +200,7 @@ struct PlaylistDetailView: View {
 
     /// 点行播放：同队列同位置（当前在播的同一首）点则 toggle 播放/暂停；
     /// 否则把整队歌单设为队列并从该位置开始播。
+    @ViewBuilder
     private func trackRow(_ track: Track, in list: [Track], at index: Int) -> some View {
         let isCurrent = playback.currentTrack?.id == track.id
             && playback.currentTrack?.platform == track.platform
@@ -201,12 +208,30 @@ struct PlaylistDetailView: View {
             && playback.queue.indices.contains(playback.currentIndex)
             && playback.queue[playback.currentIndex].track.id == track.id
             && playback.queue[playback.currentIndex].track.platform == track.platform
-        return TrackRowView(track: track, isCurrent: isCurrent, isCompact: isCompact) {
+        let row = TrackRowView(track: track, isCurrent: isCurrent, isCompact: isCompact) {
             if isCurrent {
                 playback.togglePlay()
             } else {
                 playback.setQueue(list, startAt: index)
             }
+        }
+        // r35-10（P0-3）：榜单详情页行首显示排名数字（{index+1}，13pt，
+        // 前 3 名主题强调色；长名沿用 TrackRowView 单行省略）。数字列在
+        // Button 外面（只作标签，不可点）；TrackRowView 自带左右 16
+        // 内边距，这里只补左侧 16，数字列占 24 + 间距 8。
+        if showRankNumbers {
+            HStack(spacing: 8) {
+                Text("\(index + 1)")
+                    .font(SearchDesignTokens.font(SearchDesignTokens.size13,
+                                                  weight: index < 3 ? .semibold : .regular))
+                    .foregroundStyle(index < 3 ? SearchDesignTokens.accent : SearchDesignTokens.ink3)
+                    .frame(width: 24, alignment: .center)
+                    .monospacedDigit()
+                row
+            }
+            .padding(.leading, 16)
+        } else {
+            row
         }
     }
 
@@ -248,6 +273,9 @@ struct PlaylistDetailView: View {
 /// 有真名/真封面就先显示头部；第二阶段调 NativeBridge.playlistDetail
 /// （有 detail 的平台内部再合一次元信息 + tracks，见其注释；无 detail 的
 /// 平台 tracks-only），补全曲目。网易/QQ 的 detail 本身已回全量曲目，
+/// r35-10（P0-4）：排行榜块点卡时 init 传了目录卡片的榜单名/封面种子，
+/// load 起手先用种子显示头部（不等网络），第二阶段的 merge 保留它
+/// （full 没真名时留 shown），上游给了真名真封面时以上游为准。
 /// 第一阶段后直接结束，不再调第二阶段。
 /// `hasContent` = 标题或曲目任一非空；两者都空 = 无数据（空态写清两种可能）。
 @MainActor
@@ -255,16 +283,24 @@ final class PlaylistDetailViewModel: ObservableObject {
     let platform: String
     let id: String
     let isRank: Bool
+    /// 排行榜块点卡时传的页头种子（r35-10 P0-4）：目录卡片的榜单名/封面。
+    /// 第一阶段先用它显示头部，第二阶段回来保留真名真封面只补曲目
+    /// （下面的 merge 已守着：full 没真名时留 shown；full 有真名时以上游为准）。
+    let seedTitle: String?
+    let seedCoverURL: URL?
 
     @Published private(set) var playlist: Playlist?
     @Published private(set) var isLoading = true
 
     private var started = false
 
-    init(platform: String, id: String, isRank: Bool = false) {
+    init(platform: String, id: String, isRank: Bool = false,
+         title: String? = nil, coverURL: URL? = nil) {
         self.platform = platform
         self.id = id
         self.isRank = isRank
+        self.seedTitle = title
+        self.seedCoverURL = coverURL
     }
 
     var hasContent: Bool {
@@ -277,6 +313,14 @@ final class PlaylistDetailViewModel: ObservableObject {
         guard !started else { return }
         started = true
         isLoading = true
+        // r35-10（P0-4）：有页头种子时第一阶段先用种子显示头部（不等网络；
+        // 酷我榜单、QQ/酷狗榜单的 playlistMeta 本来就回空，种子是唯一
+        // 的第一阶段头部来源）。第二阶段的 merge 会保留它（full 没真名
+        // 时留 shown），上游给了真名真封面时以上游为准。
+        if let seed = seedTitle,
+           !seed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            playlist = Playlist(id: id, title: seed, coverURL: seedCoverURL, source: platform)
+        }
         // 第一阶段：元信息（名/封面/曲数）。无 detail 端点的平台（酷我/
         // Apple Music）这步为空，不编，直接等第二阶段。
         let meta = await NativeBridge.playlistMeta(platform: platform, id: id, isRank: isRank)

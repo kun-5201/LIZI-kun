@@ -34,28 +34,55 @@ struct DailyMarqueeView: View {
     // 仍可能抖动，本视图自 r21 起未挂载（备用），真要重新挂载应改 CADisplayLink。
     private let timer = Timer.publish(every: 1.0 / 120.0, on: .main, in: .common).autoconnect()
 
+    /// r35-9（P0-2）：spinner 延迟显示（套壳 250ms 保留旧内容同款）——
+    /// 加载开始先保留旧内容，250ms 后仍未回来才亮 spinner；250ms 内
+    /// 回来全程不闪。`.task(id: isLoading)` 管：isLoading 翻 true 时
+    /// 睡 250ms 再亮，翻 false 时任务取消重跑、直接灭。
+    @State private var showSpinner = false
+
     var body: some View {
         Group {
-            if isLoading {
-                HStack(spacing: 8) {
-                    ProgressView()
-                    Text("正在拉取每日推荐…")
-                        .font(.liziBody(size: LiziTokens.size13))
-                        .foregroundColor(LiziTokens.ink3)
+            if !tracks.isEmpty {
+                // 有旧内容时直接留旧内容，加载中也不切走（套壳同款）。
+                marqueeContent
+            } else if isLoading {
+                if showSpinner {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("正在拉取每日推荐…")
+                            .font(.liziBody(size: LiziTokens.size13))
+                            .foregroundColor(LiziTokens.ink3)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 195, alignment: .center)
+                } else {
+                    // 250ms 内还没回来：旧内容没有，也不亮 spinner，
+                    // 只留空白占位，不闪「暂无推荐内容」。
+                    Color.clear
+                        .frame(maxWidth: .infinity, minHeight: 195, alignment: .center)
                 }
-                .frame(maxWidth: .infinity, minHeight: 195, alignment: .center)
-            } else if tracks.isEmpty {
+            } else {
                 Text(emptyReason ?? "暂无推荐内容。")
                     .font(.liziBody(size: LiziTokens.size13))
                     .foregroundColor(LiziTokens.ink3)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity, minHeight: 195, alignment: .center)
                     .padding(.horizontal, 24)
-            } else {
-                marqueeContent
             }
         }
         .onReceive(timer) { _ in tick() }
+        .task(id: isLoading) {
+            if isLoading {
+                do {
+                    try await Task.sleep(nanoseconds: 250_000_000)
+                } catch {
+                    // 250ms 内加载完了（任务被取消），不亮 spinner。
+                    return
+                }
+                showSpinner = true
+            } else {
+                showSpinner = false
+            }
+        }
         .onChange(of: tracks.map { $0.id }) { _ in
             // 数据换了：回到最左，停 2.5 秒再走（壳版回卷行为）。
             offsetX = 0

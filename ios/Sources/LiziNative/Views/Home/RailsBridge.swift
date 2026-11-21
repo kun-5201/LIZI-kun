@@ -248,7 +248,7 @@ extension NativeBridge {
         switch platform {
         case "netease":
             if f == "newsong" {
-                guard let d = await call(path: "/api/personalized") else {
+                guard let d = await callRail(path: "/api/personalized") else {
                     // r31：传输层没通（断网/超时/上游无响应）时写明端点，
                     // 不再回通用 searchErrorText——实测接口、解析、登录
                     // 三者都没问题（见 verification/r31-featured.cjs），
@@ -265,7 +265,7 @@ extension NativeBridge {
                                 entries: tracks.map { RailEntry.track($0) },
                                 emptyReason: "网易云没返回推荐新歌")
             }
-            guard let d = await call(path: "/api/top/playlist",
+            guard let d = await callRail(path: "/api/top/playlist",
                                      query: ["limit": "12", "cat": "全部", "order": "hot"]) else {
                 // r31：同 newsong 分支——传输层失败写明端点，不回通用文案。
                 return RailResult(kind: .featured, platform: platform, feed: f,
@@ -280,7 +280,7 @@ extension NativeBridge {
                 // /personalized/playlist 是轮换推荐（每次返回的集合都
                 // 不同），单次空抽不应直接判死；两次都空才回诚实空态。
                 // 只在「通了但空」时重试，传输层失败/上游报错不走这里。
-                if let d2 = await call(path: "/api/top/playlist",
+                if let d2 = await callRail(path: "/api/top/playlist",
                                        query: ["limit": "12", "cat": "全部", "order": "new"]),
                    railError(d2) == nil {
                     lists = railRows(d2, keys: ["playlists"])
@@ -292,7 +292,7 @@ extension NativeBridge {
                             emptyReason: "网易云没返回推荐歌单")
         case "qq":
             if f == "newsongs" {
-                guard let d = await call(path: "/api/qq/recommend/new-songs", query: ["limit": "30"]) else {
+                guard let d = await callRail(path: "/api/qq/recommend/new-songs", query: ["limit": "30"]) else {
                     return railFailed(kind: .featured, platform: platform, feed: f)
                 }
                 if let e = railError(d) {
@@ -303,7 +303,7 @@ extension NativeBridge {
                                 entries: tracks.map { RailEntry.track($0) },
                                 emptyReason: "QQ 音乐没返回新歌")
             }
-            guard let d = await call(path: "/api/qq/recommend/playlists", query: ["limit": "9"]) else {
+            guard let d = await callRail(path: "/api/qq/recommend/playlists", query: ["limit": "9"]) else {
                 return railFailed(kind: .featured, platform: platform, feed: f)
             }
             if let e = railError(d) {
@@ -314,7 +314,7 @@ extension NativeBridge {
                             entries: lists.map { RailEntry.playlist($0) },
                             emptyReason: "QQ 音乐没返回推荐歌单")
         case "qishui":
-            guard let d = await call(path: "/api/qishui/feed", query: ["limit": "20"]) else {
+            guard let d = await callRail(path: "/api/qishui/feed", query: ["limit": "20"]) else {
                 return railFailed(kind: .featured, platform: platform, feed: f)
             }
             if let e = railError(d) {
@@ -325,7 +325,7 @@ extension NativeBridge {
                             entries: tracks.map { RailEntry.track($0) },
                             emptyReason: "汽水没返回推荐流")
         case "bodian":
-            guard let d = await call(path: "/api/bodian/recommendations") else {
+            guard let d = await callRail(path: "/api/bodian/recommendations") else {
                 return railFailed(kind: .featured, platform: platform, feed: f)
             }
             if let e = railError(d) {
@@ -337,7 +337,7 @@ extension NativeBridge {
                             emptyReason: "波点没返回推荐歌单")
         case "kugou":
             if f == "newsongs" {
-                guard let d = await call(path: "/api/kugou/top/songs", query: ["type": "1"]) else {
+                guard let d = await callRail(path: "/api/kugou/top/songs", query: ["type": "1"]) else {
                     return railFailed(kind: .featured, platform: platform, feed: f)
                 }
                 if let e = railError(d) {
@@ -348,7 +348,7 @@ extension NativeBridge {
                                 entries: tracks.map { RailEntry.track($0) },
                                 emptyReason: "酷狗没返回新歌速递")
             }
-            guard let d = await call(path: "/api/kugou/top/playlists", query: ["limit": "12"]) else {
+            guard let d = await callRail(path: "/api/kugou/top/playlists", query: ["limit": "12"]) else {
                 return railFailed(kind: .featured, platform: platform, feed: f)
             }
             if let e = railError(d) {
@@ -360,7 +360,7 @@ extension NativeBridge {
                             emptyReason: "酷狗没返回精选歌单")
         case "kuwo":
             if f == "ranks" {
-                guard let d = await call(path: "/api/kuwo/rank/list") else {
+                guard let d = await callRail(path: "/api/kuwo/rank/list") else {
                     return railFailed(kind: .featured, platform: platform, feed: f)
                 }
                 if let e = railError(d) {
@@ -371,7 +371,7 @@ extension NativeBridge {
                                 entries: lists.map { RailEntry.playlist($0) },
                                 emptyReason: "酷我没返回排行榜")
             }
-            guard let d = await call(path: "/api/kuwo/recommend/playlists", query: ["limit": "12"]) else {
+            guard let d = await callRail(path: "/api/kuwo/recommend/playlists", query: ["limit": "12"]) else {
                 return railFailed(kind: .featured, platform: platform, feed: f)
             }
             if let e = railError(d) {
@@ -382,7 +382,7 @@ extension NativeBridge {
                             entries: lists.map { RailEntry.playlist($0) },
                             emptyReason: "酷我没返回推荐歌单")
         case "applemusic":
-            guard let d = await call(path: "/api/applemusic/playlists", query: ["limit": "12"]) else {
+            guard let d = await callRail(path: "/api/applemusic/playlists", query: ["limit": "12"]) else {
                 return railFailed(kind: .featured, platform: platform, feed: f)
             }
             if let e = railError(d) {
@@ -410,7 +410,7 @@ extension NativeBridge {
                 return railEmpty(kind: .liked, platform: platform,
                                  reason: "先在设置里登录网易云，才能看「我喜欢的音乐」（登录流程在 P4，未登录时这里是空的）。")
             }
-            guard let d = await call(path: "/api/user/playlist", query: ["uid": uid]) else {
+            guard let d = await callRail(path: "/api/user/playlist", query: ["uid": uid]) else {
                 if let fb = await localStarredFallback(platform: platform, note: "「我喜欢的音乐」暂时拉不到，先显示星标的歌") { return fb }
                 return railFailed(kind: .liked, platform: platform)
             }
@@ -455,9 +455,9 @@ extension NativeBridge {
             // 空页——有本地星标就回落到星标（分组卡里原样带上失败原因，
             // 登录失效的信号不丢，只是不再用它把整页挡掉）；没星标才按
             // 原样返回失败。喜欢曲目空 + 收藏也空时同样先看星标。
-            async let likedD = call(path: "/api/qq/user/liked-songs", query: ["limit": "100"])
-            async let listsD = call(path: "/api/qq/user/playlists")
-            async let albumsD = call(path: "/api/qq/user/albums", query: ["limit": "100"])
+            async let likedD = callRail(path: "/api/qq/user/liked-songs", query: ["limit": "100"])
+            async let listsD = callRail(path: "/api/qq/user/playlists")
+            async let albumsD = callRail(path: "/api/qq/user/albums", query: ["limit": "100"])
             guard let liked = await likedD else {
                 if let fb = await localStarredFallback(platform: platform, note: "「我喜欢」暂时拉不到，先显示星标的歌") { return fb }
                 return railFailed(kind: .liked, platform: platform)
@@ -494,7 +494,7 @@ extension NativeBridge {
             }
             return RailResult(kind: .liked, platform: platform, entries: entries)
         case "qishui":
-            guard let d = await call(path: "/api/qishui/user/playlists", query: ["limit": "100"]) else {
+            guard let d = await callRail(path: "/api/qishui/user/playlists", query: ["limit": "100"]) else {
                 if let fb = await localStarredFallback(platform: platform, note: "「我喜欢的音乐」暂时拉不到，先显示星标的歌") { return fb }
                 return railFailed(kind: .liked, platform: platform)
             }
@@ -527,7 +527,7 @@ extension NativeBridge {
             }
             return RailResult(kind: .liked, platform: platform, entries: entries)
         case "bodian":
-            guard let d = await call(path: "/api/bodian/liked_songs") else {
+            guard let d = await callRail(path: "/api/bodian/liked_songs") else {
                 if let fb = await localStarredFallback(platform: platform, note: "「我的喜欢」暂时拉不到，先显示星标的歌") { return fb }
                 return railFailed(kind: .liked, platform: platform)
             }
@@ -539,7 +539,7 @@ extension NativeBridge {
                 .compactMap { Track.from(dict: $0, platform: platform) }
                 .map { RailEntry.track($0) }
             // r31：收藏的歌单（isOwned==false）+ 收藏的专辑并进来。
-            if let u = await call(path: "/api/bodian/user/playlists"), railError(u) == nil {
+            if let u = await callRail(path: "/api/bodian/user/playlists"), railError(u) == nil {
                 let subs = railRows(u, keys: ["playlists"])
                     .filter { ($0["isOwned"] as? NSNumber)?.boolValue == false }
                     .filter { ($0["isLikedPlaylist"] as? NSNumber)?.boolValue != true }
@@ -574,7 +574,7 @@ extension NativeBridge {
             // user/playlists 拉不到时同款回落——以前只有含「登录」的报错
             // 才回落，其它报错（上游异常/非 200）直接报红空页；现在任何
             // 拉不到都先看星标，有星标就显示星标，没星标才报原来的错。
-            guard let d = await call(path: "/api/kugou/user/playlists") else {
+            guard let d = await callRail(path: "/api/kugou/user/playlists") else {
                 return await railLocalLiked(kind: .liked, platform: platform)
             }
             if let e = railError(d) {
@@ -721,7 +721,7 @@ extension NativeBridge {
                 return railEmpty(kind: .playlists, platform: platform,
                                  reason: "先在设置里登录网易云，才能看「我收藏的歌单」（登录流程在 P4，未登录时这里是空的）。")
             }
-            guard let d = await call(path: "/api/user/playlist", query: ["uid": uid]) else {
+            guard let d = await callRail(path: "/api/user/playlist", query: ["uid": uid]) else {
                 return railFailed(kind: .playlists, platform: platform)
             }
             if let e = railError(d) {
@@ -759,7 +759,7 @@ extension NativeBridge {
                 return railEmpty(kind: .playlists, platform: platform,
                                  reason: "先在卡片上扫码登录 QQ 音乐，才能看「我的歌单」")
             }
-            guard let d = await call(path: "/api/qq/user/playlists") else {
+            guard let d = await callRail(path: "/api/qq/user/playlists") else {
                 return railFailed(kind: .playlists, platform: platform)
             }
             if let e = railError(d) {
@@ -774,7 +774,7 @@ extension NativeBridge {
                             entries: lists.map { RailEntry.playlist($0) },
                             emptyReason: "QQ 音乐没有返回歌单")
         case "qishui":
-            guard let d = await call(path: "/api/qishui/user/playlists", query: ["limit": "100"]) else {
+            guard let d = await callRail(path: "/api/qishui/user/playlists", query: ["limit": "100"]) else {
                 return railFailed(kind: .playlists, platform: platform)
             }
             if let e = railError(d) {
@@ -788,7 +788,7 @@ extension NativeBridge {
                             entries: lists.map { RailEntry.playlist($0) },
                             emptyReason: "汽水没有返回歌单")
         case "bodian":
-            guard let d = await call(path: "/api/bodian/user/playlists") else {
+            guard let d = await callRail(path: "/api/bodian/user/playlists") else {
                 return railFailed(kind: .playlists, platform: platform)
             }
             if let e = railError(d) {
@@ -810,7 +810,7 @@ extension NativeBridge {
                 return railEmpty(kind: .playlists, platform: platform,
                                  reason: "先在卡片上扫码登录酷狗音乐，才能看「我的歌单」")
             }
-            guard let d = await call(path: "/api/kugou/user/playlists") else {
+            guard let d = await callRail(path: "/api/kugou/user/playlists") else {
                 return railFailed(kind: .playlists, platform: platform)
             }
             if let e = railError(d) {
@@ -828,7 +828,7 @@ extension NativeBridge {
             return railEmpty(kind: .playlists, platform: platform,
                              reason: "酷我 Web 没有用户歌单接口（Cookie 登录态只影响播放请求），这里是空的，不编内容。")
         case "applemusic":
-            guard let d = await call(path: "/api/applemusic/playlists", query: ["limit": "12"]) else {
+            guard let d = await callRail(path: "/api/applemusic/playlists", query: ["limit": "12"]) else {
                 return railFailed(kind: .playlists, platform: platform)
             }
             if let e = railError(d) {
@@ -852,7 +852,7 @@ extension NativeBridge {
     static func railRadio(platform: String) async -> RailResult {
         switch platform {
         case "netease":
-            guard let d = await call(path: "/api/netease/dj/recommend", query: ["limit": "8"]) else {
+            guard let d = await callRail(path: "/api/netease/dj/recommend", query: ["limit": "8"]) else {
                 return railFailed(kind: .radio, platform: platform)
             }
             if let e = railError(d) {
@@ -869,7 +869,7 @@ extension NativeBridge {
                             entries: stations.map { RailEntry.station($0) },
                             emptyReason: "网易云没返回推荐电台")
         case "qq":
-            guard let d = await call(path: "/api/qq/radio/categories") else {
+            guard let d = await callRail(path: "/api/qq/radio/categories") else {
                 return railFailed(kind: .radio, platform: platform)
             }
             if let e = railError(d) {
@@ -880,7 +880,7 @@ extension NativeBridge {
                             entries: stations.map { RailEntry.station($0) },
                             emptyReason: "QQ 音乐没返回电台频道")
         case "qishui":
-            guard let d = await call(path: "/api/qishui/feed/modes") else {
+            guard let d = await callRail(path: "/api/qishui/feed/modes") else {
                 return railFailed(kind: .radio, platform: platform)
             }
             if let e = railError(d) {
@@ -892,7 +892,7 @@ extension NativeBridge {
                             emptyReason: "汽水没返回场景电台")
         case "bodian":
             // 波点私人 FM 直接是曲目列表，不是频道目录。
-            guard let d = await call(path: "/api/bodian/personal/fm") else {
+            guard let d = await callRail(path: "/api/bodian/personal/fm") else {
                 return railFailed(kind: .radio, platform: platform)
             }
             if let e = railError(d) {
@@ -903,7 +903,7 @@ extension NativeBridge {
                             entries: tracks.map { RailEntry.track($0) },
                             emptyReason: "波点私人 FM 没返回歌曲")
         case "kugou":
-            guard let d = await call(path: "/api/kugou/fm/class") else {
+            guard let d = await callRail(path: "/api/kugou/fm/class") else {
                 return railFailed(kind: .radio, platform: platform)
             }
             if let e = railError(d) {
@@ -930,7 +930,7 @@ extension NativeBridge {
     static func railStationTracks(platform: String, stationId: String) async -> RailResult {
         switch platform {
         case "netease":
-            guard let d = await call(path: "/api/netease/dj/program",
+            guard let d = await callRail(path: "/api/netease/dj/program",
                                      query: ["rid": stationId, "limit": "50"]) else {
                 return railFailed(kind: .radio, platform: platform)
             }
@@ -957,7 +957,7 @@ extension NativeBridge {
                             entries: tracks.map { RailEntry.track($0) },
                             emptyReason: "这个电台暂时没有节目")
         case "qq":
-            guard let d = await call(path: "/api/qq/radio/tracks", query: ["id": stationId]) else {
+            guard let d = await callRail(path: "/api/qq/radio/tracks", query: ["id": stationId]) else {
                 return railFailed(kind: .radio, platform: platform)
             }
             if let e = railError(d) {
@@ -968,7 +968,7 @@ extension NativeBridge {
                             entries: tracks.map { RailEntry.track($0) },
                             emptyReason: "这个电台暂时没有曲目")
         case "qishui":
-            guard let d = await call(path: "/api/qishui/feed",
+            guard let d = await callRail(path: "/api/qishui/feed",
                                      query: ["limit": "50", "mode": stationId]) else {
                 return railFailed(kind: .radio, platform: platform)
             }
@@ -980,7 +980,7 @@ extension NativeBridge {
                             entries: tracks.map { RailEntry.track($0) },
                             emptyReason: "这个场景暂时没有曲目")
         case "kugou":
-            guard let d = await call(path: "/api/kugou/fm/songs",
+            guard let d = await callRail(path: "/api/kugou/fm/songs",
                                      query: ["fmid": stationId, "limit": "30"]) else {
                 return railFailed(kind: .radio, platform: platform)
             }
@@ -1017,7 +1017,7 @@ extension NativeBridge {
     /// 当前原生版是未登录态，调用方按 nil 走诚实空态，不弹登录（登录是 P4）。
     private static func neteaseUserId() async -> String? {
         guard SessionStore.shared.hasMusicU else { return nil }
-        guard let d = await call(path: "/api/session"),
+        guard let d = await callRail(path: "/api/session"),
               (d["loggedIn"] as? NSNumber)?.boolValue == true,
               let profile = d["profile"] as? [String: Any] else { return nil }
         if let n = profile["userId"] as? NSNumber, n.intValue != 0 { return n.stringValue }
@@ -1048,13 +1048,24 @@ extension NativeBridge {
     }
 
     /// 上游回的 error 字段，或非 0/200 的 code（callSoft 的边车失败就是这个形状）。
+    /// callSoft 的 rail 版（r35-9）：非 2xx 也把 JSON 体还回来，railError
+    /// 才能读到体里的 code/error；没体时回 nil，走原来的 guard-else。
+    /// `call` 在非 2xx 时直接回 nil，401/403 的体全丢了，空态只能写通用话。
+    private static func callRail(path: String, query: [String: String] = [:]) async -> [String: Any]? {
+        await callSoft(path: path, query: query).dict
+    }
+
     private static func railError(_ d: [String: Any]?) -> String? {
         guard let d else { return nil }
         if let e = d["error"] as? String, !e.isEmpty { return e }
-        if let code = d["code"] as? NSNumber, code.intValue != 0, code.intValue != 200 {
-            return "接口返回异常（code=\(code.intValue)）"
-        }
-        return nil
+        let code = (d["code"] as? NSNumber)?.intValue ?? 0
+        guard code != 0, code != 200 else { return nil }
+        // r35-9：失败码时先读体里的 message / msg 原话，再回通用 code 文案；
+        // code 0/200 时只认 error 字段（成功包里可能带 message 说明文字，
+        // 不能把它当成错误）。
+        if let e = d["message"] as? String, !e.isEmpty { return e }
+        if let e = d["msg"] as? String, !e.isEmpty { return e }
+        return "接口返回异常（code=\(code)）"
     }
 
     /// 按优先级取第一个非空数组字段（各平台归一化键名不完全一致）。

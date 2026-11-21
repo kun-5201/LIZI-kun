@@ -42,22 +42,22 @@ import SwiftUI
 /// 纵向结构（从上到下，截图顺序）：
 /// 顶栏（圆形毛玻璃按钮）→ 3D 封面流（上半部）→ 歌词区（`LyricsZoneView`）
 /// → 歌名 / 歌手 → 底部三排
-/// （`PlayerBottomDock`，r27 v4；横屏仍是控制行 + 最底部细进度条）。
+/// （`PlayerBottomDock`，r27 v4；横屏传统模式（r35-7）是右列进度条 +
+///   五键红控制行，不用 PlayerControlRow）。
 ///
 /// 依赖（r20 三工人分工，本文件只引用、不定义）：
 /// - `LyricsZoneView`：工人 B 在 `LyricsPanelView.swift` 里新建——截至交回时
 ///   仍未落地，本文件先按任务书给的名字引用，集成时等工人 B。
-/// - `PlayerControlRow(tier:)` / `PlayerProgressBar(tier:)`：
-///   工人 C 已在 `PlayerDockView.swift` 里落地（r22 定稿：控制行竖屏是
-///   随机 / 爱心 / 上一首 / 播放 / 下一首 / 循环，横屏是爱心 / 三条杠 /
-///   上一首 / 播放 / 下一首 / 循环（r28：横屏第 1 项随机换爱心），无 AirPlay；队列入口竖屏点歌名块
-///   （见 titleOnlyBlock）、横屏点三条杠；细条无时间数字，拖动 seek，播放头是圆点）。
-///   r27 v4：默认版式不再用它俩（改走 `PlayerBottomDock`，进度条在 dock
-///   里复用 `PlayerProgressBar` + 两端时间）；横屏仍用。
+/// - `PlayerProgressBar(tier:)`：工人 C 已在 `PlayerDockView.swift` 里落地
+///   （细条无时间数字，拖动 seek，播放头是圆点）；竖屏在 `PlayerBottomDock`
+///   里复用（+ 两端时间），横屏传统模式（r35-7）在右列里复用。
+///   `PlayerControlRow` r35-7 已删（唯一调用方是旧横屏布局；竖屏一直用
+///   PlayerBottomDock，不受影响）；队列入口竖屏点歌名块（见 titleOnlyBlock），
+///   横屏传统模式没有队列入口。
 /// - 分档 API：工人 C 已在 `PlayerTokens.swift` 里落地，
 ///   `sizeTier(for:topInset:)` / `topBarButton(_:)` / `titleSize(_:)` /
 ///   `subtitleSize(_:)` / `coverItem(_:)` / `coverTrackHeight(_:)` /
-///   `lyricsZoneHeight(_:)` / `playSize(_:)` / `progressHeight(_:)`，
+///   `lyricsZoneHeight(_:)` / `progressHeight(_:)`，
 ///   `CoverFlowView` 也已改成 `CoverFlowView(tier:)`，这里全部只调用。
 ///   在 `LyricsZoneView` 落齐之前本文件单独编译不过，集成由协调员收齐后做。
 ///
@@ -113,8 +113,10 @@ struct PlayerView: View {
             // geo 与 UIScreen 一致，换源不换数，只是以后不再依赖 geo 的口径）。
             let screenSize = UIScreen.main.bounds.size
             ZStack(alignment: .topLeading) {
-                background
-                    .frame(width: screenSize.width, height: screenSize.height)
+                Group {
+                    if isLandscape { traditionalLandscapeBackground } else { background }
+                }
+                .frame(width: screenSize.width, height: screenSize.height)
                 if isLandscape {
                     landscapeLayout(geo: geo, tier: tier)
                 } else {
@@ -327,152 +329,315 @@ struct PlayerView: View {
 
     // MARK: - 横屏默认：顶行三圆钮 → 左列封面 + 标题 / 右列歌词 → 底部控制行 + 进度条
 
-    /// 横屏默认布局（r29 task 7 重排，图纸 ~/workspace/lizi-landscape-diagram.png，
-    /// r22 的「顶区一行 + 居中歌词」结构作废）：
-    /// 1 顶行三钮都缩小：返回 / 搜索 / 舞台三个文字胶囊改 Ø38 小圆钮
-    ///   （复用竖屏的 topBarCircleButton，图标因子同款 0.47；r33 起竖屏
-    ///   横屏同为 Ø38；只留图标不留文字，动作与 accessibilityLabel 不变）；
-    /// 2 封面移到左边：左列 320 宽（r33：260 → 320，两侧封面各露约 75pt，
-    ///   原约 53pt——列半宽 160 不再卡边；侧张中心 ±100.7、投影半宽约 52
-    ///   （148 × 0.91 × cos40° ≈ 103 宽的一半），外缘约 ±152），
-    ///   CoverFlowView 不再放中间、也不再 scale 0.8 收小，中央张 148 × 1.04
-    ///   ≈ 154pt 方形完整保留，框高 154 = 方形本身（r33：162 → 154，倒影全裁，
-    ///   省 8pt 给控制行–进度条间距；框顶对齐，封面顶边不被裁）；标题 + 歌手
-    ///   放封面下面（左列内，复用 landscapeTitleTexts），不再跟顶栏抢地方；
-    /// 3 歌手在最下面（原杜比药丸位置）：无试听/演示/失败时角标行不渲染，
-    ///   歌手就是左列最下面一行；实际音质角标 r29 task 4 已删
-    ///   （statusCapsules 里无 actualQuality，见 verification/r29-task4.cjs）；
-    /// 4 歌词放右边主区域：左列 320 + 间距 16 + 右列 479，两列布局；
-    ///   右列是横屏专用的高对比歌词区 landscapeLyricsZone（不是竖屏共用的
-    ///   lyricsZone / LyricsZoneView）：非当前行白 0.85（原 playerDim 0.52）、
-    ///   不模糊、上一行实效 0.77（原 0.29），当前行红色 accent 不变；
-    /// 5 控制行与进度条（r33 改）：PlayerControlRow（爱心|队列|上一首|播放|
-    ///   下一首|循环，compact 58）大小不动；PlayerProgressBar 触摸区 32 不动，
-    ///   上间隙 12 → 23——暂停钮下缘到进度条视觉细条顶由 12pt 变 23pt
-    ///   （实测原图：暂停钮底 337pt，细条顶 349pt，只差 12pt，约 17px；
-    ///   播放头圆点还再探上 3pt，体感就是压住；改后暂停钮底上移到 326pt，
-    ///   细条顶仍在 349pt 不动，圆点顶约 346pt，离暂停钮底约 20pt）。
-    /// 结构（纵向一段到底）：顶行三圆钮（38）→ 中段两列（左列定高 212、
-    /// 右列歌词区弹性，最小高 100）→ 控制行 → 最底部细进度条
-    /// （满 contentWidth，底部留 Home Indicator 安全区）。
-    /// 高账（874×402，r33）：顶 padding 10 + 顶行 38 + 中段上间隙 6 + 左列
-    /// （封面框 154 + 间隙 4 + 标题块 54 = 212）+ 控制行 58（compact，
-    /// playSize；旧账写的 60 是约数）+ 进度条上间隙 23 + 进度条 32
-    /// + 底部安全区（0 或 21）= 402（安全区 21 时，中段实得 214，左列 212
-    /// 余 2pt；安全区 0 时 381，余 21 归弹性歌词区）。右列歌词区实得：
-    /// 中段高 214（安全区 21）/ 235（安全区 0），减区顶 padding 8，
-    /// 内容 206 / 227，均 ≥ 最小高 100。进度条屏内位置不动（细条顶仍
-    /// 349pt）：省下的 10pt 全给了控制行–进度条间距（12 → 23pt）。
-    /// 宽度（r22a 根因，见文件底）：屏宽走 UIScreen.main.bounds.width（874），
-    /// 两侧走 key window 安全区（landscapeSideInsets，岛侧 59、另一侧 0）；
-    /// HStack = 左侧 spacer + 内容列 + 右侧 spacer，总宽恒 = 屏宽。
-    /// 内容列内：顶行三圆钮（返回在左、搜索/舞台在右）；中段左列 320
-    /// + 间距 16 + 右列 479 = 815；控制行 / 进度条满 815。
-    /// 横屏分档按高取档：landscapeTier = 按高 402 取档 → standard；
-    /// 封面 / 歌名 / 控制行再降一档用 compact，才塞得进 402 高。
-    /// 残留（r29 task 7 如实记，r33 更新）：试听/演示/取链失败时状态行多约
-    /// 20–22pt，左列 212 → 约 234，底部安全区 21 时整列超约 20pt（原 19pt，
-    /// +1pt——中段 225 → 214 少了 11pt 余量，框高 + 间隙只省回 10pt），
-    /// 进度条视觉细条会被顶出屏底（触摸区仍有约 10pt 在屏内，控制行完整可见）；
-    /// 安全区 0 时 401 ≤ 402 仍不超。修法要么裁封面方形本身、要么横屏左列去掉
-    /// 状态行（会丢取链失败点红字弹登录的入口），两害相权留了现状，
-    /// 不在此轮硬塞。
+    /// r35-7 传统横屏：稿里主红（标题/当前句/控制）与淡红（下一句歌词）。
+    private static let traditionalRed = Color(red: 224 / 255, green: 72 / 255, blue: 77 / 255)
+    private static let traditionalRedFaint = Color(red: 96 / 255, green: 54 / 255, blue: 56 / 255)
+    /// r35-7 传统横屏：左大封面 232 方形；两列间距 24。
+    private static let traditionalCoverSize: CGFloat = 232
+    private static let traditionalColumnSpacing: CGFloat = 24
+    /// r35-7 传统横屏深红底渐变（稿里值：顶 #140508 → 底 #2E0B0F）。
+    private static let traditionalBgTop = Color(red: 20 / 255, green: 5 / 255, blue: 8 / 255)
+    private static let traditionalBgBottom = Color(red: 46 / 255, green: 11 / 255, blue: 15 / 255)
+
+    /// 横屏传统模式（r35-7，用户 2026-11-21 19:05 批设计稿
+    /// `~/workspace/lizi-landscape-traditional-mockup.png`，脚本
+    /// `~/workspace/draw-landscape-mockup.py`；旧 r29 task 7 两列布局整段作废）：
+    /// - 顶栏只留 3 个功能：左返回（裸红 `<`）、右舞台 / 舞台控制（红描边圆角钮）；
+    ///   设置、搜索从横屏顶栏拿掉。舞台进舞台页（.stage()）；舞台控制进舞台页
+    ///   并直达设置浮层（.stage(openSettings: true)，见 AppNavigation / StageView）。
+    /// - 开通会员行：原生播放页从来没有这行（只有取链失败文案「会员歌曲，
+    ///   无法播放整首」），不用删、也不新增；断言见 r35.cjs §N2。
+    /// - 深红底：模糊封面 + 稿里暗红渐变罩住，专辑色从模糊封面里透出来
+    ///   （按专辑取色）；无封面时只剩渐变。壁纸（BackgroundStore）在传统
+    ///   横屏下不生效——设计稿就是深红底。
+    /// - 左大封面：真专辑图（CoverImageView 单张平铺，232 方形，圆角 10），
+    ///   不是 CoverFlowView 三张流、不是占位；无封面时 CoverImageView 自带占位。
+    /// - 右列：歌名 - 歌手（红粗 26）→ 当前句歌词（红 18）→ 下一句歌词（淡红 16）
+    ///   → 进度条（现成 PlayerProgressBar）→ 控制行五键收拢一组（80pt 等宽格，
+    ///   喜欢 | 上一首 | 暂停（大）| 下一首 | 模式）。
+    /// - 混音 / 发行两行没做：Track 模型没有混音师 / 发行公司字段，各平台
+    ///   歌曲详情也不返回，壳版也没有这俩字段——不编假数据（见 §N8）；
+    ///   用户定要的话再接专辑详情接口（AlbumViewModel 那路）。
+    /// - 队列面板：传统横屏没有入口（顶栏没队列钮、控制行没三条杠）；竖屏
+    ///   点歌名块仍能开队列（lyricsZone 里的 overlay 不动）。
+    /// - 状态角标行（试听 / 网盘 / 失败红字）传统横屏不显示——设计稿里没有这行；
+    ///   竖屏 statusCapsules 不动，取链失败点红字弹登录仍在竖屏。
+    /// - 尺寸账（874×402，内容宽 815）：顶 padding 10 + 顶栏 38 + 间隙 14
+    ///   + 中段 232（封面 232 方形；右列：标题 34 + 间隙 16 + 当前句 24
+    ///   + 间隙 8 + 下一句 22 + 间隙 18 + 进度条 32 + 间隙 14 + 控制行 44
+    ///   = 212 ≤ 232，余 20 归右列底部）= 294；下面余约 108pt 空深红，
+    ///   与稿里控制行下面留空一致。控制行五键：5×80 = 400 ≤ 右列宽
+    ///   （815 − 232 − 24 = 559），居中放。
     private func landscapeLayout(geo: GeometryProxy, tier: PlayerTokens.PlayerSizeTier) -> some View {
-        let landscapeTier = PlayerTokens.sizeTier(
-            for: CGSize(width: geo.size.height, height: geo.size.width),
-            topInset: geo.safeAreaInsets.top)
         let compactTier = PlayerTokens.PlayerSizeTier.compact
-        let lyricsMinHeight: CGFloat = 100
-        // r22a：横屏宽度唯一口径。屏宽 + key window 两侧安全区（见文件底注释）；
-        // 顶行 / 中段两列 / 控制行 / 进度条四行全用 contentWidth；HStack 三段
-        // （左 spacer + 内容列 + 右 spacer）总宽恒 = 屏宽，行宽 = 容器宽，居中偏归零。
         let screenWidth = UIScreen.main.bounds.width
         let screenHeight = UIScreen.main.bounds.height
         let (leadingInset, trailingInset) = Self.landscapeSideInsets
         let contentWidth = screenWidth - leadingInset - trailingInset
-        let lyricsColumnWidth = contentWidth - Self.landscapeLeftColumnWidth - Self.landscapeColumnSpacing
+        let rightColumnWidth = contentWidth - Self.traditionalCoverSize - Self.traditionalColumnSpacing
         return HStack(spacing: 0) {
             Color.clear.frame(width: leadingInset)
             VStack(spacing: 0) {
-                // 顶行：只剩三个小圆钮（返回在左、搜索 / 舞台在右；r29 task 7：
-                // 文字胶囊改 Ø38 圆钮，只留图标不留文字，动作与竖屏圆钮一一对应）。
-                HStack {
-                    topBarCircleButton(
-                        systemName: "chevron.left",
-                        diameter: Self.landscapeTopBarButtonDiameter
-                    ) {
-                        navigation.show(.home)
-                    }
-                    .accessibilityLabel("返回首页")
-                    Spacer()
-                    HStack(spacing: 12) {
-                        topBarCircleButton(
-                            systemName: "magnifyingglass",
-                            diameter: Self.landscapeTopBarButtonDiameter
-                        ) {
-                            // 搜索页走 App 现有的搜索导航路由，不新造。
-                            navigation.show(.search)
-                        }
-                        .accessibilityLabel("搜索")
-                        topBarCircleButton(
-                            systemName: "gearshape",
-                            diameter: Self.landscapeTopBarButtonDiameter
-                        ) {
-                            // 齿轮就是舞台控制按钮（点进舞台页），不进设置页、
-                            // 不在播放页弹调节面板。
-                            navigation.show(.stage())
-                        }
-                        .accessibilityLabel("控制舞台")
-                    }
+                traditionalTopBar(width: contentWidth)
+                HStack(alignment: .top, spacing: Self.traditionalColumnSpacing) {
+                    CoverImageView(url: store.currentTrack?.coverURL, placeholderIconSize: 24)
+                        .frame(width: Self.traditionalCoverSize, height: Self.traditionalCoverSize)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    traditionalRightColumn(width: rightColumnWidth, tier: compactTier)
                 }
-                .frame(width: contentWidth)
-                // 中段两列（左列封面 + 标题 / 右列歌词），弹性段：左列定高，
-                // 右列歌词区吃掉剩余高度（底部安全区 0 时多出的 21pt 也归它）。
-                HStack(alignment: .top, spacing: Self.landscapeColumnSpacing) {
-                    VStack(spacing: 0) {
-                        // 左列封面：CoverFlowView 不再放中间、改到左列，不再
-                        // scale 0.8 收小；中央张 148 × 1.04 ≈ 154pt 方形完整
-                        // 保留，框高 154 = 方形本身、倒影全裁（r33：162 → 154，
-                        // 402 高装不下 198 轨道 + 标题块；框顶对齐，封面顶边
-                        // 不被裁）。宽取左列满宽：两侧封面在列宽里各露约 75pt。
-                        CoverFlowView(tier: landscapeTier, isCompact: true)
-                            .frame(width: Self.landscapeLeftColumnWidth, height: Self.landscapeCoverFrameHeight, alignment: .top)
-                            .clipped()
-                        // 标题 + 歌手放封面下面（左列内），复用
-                        // landscapeTitleTexts（左对齐；r35-6 起只剩默认横屏
-                        // 这一处调用，02/04 变体与 smallCoverHeader 已删；
-                        // 不新建 statusCapsules 调用点）。无试听/演示/失败时角标行
-                        // 不渲染，歌手就是左列最下面一行（原杜比药丸位置；
-                        // 实际音质角标 r29 task 4 已删，见 statusCapsules）。
-                        landscapeTitleTexts(tier: compactTier)
-                            .frame(width: Self.landscapeLeftColumnWidth)
-                            .padding(.top, 4) // r33：6 → 4，省 2pt 顶住状态行角标（安全区 0 时 +22 仍不超高）
-                    }
-                    .frame(width: Self.landscapeLeftColumnWidth, alignment: .topLeading)
-                    // 右列歌词：高对比专用区（见 landscapeLyricsZone），
-                    // 不是竖屏共用的 lyricsZone；队列面板仍只盖住本区。
-                    landscapeLyricsZone(tier: landscapeTier, width: lyricsColumnWidth, minHeight: lyricsMinHeight)
-                }
-                .frame(width: contentWidth)
-                .frame(maxHeight: .infinity, alignment: .top)
-                .padding(.top, 6)
-                // 控制行与进度条：r33 只改上间隙（12 → 23，暂停钮底 337 → 326pt，
-                // 进度条细条顶仍在 349pt 不动，间距 12 → 23pt）；控制行大小、
-                // 进度条触摸区 32 与底部安全区都沿用旧值。
-                PlayerControlRow(tier: compactTier, showsQueueButton: true, onOpenQueue: { showQueue.toggle() })
-                    .frame(width: contentWidth)
-                PlayerProgressBar(tier: tier)
-                    .frame(width: contentWidth)
-                    .padding(.top, 23)
-                    .padding(.bottom, geo.safeAreaInsets.bottom)
+                .frame(width: contentWidth, alignment: .leading)
+                .padding(.top, 14)
+                Spacer()
             }
-            // r23i：横屏顶区加显式顶部 padding（目标顶边 10pt，见
-            // landscapeTopPadding；歌词区弹性段吸收这 10pt，仍 ≥ 最小高 100）。
             .padding(.top, Self.landscapeTopPadding)
             .frame(width: contentWidth, height: screenHeight, alignment: .topLeading)
             Color.clear.frame(width: trailingInset)
         }
         .frame(width: screenWidth, height: screenHeight, alignment: .topLeading)
+    }
+
+    /// 传统横屏顶栏（r35-7）：左裸红 `<` 返回，右舞台 / 舞台控制两个红描边圆角钮。
+    /// 设置、搜索不在横屏顶栏。舞台 = 进舞台页；舞台控制 = 进舞台页并直达设置浮层。
+    private func traditionalTopBar(width: CGFloat) -> some View {
+        HStack {
+            Button(action: { navigation.show(.home) }) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(Self.traditionalRed)
+            }
+            .accessibilityLabel("返回首页")
+            Spacer()
+            HStack(spacing: 16) {
+                traditionalPillButton(text: "舞台") {
+                    navigation.show(.stage())
+                }
+                .accessibilityLabel("舞台")
+                traditionalPillButton(text: "舞台控制") {
+                    navigation.show(.stage(openSettings: true))
+                }
+                .accessibilityLabel("舞台控制")
+            }
+        }
+        .frame(width: width, height: 38)
+    }
+
+    /// 红描边圆角钮（r35-7，稿里舞台 / 舞台控制同款）：红字 16 semibold，
+    /// 横向 padding 18、高 36、描边 2、圆角 17。
+    private func traditionalPillButton(text: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(text)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Self.traditionalRed)
+                .padding(.horizontal, 18)
+                .frame(height: 36)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 17)
+                        .stroke(Self.traditionalRed, lineWidth: 2)
+                )
+        }
+    }
+
+    /// 传统横屏右列（r35-7）：歌名 - 歌手 → 当前句 → 下一句 → 进度条 → 控制行。
+    /// 歌名行与歌词行都单行（lineLimit 1 + minimumScaleFactor 0.5），长标题只缩小、不截断。
+    private func traditionalRightColumn(width: CGFloat, tier: PlayerTokens.PlayerSizeTier) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(traditionalTitleText)
+                .font(.system(size: 26, weight: .bold))
+                .foregroundStyle(Self.traditionalRed)
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+                .frame(width: width, alignment: .leading)
+            traditionalLyricLine(text: traditionalCurrentLyric, size: 18, color: Self.traditionalRed)
+                .padding(.top, 16)
+            traditionalLyricLine(text: traditionalNextLyric, size: 16, color: Self.traditionalRedFaint)
+                .padding(.top, 8)
+            PlayerProgressBar(tier: tier)
+                .frame(width: width)
+                .padding(.top, 18)
+            traditionalControlRow(width: width)
+                .padding(.top, 14)
+        }
+        .frame(width: width, alignment: .topLeading)
+    }
+
+    /// 右列歌名行（r35-7）：「歌名 - 歌手」；没歌手时只剩歌名；无曲目时「未在播放」。
+    private var traditionalTitleText: String {
+        guard let track = store.currentTrack else { return "未在播放" }
+        if track.artist.isEmpty { return track.title }
+        return "\(track.title) - \(track.artist)"
+    }
+
+    /// 有效当前行（r35-7：从旧 landscapeEffectiveCurrent 原样搬来；还没开唱
+    /// （-1）时从第一行起；越界时夹到末行；没歌词时调用方先判空，这里只保下标）。
+    private var landscapeEffectiveCurrent: Int {
+        guard !store.lyrics.isEmpty else { return 0 }
+        if store.currentLyricIndex < 0 { return 0 }
+        return min(store.currentLyricIndex, store.lyrics.count - 1)
+    }
+
+    /// 当前句 / 下一句歌词（r35-7）：只取有效当前行这一行与下一行；没歌词时空串、不编。
+    private var traditionalCurrentLyric: String {
+        guard !store.lyrics.isEmpty else { return "" }
+        return store.lyrics[landscapeEffectiveCurrent].text
+    }
+
+    private var traditionalNextLyric: String {
+        guard !store.lyrics.isEmpty else { return "" }
+        let next = landscapeEffectiveCurrent + 1
+        guard store.lyrics.indices.contains(next) else { return "" }
+        return store.lyrics[next].text
+    }
+
+    /// 歌词行（r35-7）：单行；空串时用一个空格占住行位（不塌掉下面行的位置）。
+    private func traditionalLyricLine(text: String, size: CGFloat, color: Color) -> some View {
+        Text(text.isEmpty ? " " : text)
+            .font(.system(size: size))
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 传统横屏控制行（r35-7）：五键收拢一组（80pt 等宽格，中心距 80pt，
+    /// 总宽 400 ≤ 右列宽）：喜欢 | 上一首 | 暂停（大）| 下一首 | 模式。
+    /// 全部红图标（稿里同款）；暂停是大号裸红条（没有白圆底，与
+    /// PlayerControlRow 的白圆大播放键不同）；没有队列入口、没有弹幕键
+    /// （原生本来就没有弹幕键，见 §N3）；无曲目时整行 disabled。
+    private func traditionalControlRow(width: CGFloat) -> some View {
+        HStack(spacing: 0) {
+            traditionalControlCell {
+                Button(action: { store.toggleLike() }) {
+                    Image(systemName: store.isLiked ? "heart.fill" : "heart")
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundStyle(Self.traditionalRed)
+                }
+                .accessibilityLabel(store.isLiked ? "取消喜欢" : "喜欢")
+            }
+            traditionalControlCell {
+                Button(action: { store.previous() }) {
+                    Image(systemName: "backward.fill")
+                        .font(.system(size: 22))
+                        .foregroundStyle(Self.traditionalRed)
+                }
+                .accessibilityLabel("上一首")
+            }
+            traditionalControlCell {
+                Button(action: { store.togglePlay() }) {
+                    if store.isLoading {
+                        ProgressView()
+                            .tint(Self.traditionalRed)
+                    } else {
+                        Image(systemName: store.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 32, weight: .semibold))
+                            .foregroundStyle(Self.traditionalRed)
+                            .offset(x: store.isPlaying ? 0 : 2)
+                    }
+                }
+                .accessibilityLabel(store.isPlaying ? "暂停" : "播放")
+            }
+            traditionalControlCell {
+                Button(action: { store.next() }) {
+                    Image(systemName: "forward.fill")
+                        .font(.system(size: 22))
+                        .foregroundStyle(Self.traditionalRed)
+                }
+                .accessibilityLabel("下一首")
+            }
+            traditionalControlCell {
+                Button(action: { cycleTraditionalMode() }) {
+                    Image(systemName: traditionalModeIconName)
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundStyle(Self.traditionalRed)
+                }
+                .accessibilityLabel("播放模式：\(traditionalModeTitle)，点按切换")
+            }
+        }
+        .frame(width: width)
+        .frame(height: 44)
+        .disabled(store.currentTrack == nil)
+    }
+
+    /// 控制行等宽格（r35-7）：每键 80pt 宽，中心距就是 80pt。
+    private func traditionalControlCell<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .frame(width: 80, height: 44)
+    }
+
+    // MARK: - 传统横屏模式键：循环 → 单曲 → 随机（三态一键，与竖屏 dock 同一套状态机）
+
+    /// 与 PlayerBottomDock.DockPlayMode / cycleDockMode 同一套状态机
+    /// （只调现成的 cycleRepeatMode / setShuffled，不另造状态、不改
+    /// PlayerBottomDock）：循环 → 单曲 → 随机 → 循环；顺序（off 且随机
+    /// off）不在三态里，点按进循环。图标：循环 / 顺序 repeat、单曲 repeat.1、
+    /// 随机 shuffle；三态都持久化（见 PlaybackStore）。
+    private enum TraditionalPlayMode { case all, one, shuffle, off }
+
+    private var traditionalMode: TraditionalPlayMode {
+        if store.isShuffled { return .shuffle }
+        switch store.repeatMode {
+        case .all: return .all
+        case .one: return .one
+        case .off: return .off
+        }
+    }
+
+    private var traditionalModeIconName: String {
+        switch traditionalMode {
+        case .all, .off: return "repeat"
+        case .one: return "repeat.1"
+        case .shuffle: return "shuffle"
+        }
+    }
+
+    private var traditionalModeTitle: String {
+        switch traditionalMode {
+        case .all: return "循环"
+        case .one: return "单曲"
+        case .shuffle: return "随机"
+        case .off: return "顺序"
+        }
+    }
+
+    private func cycleTraditionalMode() {
+        switch traditionalMode {
+        case .all:
+            store.cycleRepeatMode()
+        case .one:
+            store.setShuffled(true)
+        case .shuffle:
+            store.setShuffled(false)
+            if store.repeatMode == .one {
+                store.cycleRepeatMode()
+                store.cycleRepeatMode()
+            } else if store.repeatMode == .off {
+                store.cycleRepeatMode()
+            }
+        case .off:
+            store.cycleRepeatMode()
+        }
+    }
+
+    /// 传统横屏深红底（r35-7）：模糊封面 + 稿里暗红渐变罩住——专辑色从
+    /// 模糊封面里透出来（按专辑取色）；无封面时只剩渐变。壁纸不生效
+    /// （设计稿就是深红底）；只做底色，不盖内容、不挡点按。
+    private var traditionalLandscapeBackground: some View {
+        ZStack {
+            if let url = store.currentTrack?.coverURL {
+                CoverImageView(url: url)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+                    .blur(radius: 64)
+                    .scaleEffect(1.25)
+            }
+            LinearGradient(
+                colors: [
+                    Self.traditionalBgTop.opacity(0.86),
+                    Self.traditionalBgBottom.opacity(0.92),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+        .allowsHitTesting(false)
     }
 
 
@@ -487,6 +652,7 @@ struct PlayerView: View {
     ///   `resizeAspectFill` 铺满、播完回 0、切后台暂停，见 BackgroundView.swift，
     ///   本文件不另写播放器）。
     /// - 没设壁纸：原来的分支一字不动——有封面 = 模糊封面大图（blur 64 +
+    ///   （r35-7：横屏传统模式不再走这里，见 traditionalLandscapeBackground，只剩竖屏用）
     ///   scale 1.25），无封面 = ink→黑渐变。
     /// 可读性蒙版（播放器是白字为主：歌名白、歌词白 0.52–0.85、副标题白
     /// 0.72，歌词区没有底板、直接贴在背景上；首页是深色墨字所以用浅色
@@ -598,37 +764,11 @@ struct PlayerView: View {
 
     /// r29 task 5：竖屏顶栏三钮统一直径 44pt（r27 实测 49pt，改小一档；
     /// 见上面 topBar 注释；三档同一值，不走 PlayerTokens.topBarButton）。
-    /// r33：44 → 38pt，与横屏 landscapeTopBarButtonDiameter 同值，竖屏
-    /// 横屏三钮同一尺寸；图标因子共用 0.47（见 topBarCircleButton），
+    /// r33：44 → 38pt（横屏传统模式 r35-7 不再用圆钮，竖屏三钮仍是 38）；
+    /// 图标因子共用 0.47（见 topBarCircleButton），
     /// 图标 20.7 → 17.9pt，与横屏一致；顶边 39 不动，圆心 61 → 58pt；
     /// 右侧两钮 HStack 间距 12 不动（钮间空隙 16 → 22pt，不挡）。
     private static let portraitTopBarButtonDiameter: CGFloat = 38
-
-    /// r29 task 7：横屏默认顶栏三钮直径 38pt（竖屏 44pt，再小一档；
-    /// 胶囊旧高 compact 44 → 圆钮 38；图标字号 = 38 × 0.47 ≈ 17.9pt，
-    /// 复用 topBarCircleButton，与竖屏同一套做法）。
-    private static let landscapeTopBarButtonDiameter: CGFloat = 38
-
-    /// r29 task 7：横屏默认左列宽 260pt（封面中央张 154 + 两侧封面各露约 50；
-    /// 内容宽 815 − 260 − 间距 16 = 右列歌词 539）。
-    /// r33：260 → 320pt——实测原图两侧封面只露约 53pt（列半宽 130 − 中央张
-    /// 半宽 77）；320 后列半宽 160 不再卡边，两侧各露约 75pt（侧张中心
-    /// ±100.7、投影半宽约 52，外缘约 ±152）；右列歌词 539 → 479，仍够放
-    /// 歌词行；歌名 13 字在 320 宽里缩放因子约 0.77 → 0.94（自然宽约 339pt，
-    /// NotoSansCJK Bold 28pt 实测），仍完整、字更大。
-    private static let landscapeLeftColumnWidth: CGFloat = 320
-
-    /// r29 task 7：横屏默认两列间距 16pt。
-    private static let landscapeColumnSpacing: CGFloat = 16
-
-    /// r29 task 7：横屏默认左列封面框高 162pt。CoverFlowView 轨道本身
-    /// 198（中央张 148 × 1.04 ≈ 154 + 间距 8 + 倒影约 46）；框高 162
-    /// = 方形 154 + 间距 8（+ 0.1pt 余量），方形完整保留、只裁倒影；
-    /// 框顶对齐（.frame alignment: .top），封面顶边不被裁（r28 的顶裁
-    /// 教训：框高小于内容高时必须顶对齐，默认居中会连顶边一起裁）。
-    /// r33：162 → 154pt = 方形本身，倒影全裁，省 8pt 给控制行–进度条
-    /// 间距（上间隙 12 → 23）；方形仍完整保留，顶对齐不变。
-    private static let landscapeCoverFrameHeight: CGFloat = 154
 
     private func topBar(tier: PlayerTokens.PlayerSizeTier) -> some View {
         _ = tier // r33：竖屏三钮直径固定 38pt（r29 task 5 的 44pt 再小一档，与横屏同值），不再按 tier 分档。
@@ -718,173 +858,6 @@ struct PlayerView: View {
 
     // MARK: - r29 task 7：横屏默认高对比歌词区（只给 landscapeLayout 用）
 
-    /// 横屏默认歌词区：与竖屏共用的 lyricsZone / LyricsZoneView 同款行为
-    /// （当前行贴底、自动跟随滚动、点行跳转、无歌词空态、队列面板只盖住
-    /// 本区），只改对比度——且只改横屏这一路，LyricsPanelView.swift
-    /// 一字不动（任务约束只改 PlayerView.swift），所以本区自带一份
-    /// 横屏专用渲染（下面 landscapeLyricsContent / Row / Text），不复用
-    /// LyricsZoneView。
-    /// 改前（LyricsZoneRowView）：非当前行前景 playerDim = 白 0.52，
-    /// 再 × 行透明度（上一行 0.55、之后 ×0.65：0.36 / 0.23 / 0.15…），
-    /// 上一行实效 0.52 × 0.55 ≈ 0.29，还要再模糊 0.6 / 1.8 / 3.0…。
-    /// 改后（本区）：非当前行前景白 0.85 × 行透明度 0.9 / 0.75 / 0.6 / 0.5，
-    /// 上一行实效 0.85 × 0.9 ≈ 0.77；不模糊；行左对齐（图里歌词左对齐，
-    /// 竖屏歌词居中不动）；不罩顶部渐隐遮罩（原 topFadeMask 会把上面几行
-    /// 再压暗一截）。当前行红色 accent + semibold 不变；逐字未唱到的字
-    /// 白 0.85（原 playerDim 0.52）；翻译行白 0.8（原 playerTranslation 0.58）。
-    private func landscapeLyricsZone(tier: PlayerTokens.PlayerSizeTier, width: CGFloat, minHeight: CGFloat) -> some View {
-        ZStack {
-            GeometryReader { geo in
-                landscapeLyricsContent(zoneWidth: geo.size.width, zoneHeight: geo.size.height, tier: tier)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if showQueue {
-                QueuePanelView(onClose: { showQueue = false })
-            }
-        }
-        // SwiftUI 没有 frame(width:minHeight:maxHeight:) 这一重载，
-        // 用 minWidth/maxWidth 夹住宽度，语义与固定宽相同（同 lyricsZone）。
-        .frame(
-            minWidth: width,
-            maxWidth: width,
-            minHeight: minHeight,
-            maxHeight: .infinity
-        )
-        .padding(.top, 8)
-    }
-
-    /// 有效当前行（与 LyricsZoneView.effectiveCurrent 同款）：还没开唱
-    /// （-1）时从第一行起；越界时夹到末行。
-    private var landscapeEffectiveCurrent: Int {
-        guard !store.lyrics.isEmpty else { return 0 }
-        if store.currentLyricIndex < 0 { return 0 }
-        return min(store.currentLyricIndex, store.lyrics.count - 1)
-    }
-
-    /// 折叠态渲染的行：从第一行到当前行（只往上、不往下看，当前行贴底）。
-    private var landscapeVisibleIndices: [Int] {
-        guard !store.lyrics.isEmpty else { return [] }
-        return Array(0...landscapeEffectiveCurrent)
-    }
-
-    @ViewBuilder
-    private func landscapeLyricsContent(zoneWidth: CGFloat, zoneHeight: CGFloat, tier: PlayerTokens.PlayerSizeTier) -> some View {
-        if store.lyrics.isEmpty {
-            Text("这首歌没有歌词")
-                .font(.system(size: PlayerTokens.textMd))
-                .foregroundStyle(PlayerTokens.playerDim)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        } else {
-            ScrollViewReader { proxy in
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(landscapeVisibleIndices, id: \.self) { index in
-                            let line = store.lyrics[index]
-                            landscapeLyricsRow(line: line, distance: landscapeEffectiveCurrent - index, tier: tier)
-                                .id(index)
-                                // 行点按只跳转（点行是跳转，见行上的高优先级手势）。
-                                .highPriorityGesture(
-                                    TapGesture().onEnded {
-                                        store.seek(to: TimeInterval(line.startMs) / 1000)
-                                    }
-                                )
-                        }
-                    }
-                    // 内容不足一屏时也撑满区高、底对齐：当前行永远贴底、完整可见。
-                    // 显式给区宽——ScrollView 内容的布局宽由它定，不由最长
-                    // 单行歌词的理想宽定（同 LyricsZoneView 的 r21b 修法）。
-                    .frame(minWidth: zoneWidth, maxWidth: zoneWidth, minHeight: zoneHeight, alignment: .bottom)
-                }
-                // 禁手动滚动：自动跟随独占滚动，手指只点行跳转；点歌词区
-                // 空白处什么都不做。
-                .scrollDisabled(true)
-                .onAppear { scrollToLandscapeCurrent(proxy: proxy, animated: false) }
-                .onChange(of: store.currentLyricIndex) { _ in
-                    scrollToLandscapeCurrent(proxy: proxy, animated: true)
-                }
-                .onChange(of: store.lyrics) { _ in
-                    scrollToLandscapeCurrent(proxy: proxy, animated: false)
-                }
-            }
-        }
-    }
-
-    /// 滚到当前行，锚点 .bottom：当前行底边贴住歌词区底边（同 LyricsZoneView）。
-    private func scrollToLandscapeCurrent(proxy: ScrollViewProxy, animated: Bool) {
-        guard !store.lyrics.isEmpty, store.lyrics.indices.contains(landscapeEffectiveCurrent) else { return }
-        if animated {
-            withAnimation(.easeInOut(duration: 0.35)) {
-                proxy.scrollTo(landscapeEffectiveCurrent, anchor: .bottom)
-            }
-        } else {
-            proxy.scrollTo(landscapeEffectiveCurrent, anchor: .bottom)
-        }
-    }
-
-    /// 横屏默认歌词行（高对比，见 landscapeLyricsZone）：当前行大 + 红色，
-    /// 往上按距离逐行变淡（0.9 / 0.75 / 0.6 / 0.5），不模糊；
-    /// 翻译行 12px 白 0.8，另起一行，跟在对应行下方，与正文共用同一透明度。
-    private func landscapeLyricsRow(line: LyricLine, distance: Int, tier: PlayerTokens.PlayerSizeTier) -> some View {
-        let isCurrent = distance == 0
-        let rowOpacity: Double
-        if isCurrent {
-            rowOpacity = 1
-        } else {
-            switch distance {
-            case 1: rowOpacity = 0.9
-            case 2: rowOpacity = 0.75
-            case 3: rowOpacity = 0.6
-            default: rowOpacity = 0.5
-            }
-        }
-        return VStack(alignment: .leading, spacing: 2) {
-            landscapeLyricText(line: line, isCurrent: isCurrent, tier: tier)
-            if !line.translation.isEmpty {
-                Text(line.translation)
-                    .font(.system(size: PlayerTokens.textXs))
-                    .foregroundStyle(Color.white.opacity(0.8))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 4)
-        .opacity(rowOpacity)
-        .accessibilityLabel("歌词：\(line.text)，点按跳转到该句")
-        .accessibilityAddTraits(.isButton)
-    }
-
-    @ViewBuilder
-    private func landscapeLyricText(line: LyricLine, isCurrent: Bool, tier: PlayerTokens.PlayerSizeTier) -> some View {
-        if isCurrent, !line.words.isEmpty {
-            // 当前行 + 有逐字数据：逐字上色（唱到的字 accent + 600 字重，
-            // 未唱到的字白 0.85；原 LyricsZoneRowView 未唱到的是 playerDim 0.52）。
-            landscapeWordByWordText(line: line)
-                .font(.system(size: PlayerTokens.lyricsCurrentSize(tier)))
-                .lineLimit(1)
-        } else if isCurrent {
-            Text(line.text)
-                .font(.system(size: PlayerTokens.lyricsCurrentSize(tier), weight: .semibold))
-                .foregroundStyle(PlayerTokens.accent)
-                .lineLimit(1)
-        } else {
-            Text(line.text)
-                .font(.system(size: PlayerTokens.lyricsOtherSize(tier)))
-                .foregroundStyle(Color.white.opacity(0.85))
-                .lineLimit(1)
-        }
-    }
-
-    private func landscapeWordByWordText(line: LyricLine) -> Text {
-        let nowMs = Int(store.progress * 1000)
-        return line.words.reduce(Text("")) { partial, word in
-            let sung = word.startMs <= nowMs
-            let piece = Text(word.text)
-                .foregroundColor(sung ? PlayerTokens.accent : Color.white.opacity(0.85))
-                .fontWeight(sung ? .semibold : .regular)
-            return partial + piece
-        }
-    }
 
     // MARK: - 歌名 / 歌手 + 状态角标 / 播放失败原因
 
@@ -923,8 +896,8 @@ struct PlayerView: View {
     /// 无曲目时什么都不显示（空态只有「未在播放」+ 副标题）。
     /// r26：compactStyle 只由竖屏 artistBlock 在 compact 档传 true（角标行
     /// 压缩：胶囊字 11→10、纵向 padding 2→1，行上间距 4→2；角标行总增量
-    /// 22 → 约 17，省约 5pt，见文件底 r26 总账）。横屏 landscapeTitleTexts
-    /// 传 false，横屏一字不动；其余档传 false。
+    /// 22 → 约 17，省约 5pt，见文件底 r26 总账）。横屏传统模式（r35-7）
+    /// 不再调 statusCapsules（只显示当前 / 下一句歌词，不要角标行）；其余档传 false。
     /// r27：largeStyle 只由竖屏 artistBlock 在 large 档传 true，角标行同款
     /// 压缩（22 → 约 17，省约 5pt；失败原因行上间距 4→2，约 20 → 约 18），
     /// 与 artistBlock 间距（large + 有状态行 8/10 → 4/4）合计省 15pt，
@@ -979,32 +952,6 @@ struct PlayerView: View {
             .clipShape(Capsule())
     }
 
-    /// 横屏左上歌名块（r22 横屏重排）：与竖屏歌名块同内容（歌名 + 歌手 +
-    /// 状态角标），只改对齐为左对齐（歌名 + 歌手左对齐，不居中）；段间距与
-    /// 点按都不在这里——调用方给宽（变体顶行 220 + .clipped()；默认横屏
-    /// 左列 320（r33：260 → 320），行内 lineLimit 1 + minimumScaleFactor 0.5 自行截断），
-    /// 队列入口是控制行三条杠。
-    /// r29 task 7：默认横屏也复用本函数（左列封面下方的标题块，宽 260），
-    /// r35-6：02/04 变体顶行与 smallCoverHeader 已删，只剩默认横屏左列在用它。
-    /// 内容高与竖屏歌名块同款：compact 档歌名 28×1.25 + 2 + 副标题 13×1.3
-    /// = 54，状态角标行有内容时再 +22 = 76。
-    private func landscapeTitleTexts(tier: PlayerTokens.PlayerSizeTier) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(store.currentTrack?.title ?? "未在播放")
-                .font(.liziDisplay(size: PlayerTokens.titleSize(tier)))
-                .foregroundStyle(PlayerTokens.playerForeground)
-                .lineLimit(1)
-                .minimumScaleFactor(0.5)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text(subtitleText)
-                .font(.system(size: PlayerTokens.subtitleSize(tier)))
-                .foregroundStyle(PlayerTokens.playerSub)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            // r26：横屏 compactStyle 恒为 false（角标行不压缩，横屏一字不动）。
-            statusCapsules(compactStyle: false)
-        }
-    }
 
     /// 播放失败原因明示（PlaybackStore.errorMessage 的 reason 码，不编新文案，
     /// 只翻译成用户能看懂的话）。

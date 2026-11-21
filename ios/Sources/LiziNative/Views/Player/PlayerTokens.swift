@@ -230,59 +230,15 @@ enum PlayerTokens {
         }
     }
 
-    /// 大播放键直径（控制行行高 = 此值）。
-    /// r28：按壳版 phone.css `#view-now .now__transport` 1:1——
-    /// `.ntr--play` 66px；standard = 66；compact / large 按旧档比缩放
-    /// （66 × 60/68 = 58.2 → 58；66 × 76/68 = 73.8 → 74）。
-    /// 只 PlayerControlRow 用（v4 dock 有自己的 playDiameter），改它不牵连。
-    static func playSize(_ tier: PlayerSizeTier) -> CGFloat {
-        switch tier {
-        case .compact: return 58
-        case .standard: return 66
-        case .large: return 74
-        }
-    }
-
     /// 控制行小图标字号（上一首/下一首/队列列表）。
     /// r28：一字不动——v4 dock（PlayerBottomDock.transportIconFont）
-    /// 共用它；传统播放页控制行改用下面的 classicControlIconSize。
+    /// 共用它。（r35-7：传统播放页控制行 PlayerControlRow 已删。）
     static func controlIconSize(_ tier: PlayerSizeTier) -> CGFloat {
         switch tier {
         case .compact: return 22
         case .standard: return 24
         case .large: return 26
         }
-    }
-
-    /// 传统播放页控制行小图标字号（壳版 phone.css `.ntr .ico` 24px；
-    /// standard = 24，compact / large 按旧档比缩放：24 × 60/68 = 21.2 → 21，
-    /// 24 × 76/68 = 26.8 → 27）。只给 PlayerControlRow 用（上一首/下一首/
-    /// 爱心/队列三条杠），不碰上面共用的 controlIconSize。
-    static func classicControlIconSize(_ tier: PlayerSizeTier) -> CGFloat {
-        switch tier {
-        case .compact: return 21
-        case .standard: return 24
-        case .large: return 27
-        }
-    }
-
-    /// 传统播放页控制行模式键图标字号（壳版 `#ntr-mode .ico` 20px；
-    /// standard = 20，compact / large 按旧档比缩放：20 × 60/68 = 17.6 → 18，
-    /// 20 × 76/68 = 22.4 → 22）。模式键 = 随机 + 循环两个键（壳版只有一个
-    /// #ntr-mode，原生行里两个模式键都按 20 落）。
-    static func classicModeIconSize(_ tier: PlayerSizeTier) -> CGFloat {
-        switch tier {
-        case .compact: return 18
-        case .standard: return 20
-        case .large: return 22
-        }
-    }
-
-    /// 传统播放页控制行行内间距（壳版 `.now__transport` gap 10px；
-    /// 三档同一值 10；旧值 compact 16、其余 32）。
-    static func classicControlSpacing(_ tier: PlayerSizeTier) -> CGFloat {
-        _ = tier
-        return 10
     }
 
     /// 底部细进度条高（三档同值）。

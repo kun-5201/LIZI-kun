@@ -18,15 +18,26 @@ enum NativeBridge {
 
     /// LX 取链硬超时（第 15 轮：LX 脚本 Promise 可能永不 settle；25 秒不回就当失败）。
     static let lxTimeout: TimeInterval = 25
-    /// 每日推荐整链硬超时（r28：单腿都有超时，但网易匿名要连调两条
-    /// （recommend/songs + personalized，各 15s × 2 次重试）、QQ 登录态
-    /// 刷新 + 两条各 25s，最坏单次拉取 60–75s 才落空态；且每次回首页
-    /// 都从头拉。整链 25s 不回就当空、UI 走诚实空态，不让 spinner
-    /// 无限转。健康链路实测 0.3–5.2s（r28 真机前用 r27 Node 服务对
-    /// 真上游测过），25s 是约 5 倍余量。超时只掐断 UI 的等待——
-    /// 底下的 URLSession 取数不停（链路里没有取消检查点），它自己
-    /// 到腿超时就停，不泄漏。
-    static let dailyTimeout: TimeInterval = 25
+    /// 每条腿的独立预算（r35-9：套壳 api.js 每条腿 AbortSignal.timeout(60000)，
+    /// 主腿→兜底腿各拿一个全新 60 秒；原生之前整链共用 25 秒，4G 慢网下
+    /// 主腿一慢就吃光预算，兜底腿（personalized、雷达、推荐歌单合成）
+    /// 根本轮不到，用户只看到空态。套壳同一网络主腿 12 秒 + 兜底 12 秒
+    /// = 24 秒出数据，就是「每腿独立」省出来的）。
+    /// 每日推荐的每条腿（dailyTracks / synthesizedDailyTracks）与每栏
+    /// （HomeViewModel.loadRailPage）各包一层 60 秒；整链再包一层
+    /// dailyChainTimeout 兜底。
+    static let legTimeout: TimeInterval = 60
+    /// 每日推荐整链兜底（r35-9：每腿独立 60 秒之后，整链再包一层 120 秒；
+    /// 旧 dailyTimeout（整链 25 秒）作废——25 秒是 r28 的旧账（见下），
+    /// 链路里单腿 15–25 秒的上限仍在，120 秒只是外层兜底。
+    /// r28 旧账：单腿都有超时，但网易匿名要连调两条（recommend/songs +
+    /// personalized，各 15s × 2 次重试）、QQ 登录态刷新 + 两条各 25s，
+    /// 最坏单次拉取 60–75s 才落空态；且每次回首页都从头拉。整链 25s
+    /// 不回就当空、UI 走诚实空态，不让 spinner 无限转。健康链路实测
+    /// 0.3–5.2s（r28 真机前用 r27 Node 服务对真上游测过），25s 是约
+    /// 5 倍余量。超时只掐断 UI 的等待——底下的 URLSession 取数不停
+    /// （链路里没有取消检查点），它自己到腿超时就停，不泄漏。
+    static let dailyChainTimeout: TimeInterval = 120
     /// 搜索上游请求失败时回给 UI 的文案（P1 集成补的轻量错误通道：call 回 nil
     /// = 请求本身没通，不是「搜不到」；上游正常回空列表不走这里）。
     static let searchErrorText = "接口请求失败，请检查网络后重试"
@@ -94,6 +105,21 @@ enum NativeBridge {
               let obj = try? JSONSerialization.jsonObject(with: resp.body),
               let dict = obj as? [String: Any] else { return nil }
         return dict
+    }
+
+    /// 不论 2xx 与否都把 JSON 体还回来的调用（r35-9，套壳 callSoft 同款）：
+    /// `call` 在非 2xx 时直接回 nil，错误体（code/error/message）全丢了，
+    /// 空态只能写一句通用话；这里把 (status, dict) 一起还回来，调用方
+    /// （dailyTracks / RailsBridge.railError）自己按体里的 code/error 判。
+    /// 没体（空 body / 解析失败）时 dict 为 nil，与 `call` 的失败口径一致。
+    static func callSoft(path: String, query: [String: String] = [:],
+                         method: String = "GET") async -> (status: Int, dict: [String: Any]?) {
+        let req = HttpRequest(method: method, path: path, query: query,
+                              headers: [:], body: Data())
+        let resp = await router.handle(req)
+        guard let obj = try? JSONSerialization.jsonObject(with: resp.body),
+              let dict = obj as? [String: Any] else { return (resp.status, nil) }
+        return (resp.status, dict)
     }
 
     /// 带 JSON body 的调用（r23a 登录底座；现有无 body 的 `call` 一行没动）。
@@ -779,14 +805,21 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
     ///   （synthesizedDailyTracks：推荐歌单前 3 张详情并行取、展平、
     ///   「歌名|歌手」小写去重、截 30 条；主腿有数据时不走）；汽水/波点
     ///   无合成腿（Moumusic 无对照），Apple Music 不用（RSS 通）。
-    /// - r28：整链包一层 dailyTimeout（25s）硬超时，见 dailyTimeout 注释；
-    ///   超时按空处理，loadDaily 走诚实空态，不留 spinner。
+    /// - r35-9：每条腿独立 60 秒（dailyTracksTimed / synthesizedDailyTracksTimed，
+    ///   套壳每腿 AbortSignal.timeout(60000) 同款），整链再包一层
+    ///   dailyChainTimeout（120s）兜底；旧整链 25 秒（dailyTimeout）作废——
+    ///   25 秒是 r28 的旧账，单腿最坏 30–80 秒，整链 25 秒掐的是兜底腿
+    ///   的命，不是掐慢网。网易主腿 + 兜底腿、QQ 主腿 + 雷达腿用 async let
+    ///   并行取，主腿有数据用主腿、主腿空用兜底，耗时取两者最大值
+    ///   （主腿 401 未登录时仍走兜底，兜底数据不标成主腿数据写缓存——
+    ///   缓存只存曲目 + 空原因，不存腿名，见 HomeDataCache）。
+    /// - r28：整链包一层硬超时；超时按空处理，loadDaily 走诚实空态，不留 spinner。
     /// - r33：r31-daily 的“弃子竞速”仍建立在 withTimeout（TaskGroup）
     ///   之上，群组等腿的假设没有实测证据，真机（2026-11-21）7 平台仍
     ///   全部转圈。withTimeout 本身已改成 detached 竞速（见其注释），
     ///   这里不再另起 opTask，直接把整链放进 withTimeout；超时/取消
-    ///   25s 一到必回空结果，spinner 必停；被弃的腿留在后台、自己到腿
-    ///   超时就停（各腿 15–25s 都有上限），它只读上游、不写任何 UI 状态。
+    ///   120s 一到必回空结果，spinner 必停；被弃的腿留在后台、自己到腿
+    ///   超时就停（各腿 60s 都有上限），它只读上游、不写任何 UI 状态。
     /// - r31-daily：回值改成 DailyResult（曲目 + 空原因）：旧写法只回
     ///   [DailyTrack]，主腿 301/401（未登录）与请求失败的信息全丢了，
     ///   空态只能写一句通用话，用户问“是不是系统不认登录”答不上来。
@@ -800,14 +833,90 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
 
     static func dailyRecommend(platform: String) async -> DailyResult {
         do {
-            return try await withTimeout(seconds: Self.dailyTimeout) {
+            return try await withTimeout(seconds: Self.dailyChainTimeout) {
                 await dailyRecommendUntimed(platform: platform)
             }
         } catch is CancellationError {
             return DailyResult(tracks: [], emptyReason: nil)
         } catch {
-            // 超时（TimeoutError）必走这里：25s 一到即回，不等被弃的腿。
-            return DailyResult(tracks: [], emptyReason: "每日推荐拉取超时（25 秒无响应），请检查网络后重试。")
+            // 超时（TimeoutError）必走这里：120s 一到即回，不等被弃的腿。
+            return DailyResult(tracks: [], emptyReason: "每日推荐拉取超时（120 秒无响应），请检查网络后重试。")
+        }
+    }
+
+    /// 排行榜目录（r35-10：面板里的排行榜块用；Moumusic 榜单按平台分明，
+    /// 只有实现了榜单目录的平台才有榜，没榜的平台老实写没有、不编假榜）。
+    /// - 有榜单目录：网易 eapi /toplist、QQ musicu GetAll、酷狗 rank/list、
+    ///   酷我 /api/kuwo/rank/list（已有全链路）。各走独立 60 秒预算（r35-9
+    ///   同款每腿预算），callSoft 透传非 2xx 错误体，空态带上游原话。
+    /// - 没榜单目录：汽水（两端都没有）→「汽水暂无官方排行榜」，不发请求；
+    ///   Apple Music（没有榜单目录；公开 RSS 热门歌曲榜已接在每日推荐里，
+    ///   不是目录，别冒充）→「Apple Music 暂无官方榜单目录」，不发请求；
+    ///   波点（VM 实测 2026-11-21：静态页域名被 DNS 拦到 webblock 页，
+    ///   接口不可用）→「波点榜单接口不可用」，不发请求、不硬上。
+    /// 回 (boards, emptyReason)：有榜时 emptyReason 为 nil；没榜/拉不到时
+    /// emptyReason 是诚实文案（块里只画标题行 + 这句，不隐藏整块）。
+    static func rankBoards(platform: String) async -> (boards: [RankBoard], emptyReason: String?) {
+        switch platform {
+        case "bodian":
+            return ([], "波点榜单接口不可用（上游静态榜单页已无法访问）。")
+        case "qishui":
+            return ([], "汽水暂无官方排行榜。")
+        case "applemusic":
+            return ([], "Apple Music 暂无官方榜单目录（热门歌曲榜已在每日推荐里）。")
+        case "netease", "qq", "kugou", "kuwo":
+            break
+        default:
+            return ([], "该平台暂无排行榜。")
+        }
+        let path: String
+        switch platform {
+        case "netease": path = "/api/toplist"
+        case "qq": path = "/api/qq/rank/list"
+        case "kugou": path = "/api/kugou/rank/list"
+        default: path = "/api/kuwo/rank/list"
+        }
+        let start = Date()
+        do {
+            let (status, dict) = try await withTimeout(seconds: Self.legTimeout) {
+                await callSoft(path: path)
+            }
+            let ms = Int(Date().timeIntervalSince(start) * 1000)
+            let code = (dict?["code"] as? NSNumber)?.intValue ?? status
+            let boards = ((dict?["playlists"] as? [[String: Any]]) ?? []).compactMap { p -> RankBoard? in
+                let id: String
+                if let s = p["id"] as? String, !s.isEmpty { id = s }
+                else if let n = p["id"] as? NSNumber { id = n.stringValue }
+                else { return nil }
+                let name = (p["name"] as? String) ?? ""
+                guard !name.isEmpty else { return nil }
+                let cover = (p["cover"] as? String) ?? ""
+                let count = (p["tracks"] as? NSNumber)?.intValue ?? (p["trackCount"] as? NSNumber)?.intValue ?? 0
+                return RankBoard(id: id, name: name,
+                                 coverURL: cover.isEmpty ? nil : URL(string: cover),
+                                 trackCount: count)
+            }
+            let failed = !(200...299).contains(code)
+            DiagLog.shared.recordLog(category: "rank", message: "rank list",
+                                     fields: ["platform": platform, "leg": path, "ms": ms,
+                                              "count": boards.count, "code": code, "timedOut": false])
+            if failed {
+                let err = (dict?["error"] as? String) ?? (dict?["message"] as? String) ?? ""
+                let reason = err.isEmpty
+                    ? "排行榜目录拉取失败（code=\(code)），请检查网络后重试。"
+                    : "排行榜目录拉取失败（上游：\(err)）。"
+                return ([], reason)
+            }
+            if boards.isEmpty {
+                return ([], "该平台暂未返回排行榜。")
+            }
+            return (boards, nil)
+        } catch {
+            DiagLog.shared.recordLog(category: "rank", message: "rank list timeout",
+                                     fields: ["platform": platform, "leg": path,
+                                              "ms": Int(Self.legTimeout * 1000),
+                                              "count": 0, "code": -1, "timedOut": true])
+            return ([], "排行榜目录拉取超时（60 秒无响应），请检查网络后重试。")
         }
     }
 
@@ -857,76 +966,134 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
         return out
     }
 
+    /// 一条每日腿包一层 60 秒独立预算（r35-9，套壳每腿 AbortSignal.timeout(60000)
+    /// 同款）：超时按失败腿回（failed = true），不抛错、不拦后面的腿。
+    /// 分腿耗时记进诊断日志（P1-4）：平台、腿名、耗时毫秒、结果条数/code/
+    /// 是否超时——下次报「拉不到数据」时日志直接写明哪条腿花了多少秒。
+    private static func dailyTracksTimed(path: String, query: [String: String] = [:],
+                                         platform: String) async -> DailyLeg {
+        let start = Date()
+        do {
+            let leg = try await withTimeout(seconds: Self.legTimeout) {
+                await dailyTracks(path: path, query: query, platform: platform)
+            }
+            let ms = Int(Date().timeIntervalSince(start) * 1000)
+            DiagLog.shared.recordLog(category: "daily", message: "daily leg",
+                                     fields: ["platform": platform, "leg": path, "ms": ms,
+                                              "count": leg.tracks.count, "code": leg.code,
+                                              "timedOut": false])
+            return leg
+        } catch {
+            DiagLog.shared.recordLog(category: "daily", message: "daily leg timeout",
+                                     fields: ["platform": platform, "leg": path,
+                                              "ms": Int(Self.legTimeout * 1000),
+                                              "count": 0, "code": -1, "timedOut": true])
+            return DailyLeg(tracks: [], unauthorized: false, failed: true, code: -1)
+        }
+    }
+
+    /// 合成兜底腿包一层 60 秒独立预算（r35-9，P1-2：与 P0-1 一起改，
+    /// 否则合成腿在慢网上永远跑不到；超时回 []，调用方走诚实空态）。
+    /// 分腿耗时记进诊断日志（P1-4），腿名 "synth"。
+    private static func synthesizedDailyTracksTimed(platform: String) async -> [DailyTrack] {
+        let start = Date()
+        do {
+            let tracks = try await withTimeout(seconds: Self.legTimeout) {
+                await synthesizedDailyTracks(platform: platform)
+            }
+            let ms = Int(Date().timeIntervalSince(start) * 1000)
+            DiagLog.shared.recordLog(category: "daily", message: "daily leg",
+                                     fields: ["platform": platform, "leg": "synth",
+                                              "ms": ms, "count": tracks.count,
+                                              "code": 200, "timedOut": false])
+            return tracks
+        } catch {
+            DiagLog.shared.recordLog(category: "daily", message: "daily leg timeout",
+                                     fields: ["platform": platform, "leg": "synth",
+                                              "ms": Int(Self.legTimeout * 1000),
+                                              "count": 0, "code": -1, "timedOut": true])
+            return []
+        }
+    }
+
     /// 每日推荐整链（无超时；dailyRecommend 的超时壳调这里）。
     private static func dailyRecommendUntimed(platform: String) async -> DailyResult {
         switch platform {
         case "netease":
-            let main = await dailyTracks(path: "/api/recommend/songs", platform: platform)
+            // r35-9：主腿 + 兜底腿 async let 并行取（各 60 秒独立预算），
+            // 耗时取两者最大值；主腿有数据用主腿、主腿空用兜底。
+            async let mainLeg = dailyTracksTimed(path: "/api/recommend/songs", platform: platform)
+            async let fbLeg = dailyTracksTimed(path: "/api/personalized", platform: platform)
+            let main = await mainLeg
+            let fallback = await fbLeg
             if !main.tracks.isEmpty { return DailyResult(tracks: main.tracks, emptyReason: nil) }
-            let fallback = await dailyTracks(path: "/api/personalized", platform: platform)
             if !fallback.tracks.isEmpty { return DailyResult(tracks: fallback.tracks, emptyReason: nil) }
             // r33：主腿 + 推荐新歌都空，走推荐歌单合成兜底（/api/top/playlist 前 3 张）。
-            let synth = await synthesizedDailyTracks(platform: platform)
+            let synth = await synthesizedDailyTracksTimed(platform: platform)
             if !synth.isEmpty { return DailyResult(tracks: synth, emptyReason: nil) }
             if main.unauthorized {
-                return DailyResult(tracks: [], emptyReason: "未登录网易云：每日推荐需要登录才能拉取；推荐新歌、推荐歌单合成也没返回内容，请登录网易云后重试，或检查网络。")
+                return DailyResult(tracks: [], emptyReason: withServerMessage("未登录网易云：每日推荐需要登录才能拉取；推荐新歌、推荐歌单合成也没返回内容，请登录网易云后重试，或检查网络。", main))
             }
             if main.failed && fallback.failed {
-                return DailyResult(tracks: [], emptyReason: "网易云每日推荐、推荐新歌和推荐歌单合成都请求失败，请检查网络后重试。")
+                return DailyResult(tracks: [], emptyReason: withServerMessage("网易云每日推荐、推荐新歌和推荐歌单合成都请求失败，请检查网络后重试。", main.failed ? main : fallback))
             }
             return DailyResult(tracks: [], emptyReason: nil)
         case "qq":
-            let main = await dailyTracks(path: "/api/qq/user/daily-songs", platform: platform)
+            // r35-9：主腿 + 雷达腿 async let 并行取（各 60 秒独立预算），
+            // 耗时取两者最大值；主腿有数据用主腿、主腿空用兜底。
+            async let mainLeg = dailyTracksTimed(path: "/api/qq/user/daily-songs", platform: platform)
+            async let fbLeg = dailyTracksTimed(path: "/api/qq/recommend/radar",
+                                               query: ["page": "1"], platform: platform)
+            let main = await mainLeg
+            let fallback = await fbLeg
             if !main.tracks.isEmpty { return DailyResult(tracks: main.tracks, emptyReason: nil) }
-            let fallback = await dailyTracks(path: "/api/qq/recommend/radar",
-                                             query: ["page": "1"], platform: platform)
             if !fallback.tracks.isEmpty { return DailyResult(tracks: fallback.tracks, emptyReason: nil) }
             // r33：雷达兜底（GetRadarSong）是否真回数据从未验证过——空了就改走
             // 推荐歌单合成腿（/api/qq/recommend/playlists 前 3 张详情）。
-            let synth = await synthesizedDailyTracks(platform: platform)
+            let synth = await synthesizedDailyTracksTimed(platform: platform)
             if !synth.isEmpty { return DailyResult(tracks: synth, emptyReason: nil) }
             if main.unauthorized {
-                return DailyResult(tracks: [], emptyReason: "未登录 QQ 音乐：每日推荐需要登录才能拉取；雷达推荐、推荐歌单合成也没返回内容，请登录 QQ 音乐后重试，或检查网络。")
+                return DailyResult(tracks: [], emptyReason: withServerMessage("未登录 QQ 音乐：每日推荐需要登录才能拉取；雷达推荐、推荐歌单合成也没返回内容，请登录 QQ 音乐后重试，或检查网络。", main))
             }
             if main.failed && fallback.failed {
-                return DailyResult(tracks: [], emptyReason: "QQ 音乐每日推荐、雷达推荐和推荐歌单合成都请求失败，请检查网络后重试。")
+                return DailyResult(tracks: [], emptyReason: withServerMessage("QQ 音乐每日推荐、雷达推荐和推荐歌单合成都请求失败，请检查网络后重试。", main.failed ? main : fallback))
             }
             return DailyResult(tracks: [], emptyReason: nil)
         case "qishui":
-            let leg = await dailyTracks(path: "/api/qishui/feed",
-                                        query: ["count": "20"], platform: platform)
+            let leg = await dailyTracksTimed(path: "/api/qishui/feed",
+                                             query: ["count": "20"], platform: platform)
             return DailyResult(tracks: leg.tracks,
                                emptyReason: leg.tracks.isEmpty
-                                ? (leg.failed ? "汽水推荐流请求失败，请检查网络后重试。" : "汽水推荐流没有返回内容（汽水音乐需要设备注册/登录，请在设置里登录汽水音乐后重试）。") : nil)
+                                ? (leg.failed ? withServerMessage("汽水推荐流请求失败，请检查网络后重试。", leg) : "汽水推荐流没有返回内容（汽水音乐需要设备注册/登录，请在设置里登录汽水音乐后重试）。") : nil)
         case "bodian":
-            let leg = await dailyTracks(path: "/api/bodian/ai/playlist",
-                                        query: ["index": "0"], platform: platform)
+            let leg = await dailyTracksTimed(path: "/api/bodian/ai/playlist",
+                                             query: ["index": "0"], platform: platform)
             return DailyResult(tracks: leg.tracks,
                                emptyReason: leg.tracks.isEmpty
-                                ? (leg.failed ? "波点潮趣日推请求失败，请检查网络后重试。" : "波点潮趣日推没有返回内容（波点需要登录，请在设置里登录波点后重试）。") : nil)
+                                ? (leg.failed ? withServerMessage("波点潮趣日推请求失败，请检查网络后重试。", leg) : "波点潮趣日推没有返回内容（波点需要登录，请在设置里登录波点后重试）。") : nil)
         case "kuwo":
-            let leg = await dailyTracks(path: "/api/kuwo/daily", platform: platform)
+            let leg = await dailyTracksTimed(path: "/api/kuwo/daily", platform: platform)
             if !leg.tracks.isEmpty { return DailyResult(tracks: leg.tracks, emptyReason: nil) }
             // r33：主腿空，走推荐歌单合成兜底（/api/kuwo/recommend/playlists 前 3 张）。
-            let synth = await synthesizedDailyTracks(platform: platform)
+            let synth = await synthesizedDailyTracksTimed(platform: platform)
             if !synth.isEmpty { return DailyResult(tracks: synth, emptyReason: nil) }
             return DailyResult(tracks: leg.tracks,
-                               emptyReason: leg.failed ? "酷我每日推荐请求失败，推荐歌单合成也没返回内容，请检查网络后重试。" : "酷我今日没有返回推荐内容（每日推荐与推荐歌单合成都为空）。")
+                               emptyReason: leg.failed ? withServerMessage("酷我每日推荐请求失败，推荐歌单合成也没返回内容，请检查网络后重试。", leg) : "酷我今日没有返回推荐内容（每日推荐与推荐歌单合成都为空）。")
         case "kugou":
-            let leg = await dailyTracks(path: "/api/kugou/everyday/recommend", platform: platform)
+            let leg = await dailyTracksTimed(path: "/api/kugou/everyday/recommend", platform: platform)
             if !leg.tracks.isEmpty { return DailyResult(tracks: leg.tracks, emptyReason: nil) }
             // r33：主腿（everyday_song_recommend，先保留）空，走推荐歌单合成兜底
             // （/api/kugou/top/playlists 前 3 张，壳版精选歌单同款；r34：
             // 旧推荐端点是 yueku http，壳版无此路由且真机 ATS 拦 http）。
-            let synth = await synthesizedDailyTracks(platform: platform)
+            let synth = await synthesizedDailyTracksTimed(platform: platform)
             if !synth.isEmpty { return DailyResult(tracks: synth, emptyReason: nil) }
             return DailyResult(tracks: leg.tracks,
-                               emptyReason: leg.failed ? "酷狗每日推荐请求失败，推荐歌单合成也没返回内容，请检查网络后重试。" : "酷狗今日没有返回推荐内容（每日推荐与推荐歌单合成都为空）。")
+                               emptyReason: leg.failed ? withServerMessage("酷狗每日推荐请求失败，推荐歌单合成也没返回内容，请检查网络后重试。", leg) : "酷狗今日没有返回推荐内容（每日推荐与推荐歌单合成都为空）。")
         case "applemusic":
-            let leg = await dailyTracks(path: "/api/applemusic/daily", platform: platform)
+            let leg = await dailyTracksTimed(path: "/api/applemusic/daily", platform: platform)
             return DailyResult(tracks: leg.tracks,
                                emptyReason: leg.tracks.isEmpty
-                                ? (leg.failed ? "Apple Music 每日推荐请求失败，请检查网络后重试。" : nil) : nil)
+                                ? (leg.failed ? withServerMessage("Apple Music 每日推荐请求失败，请检查网络后重试。", leg) : nil) : nil)
         default:
             return DailyResult(tracks: [], emptyReason: nil)
         }
@@ -936,21 +1103,46 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
     /// r31-daily：回腿结果不只给曲目——上游 301/401（未登录）与请求失败
     /// （call 回 nil / 包里 code 非 200）要原样带给调用方，空态才能说清
     /// 是没登录还是没网；rows 仍只认 { tracks } / { data } / { songs }，
-    /// 不编假数据。code 缺键时按 200（成功）算，不把无 code 的成功包判失败。
+    /// 不编假数据。code 缺键时按 HTTP 状态算（callSoft 透传；无状态时 200，
+    /// 不把无 code 的成功包判失败）。
+    /// r35-9：code/errorText 从 callSoft 的体里读（非 2xx 的体以前被 `call`
+    /// 直接丢掉，401 也只能报「请求失败」）；errorText 是体里的 error /
+    /// message / msg 原话，空态文案缀在后面（见 withServerMessage）。
     private struct DailyLeg {
         var tracks: [DailyTrack]
         /// 上游明确说没登录（包里 code 301/401，如网易 301、QQ 401）。
         var unauthorized: Bool
-        /// 请求本身没通（call 回 nil）或包里 code 非 200/301/401。
+        /// 请求本身没通（没体）或包里 code 非 2xx/301/401。
         var failed: Bool
+        /// 上游回的 code（体里 code 缺键时取 HTTP 状态；没体时 -1）。
+        var code: Int
+        /// 体里的 error / message / msg 原话（没有时 nil，不编）。
+        var errorText: String?
+
+        init(tracks: [DailyTrack], unauthorized: Bool, failed: Bool,
+             code: Int = 200, errorText: String? = nil) {
+            self.tracks = tracks
+            self.unauthorized = unauthorized
+            self.failed = failed
+            self.code = code
+            self.errorText = errorText
+        }
+    }
+
+    /// 空原因后挂上游原话（r35-9）：腿里带回来的 errorText（体里的 error /
+    /// message / msg）有值时缀在文案后，没值时原文案不动，不编。
+    private static func withServerMessage(_ base: String, _ leg: DailyLeg) -> String {
+        guard let msg = leg.errorText, !msg.isEmpty else { return base }
+        return "\(base)（上游：\(msg)）"
     }
 
     private static func dailyTracks(path: String, query: [String: String] = [:],
                                     platform: String) async -> DailyLeg {
-        guard let d = await call(path: path, query: query) else {
-            return DailyLeg(tracks: [], unauthorized: false, failed: true)
+        let (status, d) = await callSoft(path: path, query: query)
+        guard let d else {
+            return DailyLeg(tracks: [], unauthorized: false, failed: true, code: -1)
         }
-        let code = (d["code"] as? NSNumber)?.intValue ?? 200
+        let code = (d["code"] as? NSNumber)?.intValue ?? status
         // r33：多键解析——除 tracks/data/songs 外再扫 list/rows/result/
         // dailySongs/recommend；data 是字典时再往里一层扫
         // list/tracks/songs/recommend/dailySongs（网易 recommend/songs
@@ -976,7 +1168,10 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
             .map { DailyTrack(track: $0) }
         return DailyLeg(tracks: tracks,
                         unauthorized: code == 301 || code == 401,
-                        failed: code != 200 && code != 301 && code != 401)
+                        failed: !(200...299).contains(code) && code != 301 && code != 401,
+                        code: code,
+                        errorText: (d["error"] as? String)
+                            ?? (d["message"] as? String) ?? (d["msg"] as? String))
     }
 
     /// 歌单全量曲目（r31：面板「点歌单看全部歌曲」用；旧实现只取一页——汽水/
@@ -1014,6 +1209,24 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
             }
             return all
         case "kugou":
+            if isRank {
+                // r35-10：酷狗榜单详情走 /api/kugou/rank/song，page + pagesize 100，
+                // 翻到 total 为止，最多 10 页（P1-4；TOP500 = 5 页）。
+                var all: [Track] = []
+                var total = 0
+                for page in 1...10 {
+                    guard let d = await call(path: "/api/kugou/rank/song",
+                                             query: ["id": id, "limit": "100", "page": "\(page)"]),
+                          (d["code"] as? NSNumber)?.intValue == 200 else { break }
+                    let rows = (d["tracks"] as? [[String: Any]]) ?? []
+                    let tracks = rows.compactMap { Track.from(dict: $0, platform: platform) }
+                    all.append(contentsOf: tracks)
+                    total = (d["total"] as? NSNumber)?.intValue ?? total
+                    if total > 0, all.count >= total { break }
+                    if tracks.count < 100 { break }
+                }
+                return all
+            }
             var all: [Track] = []
             for page in 1...20 {
                 guard let d = await call(path: "/api/kugou/playlist/tracks",
@@ -1049,6 +1262,11 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
     /// - detail 本身回全量（名/封面/曲数/曲目），一次就够：
     ///   netease /api/playlist/detail（normalize 回 { playlist, tracks }）、
     ///   qq /api/qq/playlist/detail（回 { name, cover, tracks, trackCount }）。
+    /// - 榜单详情（r35-10，isRank=true）：网易榜单 id 即歌单 id，沿用
+    ///   playlist/detail；QQ 走 /api/qq/rank/tracks（GetDetail + songId 换
+    ///   mid；playlistMeta 不发请求，页头靠 P0-4 的种子）；酷狗不调
+    ///   playlist/detail，曲目走 /api/kugou/rank/song 翻页取全量；
+    ///   酷我走 /api/kuwo/rank/tracks（无名/封面端点，页头靠种子）。
     /// - detail 只回元信息（名/封面/曲数，无曲目）+ tracks 只回曲目，两步合并：
     ///   bodian /api/bodian/playlist/detail（{ playlist: bodianPlaylist }）
     ///     + /api/bodian/playlist/tracks（{ tracks, more }）；
@@ -1077,7 +1295,18 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
         case "netease", "qq":
             // detail 端点本身回全量，一次就够（meta 已带曲目时直接用它）。
             if let meta, !meta.tracks.isEmpty { return meta }
-            let path = platform == "netease" ? "/api/playlist/detail" : "/api/qq/playlist/detail"
+            let path: String
+            if platform == "netease" {
+                // 榜单 id 即歌单 id，沿用 playlist/detail（normalize 自带
+                // trackIds 补全，热歌榜 10 首预览也能拉全）。
+                path = "/api/playlist/detail"
+            } else if isRank {
+                // r35-10：QQ 榜单详情不走歌单 detail（topId 不是歌单 dissid），
+                // 走新的 /api/qq/rank/tracks（musicu GetDetail + songId 换 mid）。
+                path = "/api/qq/rank/tracks"
+            } else {
+                path = "/api/qq/playlist/detail"
+            }
             guard let d = await call(path: path, query: ["id": id]) else {
                 return meta ?? Playlist(id: id, source: platform)
             }
@@ -1095,11 +1324,15 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
             var pl = Playlist(id: id, source: platform)
             if let meta, !meta.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 pl = meta
+            } else if isRank, platform == "kugou" {
+                // r35-10：酷狗榜单详情不调 /api/kugou/playlist/detail
+                //（rankid 不是歌单 id）；页头靠 PlaylistDetailViewModel 传入的
+                // 榜单名/封面种子（P0-4），曲目走下面的 playlistAllTracks(isRank: true)。
             } else if let d = await call(path: detailPath, query: ["id": id]) {
                 pl = playlistFrom(dict: d, platform: platform, id: id)
             }
             // r31：曲目走 playlistAllTracks 翻页取全量（旧实现只取一页 limit 50）。
-            pl.tracks = await playlistAllTracks(platform: platform, id: id)
+            pl.tracks = await playlistAllTracks(platform: platform, id: id, isRank: isRank)
             if pl.trackCount == 0 { pl.trackCount = pl.tracks.count }
             return pl
         case "kuwo":
@@ -1150,6 +1383,11 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
             }
             return playlistFrom(dict: d, platform: platform, id: id)
         case "qq":
+            if isRank {
+                // r35-10：rank id 不是歌单 id，调 playlist/detail 会失败；
+                // 页头靠 P0-4 的种子，直接回空 Playlist，不发请求。
+                return Playlist(id: id, source: platform)
+            }
             guard let d = await call(path: "/api/qq/playlist/detail", query: ["id": id]) else {
                 return Playlist(id: id, source: platform)
             }
@@ -1165,6 +1403,11 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
             }
             return playlistFrom(dict: d, platform: platform, id: id)
         case "kugou":
+            if isRank {
+                // r35-10：rank id 不是歌单 id，调 playlist/detail 会失败；
+                // 页头靠 P0-4 的种子，直接回空 Playlist，不发请求。
+                return Playlist(id: id, source: platform)
+            }
             guard let d = await call(path: "/api/kugou/playlist/detail", query: ["id": id]) else {
                 return Playlist(id: id, source: platform)
             }

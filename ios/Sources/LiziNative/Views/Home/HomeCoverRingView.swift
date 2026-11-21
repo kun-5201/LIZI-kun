@@ -518,6 +518,21 @@ import UIKit
 /// 展开 520ms/收回 430ms/点空白 220ms/松手 1s 收、惯性 τ=1.08s +
 /// 弹簧 118 吸附、点卡播歌收回、下滑 >90px 退出、变暗三档。
 /// 驱动见 verification/r34-ring.cjs。
+///
+/// r35-8（2026-11-21，用户 19:07「修复 3d 滑动的时候像把卡片丢掉的拖影」，
+/// 19:08「只需要像个圆柱体一样一直转动就行」「看看套壳版」）：
+/// 根因钉死：`visibleSlots()` 只取中心±1 格，槽位在 world ±60°
+/// （facing 0.5、透明度 1）时硬弹出/消失——拖动中每转 40° 就有一张
+/// 全不透明的卡在屏内凭空消失、对面凭空出现一张，看着就像把卡片甩出去。
+/// 平带重影已排除：环开着时平带透明度 = 1 - overlayOpacity = 0，拖动里
+/// `syncFlatOffsetToRingCenter` 只动看不见的带子；文件里没有 rasterize /
+/// .drawingGroup / .blur，拖动路径上也没有 .animation（没有动画滞后/过冲）。
+/// 修法：窗口放回中心±2（r31 由 ±2 收成 ±1 的那次改动作废），槽位进出
+/// 发生在 |world| = 86.5°（facing 0.06、透明度 ≈ 0）处，再经 0.06–0.30
+/// smoothstep 淡入/淡出——套壳 ring.js 9 槽固定身份绕圆柱转同款；
+/// 静止时边缘多两张约 0.46 透明度的淡卡（壳版同款）。拖动 1:1 /
+/// 松手惯性 + 弹簧 / pitch / 压暗 / 后仰 / 位置 / 绑定一字不动。
+/// 驱动见 verification/r35.cjs §O。
 
 // MARK: - 状态机
 
@@ -537,6 +552,9 @@ final class HomeCoverRingModel: ObservableObject {
     /// 故不用 @Published；调用方经 syncInputs 同步 playback.currentTrack）。
     var playingKey: String?
     @Published var isLoadingDaily = false
+    /// 每日推荐 spinner 是否可见（r35-9，P0-2：250ms 后仍未回来才亮；
+    /// 视图只认这面旗子亮 spinner，不认 isLoadingDaily）。
+    @Published var dailySpinnerVisible = false
     @Published var dailyEmptyReason: String?
     @Published var marqueeSpeed: CGFloat = 24
     @Published var tier: PlayerTokens.PlayerSizeTier = .standard
@@ -703,6 +721,7 @@ final class HomeCoverRingModel: ObservableObject {
     /// 调用方数据同步进来；曲目 id 集合变了（切平台/重拉）才重置
     /// （壳版 setItems 同款语义）。
     func syncInputs(daily: [Track], isLoading: Bool,
+                    spinnerVisible: Bool,
                     emptyReason: String?, playing: Track?,
                     speed: CGFloat,
                     tier: PlayerTokens.PlayerSizeTier,
@@ -712,6 +731,7 @@ final class HomeCoverRingModel: ObservableObject {
         dailyTracks = daily
         playingKey = playing.map { $0.platform + ":" + $0.id }
         isLoadingDaily = isLoading
+        dailySpinnerVisible = spinnerVisible
         dailyEmptyReason = emptyReason
         marqueeSpeed = speed
         self.tier = tier
@@ -1409,19 +1429,31 @@ final class HomeCoverRingModel: ObservableObject {
         let trackIndex: Int
     }
 
-    /// 可见槽位：一次只见 3 张（实拍 f_050 也是 3 张：左一张切半、中间完整、
-    /// 右一张切半；r30 v5 图口径同值）——中心槽前后各一格
-    /// （world ±40°）；|world| ≤ 86.5°（facing > 0.06）仍作第二道防线，
-    /// 同一首歌只出现一次（曲目 < 3 首时不复制，壳版 n = min(曲数, 环容量) 同款）。
-    /// 旧的中心±2 会在转环半途多露一格（world ±60° 在屏边各剩约 12pt 边角；
-    /// r31 起环层全屏宽不裁切，±60° 的卡真会露出来，所以仍收成 3 张）。
+    /// 可见槽位（r35-8，拖影根因）：中心槽前后各两格（world ±80°），
+    /// 不再是 ±1 格。旧 ±1 的问题：槽位在 world ±60°（facing 0.5、
+    /// facingOpacity = 1）时硬弹出/消失——拖动中每转 40° 就有一张
+    /// 全不透明的卡在屏内凭空消失、对面凭空出现一张，看着就像把卡片
+    /// 甩出去丢掉（用户 19:07「像把卡片丢掉的拖影」）；套壳 ring.js
+    /// 是 9 个槽位固定身份绕圆柱转、只按 facing 淡出，卡片从不在屏内
+    /// 凭空出现/消失。改 ±2 后槽位进出窗口发生在 |world| = 86.5°
+    /// （facing 0.06、facingOpacity ≈ 0）处，再经 0.06–0.30 smoothstep
+    /// 淡入/淡出——圆柱体一直转，拖动就是干净的圆柱转动。
+    /// 静止时多露的两格在 world ±80°、透明度约 0.46、贴在屏边（壳版同款
+    /// 边缘淡卡；旧「一次只见 3 张」是 r31 按 f_050 定的，淡入淡出
+    /// 的代价就是边缘多两张淡卡）；|world| ≤ 86.5°（facing > 0.06）
+    /// 仍作第二道防线，同一首歌只出现一次（曲目 < 5 首时不复制，
+    /// 壳版 n = min(曲数, 环容量) 同款）。
+    /// 拖动 1:1 / 松手惯性 + 弹簧 / pitch / 压暗 / 后仰 / 位置 / 绑定
+    /// 一字不动（见 ringDragMoved / ringDragEnded）；文件里没有
+    /// rasterize / .drawingGroup / .blur（拖影不是栅格化糊的），
+    /// 拖动路径上也没有 .animation（没有动画滞后/过冲）。
     func visibleSlots() -> [RingSlot] {
         guard !tracks.isEmpty else { return [] }
         let q = -angle / ringStep
         let center = Int(q.rounded())
         var seen = Set<Int>()
         var out: [RingSlot] = []
-        for s in (center - 1)...(center + 1) {
+        for s in (center - 2)...(center + 2) {
             let world = (CGFloat(s) - q) * ringStep
             guard abs(world) <= 86.5 else { continue }
             let idx = mod(anchorIndex + s, tracks.count)
@@ -1658,6 +1690,9 @@ struct HomeCoverRingView: View {
     /// 每日推荐曲目（调用方传 `viewModel.daily.map { $0.track }`）。
     var dailyTracks: [Track] = []
     var isLoadingDaily = false
+    /// 每日推荐 spinner 是否可见（调用方传 `viewModel.dailySpinnerVisible`，
+    /// r35-9：250ms 后仍未回来才亮）。
+    var dailySpinnerVisible = false
     var dailyEmptyReason: String?
     /// 跑马带速度（调用方传 `viewModel.marqSpeedPxPerSecond`，默认 24）。
     var marqueeSpeed: CGFloat = 24
@@ -1669,8 +1704,13 @@ struct HomeCoverRingView: View {
     var body: some View {
         Group {
             if model.tracks.isEmpty {
-                if model.isLoadingDaily {
+                if model.dailySpinnerVisible {
                     loadingView
+                } else if model.isLoadingDaily {
+                    // r35-9：250ms 内还没回来——旧内容没有（tracks 空），
+                    // 也不亮 spinner，只留一块空白占位，不闪「暂无推荐内容」。
+                    Color.clear
+                        .frame(maxWidth: .infinity, minHeight: model.flatHeight, alignment: .center)
                 } else {
                     emptyView
                 }
@@ -1720,6 +1760,7 @@ struct HomeCoverRingView: View {
         model.syncInputs(
             daily: dailyTracks,
             isLoading: isLoadingDaily,
+            spinnerVisible: dailySpinnerVisible,
             emptyReason: dailyEmptyReason,
             playing: playback.currentTrack,
             speed: marqueeSpeed,

@@ -92,8 +92,28 @@ final class HomeViewModel: ObservableObject {
     var visiblePlatforms: Set<String> { SettingsStore.readVisiblePlatforms() }
     @Published var daily: [DailyTrack] = []
     @Published var isLoadingDaily = false
+    /// 每日推荐 spinner 是否可见（r35-9，P0-2：套壳 250ms 保留旧内容同款）：
+    /// 加载开始先保留旧内容，250ms 后仍未回来才置 true 亮 spinner；
+    /// 250ms 内回来全程不闪。视图只认这面旗子亮 spinner，不认 isLoadingDaily。
+    @Published private(set) var dailySpinnerVisible = false
+    /// 延迟亮 spinner 的代际（loadDaily 每次起手 +1；旧的延迟任务回来
+    /// 对不上就不亮，不串味到下一单）。
+    private var dailySpinnerEpoch = 0
     /// 每日推荐为空时的诚实原因（nil = 有数据或正在加载）。
     @Published var dailyEmptyReason: String?
+    /// 排行榜目录（r35-10：面板里的排行榜块用；只动面板里头）。
+    /// 没榜的平台（波点/汽水/Apple Music）不发请求，emptyReason 是
+    /// NativeBridge.rankBoards 给的诚实文案，ViewModel 不走缓存。
+    @Published var rankBoards: [RankBoard] = []
+    @Published var isLoadingRank = false
+    /// 排行榜 spinner 是否可见（r35-9 P0-2 同款 250ms 保留旧内容：
+    /// 加载开始先保留旧榜，250ms 后仍未回来才置 true）。
+    @Published private(set) var rankSpinnerVisible = false
+    private var rankSpinnerEpoch = 0
+    /// 排行榜为空/没榜时的诚实原因（nil = 有榜或正在加载）。
+    @Published var rankEmptyReason: String?
+    /// 进行中的排行榜加载句柄（切台时先 cancel 再起新的；dailyTask 同款）。
+    private var rankTask: Task<Void, Never>?
     /// 上次播放的歌（PlaybackStore.currentTrack 为空时 Hero 显示它）。
     @Published var lastTrack: Track?
     @Published var lastPlayedAt: Date?
@@ -144,6 +164,22 @@ final class HomeViewModel: ObservableObject {
         let task = Task { await loadDaily() }
         dailyTask = task
         await task.value
+        // r35-10：排行榜目录与每日推荐同批起（不 await——榜单块在后台拉，
+        // 每日推荐先出；切台时 rankTask 同 dailyTask 一起取消，见 selectPlatform）。
+        rankTask = Task { await loadRankBoards() }
+        // r35-9（P1-1）：首页挂载就预取网易每日推荐（套壳首页挂载就主动拉
+        // 网易，不管当前在哪个平台）：当前平台不是网易时，后台再拉一份
+        // 网易写进缓存（只写缓存，不碰任何 UI 状态），切到网易零请求；
+        // 已有当日缓存或否定缓存时不拉。预取任务不进 dailyTask（不拦
+        // 切台取消，不碰代际），取数走 dailyRecommend 自己的 120 秒壳。
+        if selectedPlatform != "netease" {
+            Task {
+                guard HomeDataCache.shared.dailyIfFresh(platform: "netease") == nil,
+                      HomeDataCache.shared.dailyNegativeIfFresh(platform: "netease") == nil else { return }
+                let result = await NativeBridge.dailyRecommend(platform: "netease")
+                HomeDataCache.shared.storeDaily(platform: "netease", tracks: result.tracks, emptyReason: result.emptyReason)
+            }
+        }
     }
 
     /// 读持久化平台的唯一入口（声明初值 + initialLoad 共用）：键里有合法
@@ -214,6 +250,8 @@ final class HomeViewModel: ObservableObject {
         let generation = homeLoadGeneration
         dailyTask?.cancel()
         dailyTask = nil
+        rankTask?.cancel()
+        rankTask = nil
         selectedPlatform = id
         UserDefaults.standard.set(id, forKey: Self.platformKey)
         resetHomeContent()
@@ -222,6 +260,11 @@ final class HomeViewModel: ObservableObject {
         // 才起新加载。
         if daily.isEmpty && dailyEmptyReason == nil {
             dailyTask = Task { await loadDaily(generation: generation) }
+        }
+        // r35-10：排行榜目录同批起（缓存命中时 resetHomeContent 已恢复，
+        // 不起新加载；没命中才起）。
+        if rankBoards.isEmpty && rankEmptyReason == nil {
+            rankTask = Task { await loadRankBoards(generation: generation) }
         }
     }
 
@@ -237,10 +280,34 @@ final class HomeViewModel: ObservableObject {
             daily = cached.tracks
             dailyEmptyReason = cached.emptyReason
             isLoadingDaily = false
+        } else if let neg = HomeDataCache.shared.dailyNegativeIfFresh(platform: selectedPlatform) {
+            // r35-9：否定缓存命中（5 分钟内空过）——直接显示空态文案，
+            // 不起新请求、不亮 spinner。
+            daily = []
+            dailyEmptyReason = neg.emptyReason ?? emptyReason(for: selectedPlatform)
+            isLoadingDaily = false
         } else {
             daily = []
             dailyEmptyReason = nil
             isLoadingDaily = true
+        }
+        // r35-10：排行榜目录同款恢复（当日非空直接画；5 分钟内空过
+        // 直接显示空态文案，不起新请求、不亮 spinner；没命中等
+        // selectPlatform 起的新 loadRankBoards 回来再落）。
+        // 没榜的平台（波点/汽水/Apple Music）不发请求、不走缓存，
+        // 文案由 loadRankBoards 立刻填（见函数头的早期返回）。
+        if let cached = HomeDataCache.shared.rankIfFresh(platform: selectedPlatform) {
+            rankBoards = cached.boards
+            rankEmptyReason = cached.emptyReason
+            isLoadingRank = false
+        } else if let neg = HomeDataCache.shared.rankNegativeIfFresh(platform: selectedPlatform) {
+            rankBoards = []
+            rankEmptyReason = neg.emptyReason
+            isLoadingRank = false
+        } else {
+            rankBoards = []
+            rankEmptyReason = nil
+            isLoadingRank = false
         }
         selectedSource = .daily
         UserDefaults.standard.set(HomeRailPage.daily.rawValue, forKey: Self.sourceKey)
@@ -283,16 +350,40 @@ final class HomeViewModel: ObservableObject {
             daily = cached.tracks
             dailyEmptyReason = cached.emptyReason
             isLoadingDaily = false
+            dailySpinnerVisible = false
+            return
+        }
+        // r35-9：否定缓存命中（5 分钟内空过）——直接显示空态文案，
+        // 不起新请求、不亮 spinner。
+        if let neg = HomeDataCache.shared.dailyNegativeIfFresh(platform: platform) {
+            guard generation == homeLoadGeneration, platform == selectedPlatform else { return }
+            daily = []
+            dailyEmptyReason = neg.emptyReason ?? emptyReason(for: platform)
+            isLoadingDaily = false
+            dailySpinnerVisible = false
             return
         }
         isLoadingDaily = true
+        dailySpinnerVisible = false
         dailyEmptyReason = nil
+        // r35-9（P0-2）：250ms 后仍未回来才亮 spinner（套壳 250ms 保留旧内容
+        // 同款）——250ms 内回来全程不闪。epoch 防旧任务串味：新加载起手
+        // +1，旧的延迟任务回来对不上 epoch 就不亮。
+        dailySpinnerEpoch += 1
+        let spinnerEpoch = dailySpinnerEpoch
+        Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if spinnerEpoch == dailySpinnerEpoch, isLoadingDaily {
+                dailySpinnerVisible = true
+            }
+        }
         defer {
             // r33：任何返回路径都无条件落下，除非更新的加载已接管
             // （代际比当前新，generation < homeLoadGeneration）。
             // 铁律：最终状态一定落到有数据或带文案的空态，绝不停在加载中。
             if generation >= homeLoadGeneration {
                 isLoadingDaily = false
+                dailySpinnerVisible = false
             }
         }
         let result = await NativeBridge.dailyRecommend(platform: platform)
@@ -312,11 +403,70 @@ final class HomeViewModel: ObservableObject {
         daily = result.tracks
         if result.tracks.isEmpty {
             dailyEmptyReason = result.emptyReason ?? emptyReason(for: platform)
-        } else {
-            // r35：成功且 tracks 非空才写缓存（空结果不缓存，登录态变了
-            // 回首页能拉到新数据）。
-            HomeDataCache.shared.storeDaily(platform: platform, tracks: result.tracks, emptyReason: result.emptyReason)
         }
+        // r35-9：结果无论空不空都写缓存（storeDaily 里分流：非空写当日缓存，
+        // 空写 5 分钟否定缓存；旧「空结果不缓存」作废——空平台每次回首页
+        // 都重拉、每次最多转 25 秒，就是这句的代价）。
+        HomeDataCache.shared.storeDaily(platform: platform, tracks: result.tracks, emptyReason: result.emptyReason)
+    }
+
+    /// 排行榜目录（r35-10）。缓存优先（当日非空直接画；5 分钟内空过
+    /// 直接显示空态文案，不起新请求、不亮 spinner）；没命中才起新请求
+    /// （各走独立 60 秒预算，见 NativeBridge.rankBoards）。代际守卫与
+    /// loadDaily 同款（切台 +1，旧加载回来对不上直接丢）。
+    func loadRankBoards(generation: Int? = nil) async {
+        let platform = selectedPlatform
+        let generation = generation ?? homeLoadGeneration
+        // 没榜的平台（波点/汽水/Apple Music）：不发请求、不走缓存，
+        // 文案直接给（NativeBridge.rankBoards 里是固定事实）。
+        if platform == "bodian" || platform == "qishui" || platform == "applemusic" {
+            guard generation == homeLoadGeneration, platform == selectedPlatform else { return }
+            rankBoards = []
+            rankEmptyReason = (await NativeBridge.rankBoards(platform: platform)).emptyReason
+            isLoadingRank = false
+            rankSpinnerVisible = false
+            return
+        }
+        if let cached = HomeDataCache.shared.rankIfFresh(platform: platform) {
+            guard generation == homeLoadGeneration, platform == selectedPlatform else { return }
+            rankBoards = cached.boards
+            rankEmptyReason = cached.emptyReason
+            isLoadingRank = false
+            rankSpinnerVisible = false
+            return
+        }
+        if let neg = HomeDataCache.shared.rankNegativeIfFresh(platform: platform) {
+            guard generation == homeLoadGeneration, platform == selectedPlatform else { return }
+            rankBoards = []
+            rankEmptyReason = neg.emptyReason
+            isLoadingRank = false
+            rankSpinnerVisible = false
+            return
+        }
+        isLoadingRank = true
+        rankSpinnerVisible = false
+        rankEmptyReason = nil
+        // 250ms 后仍未回来才亮 spinner（loadDaily 同款 epoch 防串味）。
+        rankSpinnerEpoch += 1
+        let spinnerEpoch = rankSpinnerEpoch
+        Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if spinnerEpoch == rankSpinnerEpoch, isLoadingRank {
+                rankSpinnerVisible = true
+            }
+        }
+        defer {
+            if generation >= homeLoadGeneration {
+                isLoadingRank = false
+                rankSpinnerVisible = false
+            }
+        }
+        let result = await NativeBridge.rankBoards(platform: platform)
+        guard generation == homeLoadGeneration else { return }
+        guard platform == selectedPlatform, !Task.isCancelled else { return }
+        rankBoards = result.boards
+        rankEmptyReason = result.emptyReason
+        HomeDataCache.shared.storeRank(platform: platform, boards: result.boards, emptyReason: result.emptyReason)
     }
 
     private func emptyReason(for platform: String) -> String {
@@ -342,6 +492,12 @@ final class HomeViewModel: ObservableObject {
     /// 当前来源的标题（喜欢栏按平台取真名，唯一事实来源
     /// `RailKind.likedTitle(for:)`）。
     var sourceTitle: String { selectedSource.title(platform: selectedPlatform) }
+
+    /// 当前平台的中文名（排行榜块标题「排行榜 · 网易云」用；唯一事实来源
+    /// LiziPlatforms.all，找不到时回 id 本身，不编）。
+    var selectedPlatformName: String {
+        LiziPlatforms.all.first(where: { $0.id == selectedPlatform })?.name ?? selectedPlatform
+    }
 
     /// 切来源（菜单点选唯一入口；点当前来源且数据已在就直接 return，
     /// 什么都不做，见函数体 r35 分支；喜欢栏星标旗置起时重拉，
@@ -382,6 +538,13 @@ final class HomeViewModel: ObservableObject {
 
     func isRailPageLoading(_ page: HomeRailPage) -> Bool { railLoadingPages.contains(page) }
 
+    /// 该栏的 spinner 是否可见（r35-9，P0-2：套壳 250ms 同款——栏在拉取中
+    /// 且没旧内容时，250ms 内只留空白，之后才亮 spinner；有旧内容时
+    /// 视图直接留旧内容，不看这面旗子）。
+    @Published private(set) var railSpinnerVisiblePages: Set<HomeRailPage> = []
+
+    func isRailSpinnerVisible(_ page: HomeRailPage) -> Bool { railSpinnerVisiblePages.contains(page) }
+
     /// 该栏在面板里显示的条目（groupHeader 不可点，只做分组说明）。
     /// - 每日推荐：不在这里取（走修好的 loadDaily 链路）。
     /// - 我的歌单：网易按 subscribed 分两组，只取「我创建的歌单」那组
@@ -419,10 +582,11 @@ final class HomeViewModel: ObservableObject {
     /// 切回都重拉）。
     /// 每栏加载/失败/空态走 RailDetailView 同款三态（RailResult.error /
     /// emptyReason，文案由 RailsBridge 原样给）。
-    /// r34：整栏包一层 25s 硬超时（`NativeBridge.dailyTimeout`，
-    /// 与每日推荐同一把尺子）：之前这里没有超时壳，腿一挂起
-    /// （慢网 / 上游不回），`railLoadingPages` 永远不清，面板就一直
-    /// 转圈——每日推荐在 r31/r33 修的是同一毛病，栏这里是漏网的。
+    /// r35-9：整栏包一层 60s 硬超时（`NativeBridge.legTimeout`，
+    /// 与每日推荐每条腿同一把尺子，套壳每腿 60 秒同款；旧 25 秒作废）：
+    /// 之前这里没有超时壳，腿一挂起（慢网 / 上游不回），`railLoadingPages`
+    /// 永远不清，面板就一直转圈——每日推荐在 r31/r33 修的是同一毛病，
+    /// 栏这里是漏网的。
     /// 超时按失败处理（`error` 带文案，面板显示红字原因，不留 spinner）。
     func loadRailPage(_ page: HomeRailPage, force: Bool = false) {
         guard page != .daily else { return }
@@ -439,9 +603,17 @@ final class HomeViewModel: ObservableObject {
         railLoadingPages.insert(page)
         Task {
             let platform = selectedPlatform
+            // r35-9（P0-2）：250ms 后仍在拉取才亮 spinner（没旧内容时；
+            // 有旧内容时视图留旧内容，不看这面旗子）。250ms 内回来不闪。
+            Task {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                if railLoadingPages.contains(page) {
+                    railSpinnerVisiblePages.insert(page)
+                }
+            }
             let fetched: RailResult
             do {
-                fetched = try await NativeBridge.withTimeout(seconds: NativeBridge.dailyTimeout) {
+                fetched = try await NativeBridge.withTimeout(seconds: NativeBridge.legTimeout) {
                     switch page {
                     case .daily:
                         // 上面 guard 已拦 daily，这里到不了；穷举 switch 用。
@@ -458,12 +630,13 @@ final class HomeViewModel: ObservableObject {
                 }
             } catch {
                 fetched = RailResult(kind: page.railKind ?? .featured, platform: platform,
-                                     error: "该栏拉取超时（25 秒无响应），请检查网络后重试。")
+                                     error: "该栏拉取超时（60 秒无响应），请检查网络后重试。")
             }
             // 切台后旧结果回来直接丢（selectPlatform 已换平台；
             // fetched.platform 是取数时的平台，对不上当前平台就是旧单）。
             guard selectedPlatform == fetched.platform else {
                 railLoadingPages.remove(page)
+                railSpinnerVisiblePages.remove(page)
                 return
             }
             railResults[page] = fetched
@@ -473,6 +646,7 @@ final class HomeViewModel: ObservableObject {
                 HomeDataCache.shared.storeRail(platform: platform, page: page, result: fetched)
             }
             railLoadingPages.remove(page)
+            railSpinnerVisiblePages.remove(page)
         }
     }
 

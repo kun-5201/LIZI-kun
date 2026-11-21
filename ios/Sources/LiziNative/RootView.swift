@@ -9,11 +9,12 @@ import SwiftUI
 /// - `.player` → PlayerView（P1-D 播放页，P1 集成已接线）。
 /// - AppNavigation 由这里以 @StateObject 持有，经 environmentObject 下发。
 ///
-/// 深链（`lizinative://`，r28 已移除灵动岛，扩展不再发深链；锁屏只剩系统卡）：
-/// - `lizinative://now` → 打开播放页。
+/// 深链（`lizinative://`）：
+/// - `lizinative://now` → 打开播放页（灵动岛点任何位置都走这条，
+///   r35-11 重加岛后扩展重新发深链）。
 /// - `lizinative://airplay` → 打开 App 后弹系统音频路由选择页
 ///  （AVRoutePickerView sheet，照抄壳版 ContentView.AirPlayPickerSheet；
-///   r28 已移除灵动岛，深链只剩 App 内调用）。
+///   岛上 AirPlay 钮走这条，原地弹面板没有公开 API）。
 struct RootView: View {
     @StateObject private var nav = AppNavigation()
     @StateObject private var stageForms = StageFormStore()
@@ -28,11 +29,13 @@ struct RootView: View {
                 SearchViewWithBack()
             case .player:
                 PlayerView()
-            case .stage(let formId):
-                StageView(initialFormId: formId)
-            case .playlist(let platform, let id, let isRank):
+            case .stage(let formId, let openSettings):
+                StageView(initialFormId: formId, openSettings: openSettings)
+            case .playlist(let platform, let id, let isRank, let title, let coverURL, let showRankNumbers):
                 DetailWithBack {
-                    PlaylistDetailView(platform: platform, id: id, isRank: isRank)
+                    PlaylistDetailView(platform: platform, id: id, isRank: isRank,
+                                       title: title, coverURL: coverURL,
+                                       showRankNumbers: showRankNumbers)
                 }
             case .artist(let platform, let id):
                 DetailWithBack {

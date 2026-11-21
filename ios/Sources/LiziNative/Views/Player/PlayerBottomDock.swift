@@ -41,7 +41,7 @@ import SwiftUI
 ///   （从原进度继续，见 switchQuality；显示的永远是实际返回档位，
 ///   未知显示「未知」，见 store.servedQualityText）。
 /// - 音量不在三排里：r28 已删第二行，App 内无音量按钮，音量走机身键/控制中心。
-/// - 无曲目时整排 disabled（与 PlayerControlRow 同款）。
+/// - 无曲目时整排 disabled。
 /// - 禁缩放：本文件没有任何 MagnificationGesture / 捏合手势。
 struct PlayerBottomDock: View {
     @EnvironmentObject private var store: PlaybackStore

@@ -3326,6 +3326,139 @@ extension QQService {
         }
     }
 
+    /// 排行榜目录（r35-10：Moumusic iOS officialToplists 同款 musicu GetAll，
+    /// 匿名；VM 实测 2026-11-21：code 0、4 组 30 个榜）。
+    /// 回 { code, source, playlists: [{ id: topId, name: title,
+    /// cover: frontPicUrl ?? headPicUrl ?? 首曲专辑图, tracks: totalNum }] }；
+    /// 封面走榜单图/首曲专辑图（Moumusic 同款：歌手图/专辑图）。
+    private func rankList() async -> HttpResponse {
+        do {
+            let d = try await musicuAnon(module: "musicToplist.ToplistInfoServer",
+                                         method: "GetAll", param: [:])
+            var playlists: [[String: Any]] = []
+            for g in scArr(d, "group") {
+                for item in scArr(g, "toplist") {
+                    guard let topId = (item["topId"] as? NSNumber)?.intValue, topId > 0 else { continue }
+                    let title = scStr(item, "title")
+                    guard !title.isEmpty else { continue }
+                    var cover = qqFirstStr(item, ["frontPicUrl", "headPicUrl", "topAlbumURL"])
+                    if cover.isEmpty, let first = scArr(item, "song").first {
+                        cover = scStr(first, "cover")
+                        if cover.isEmpty { cover = qqCover(scStr(first, "albumMid")) }
+                    }
+                    playlists.append([
+                        "id": String(topId), "name": title, "cover": cover,
+                        "tracks": scInt(item, "totalNum"), "source": "qq",
+                    ])
+                }
+            }
+            return .json(200, ["code": 200, "source": "qq", "playlists": playlists])
+        } catch {
+            return .json(200, ["code": 502, "source": "qq", "playlists": [],
+                               "error": "QQ 榜单目录取不到"])
+        }
+    }
+
+    /// 榜单详情（r35-10：musicu GetDetail，匿名；VM 实测 2026-11-21：
+    /// period:"" 直接通，热歌榜 totalNum 300）。
+    /// GetDetail 只回 songId（无 songmid，播不了），再按 song_id 分批
+    /// 调 get_song_detail_yqq 换回 mid/专辑/时长（VM 实测只给 song_id
+    /// 也回完整 track_info；每批 20，musicuMulti 同款）。分批解析失败的
+    /// 歌直接丢掉（不编假曲目），trackCount 按实际解析到的计。
+    /// 分页：offset 按 100 步进拉到 totalNum，最多 3 页（Moumusic 上限 300）。
+    /// 回 { code, source, id, name, cover, tracks, total, trackCount }。
+    private func rankTracks(req: HttpRequest) async -> HttpResponse {
+        let topId = req.int("id", 0)
+        guard topId > 0 else { return .json(400, ["code": 400, "error": "id required"]) }
+        do {
+            var (title, totalNum, songs) = try await rankDetailPage(topId: topId, offset: 0, period: "")
+            if songs.isEmpty {
+                // 空周期不通时补取周期再试一次（Moumusic Android getPeriods
+                // 同款：抓 PC 榜单页正则取本榜的 period；取不到就认第一次的结果）。
+                if let period = await fetchRankPeriod(topId: topId), !period.isEmpty {
+                    let retry = try await rankDetailPage(topId: topId, offset: 0, period: period)
+                    if !retry.songs.isEmpty { (title, totalNum, songs) = retry }
+                }
+            }
+            var allSongs = songs
+            var offset = songs.count
+            var pages = 1
+            while totalNum > 0, allSongs.count < totalNum, pages < 3 {
+                let page = try await rankDetailPage(topId: topId, offset: offset, period: "")
+                if page.songs.isEmpty { break }
+                allSongs.append(contentsOf: page.songs)
+                offset += page.songs.count
+                pages += 1
+            }
+            let tracks = await resolveRankTracks(allSongs)
+            let cover = allSongs.first.flatMap { scStr($0, "cover").isEmpty ? nil : scStr($0, "cover") }
+                ?? qqCover(scStr(allSongs.first ?? [:], "albumMid"))
+            return .json(200, ["code": 200, "source": "qq", "id": String(topId),
+                               "name": title, "cover": cover, "tracks": tracks,
+                               "total": totalNum > 0 ? totalNum : tracks.count,
+                               "trackCount": tracks.count])
+        } catch {
+            return .json(200, ["code": 502, "source": "qq", "id": String(topId),
+                               "name": "", "cover": "", "tracks": [], "total": 0,
+                               "trackCount": 0, "error": "QQ 榜单取不到"])
+        }
+    }
+
+    /// 一页 GetDetail：回（榜名，totalNum，song 行）。
+    /// musicu 返回的 data 里还有一层 data（req_0.data.data），别认错层。
+    private func rankDetailPage(topId: Int, offset: Int, period: String) async throws -> (String, Int, [[String: Any]]) {
+        let d = try await musicuAnon(module: "musicToplist.ToplistInfoServer",
+                                     method: "GetDetail",
+                                     param: ["topId": topId, "offset": offset, "num": 100, "period": period])
+        let inner = scDict(d, "data")
+        let songs = scArr(inner, "song")
+        return (scStr(inner, "title"), scInt(inner, "totalNum"), songs)
+    }
+
+    /// 榜单周期兜底（Moumusic Android getPeriods 同款）：空周期不通时，
+    /// 抓 QQ 榜单 PC 页，用正则取各榜的 period（data-date），只取本榜的。
+    private func fetchRankPeriod(topId: Int) async -> String? {
+        guard let url = URL(string: "https://c.y.qq.com/node/pc/wk_v15/top.html"),
+              let (data, resp) = try? await Upstream.fetch(url, headers: ["User-Agent": "Mozilla/5.0"], timeout: 15),
+              (200...299).contains(resp.statusCode),
+              let html = String(data: data, encoding: .utf8),
+              let re = try? NSRegularExpression(pattern: #"data-listname="(.+?)" data-tid="[^"]*?/(\d+)" data-date="(.+?)""#) else { return nil }
+        let range = NSRange(html.startIndex..., in: html)
+        for m in re.matches(in: html, range: range) {
+            guard let idRange = Range(m.range(at: 2), in: html),
+                  let periodRange = Range(m.range(at: 3), in: html),
+                  Int(html[idRange]) == topId else { continue }
+            return String(html[periodRange])
+        }
+        return nil
+    }
+
+    /// songId → 完整曲目：每批 20 个 get_song_detail_yqq（songBatchInternal
+    /// 同款 RPC，只给 song_id 不给 song_mid；VM 实测回完整 track_info）。
+    /// 解析失败的直接丢掉，不编。
+    private func resolveRankTracks(_ songs: [[String: Any]]) async -> [[String: Any]] {
+        let ids = songs.compactMap { ($0["songId"] as? NSNumber)?.intValue }.filter { $0 > 0 }
+        guard !ids.isEmpty else { return [] }
+        var tracks: [[String: Any]] = []
+        var idx = 0
+        while idx < ids.count {
+            let chunk = Array(ids[idx..<min(idx + 20, ids.count)])
+            idx += chunk.count
+            let calls = chunk.map { id -> (module: String, method: String, param: [String: Any]) in
+                (module: "music.pf_song_detail_svr", method: "get_song_detail_yqq",
+                 param: ["song_type": 0, "song_id": id])
+            }
+            guard let datas = try? await musicuMulti(comm: ["ct": 24, "cv": 0], calls: calls) else { continue }
+            for d in datas {
+                guard let info = d["track_info"] as? [String: Any],
+                      !scStr(info, "mid").isEmpty, scInt(info, "id") > 0,
+                      let track = qqTrack(info) else { continue }
+                tracks.append(track)
+            }
+        }
+        return tracks
+    }
+
     // MARK: - 分发
 
     func handle(_ req: HttpRequest) async -> HttpResponse {
@@ -3368,6 +3501,10 @@ extension QQService {
                 return await recommendNewSongs(req: req)
             case "playlist/detail":
                 return await playlistDetail(req: req)
+            case "rank/list":
+                return await rankList()
+            case "rank/tracks":
+                return await rankTracks(req: req)
             case "user/liked-songs":
                 return await userLikedSongs(req: req)
             case "user/playlists":

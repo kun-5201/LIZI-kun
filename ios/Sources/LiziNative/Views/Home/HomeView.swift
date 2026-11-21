@@ -914,8 +914,8 @@ struct HomeView: View {
                     marqueeSpeed: viewModel.marqSpeedPxPerSecond,
                     tier: tier,
                     panelIsDark: isDark,
-                    hideEntryHint: true,
-                    coverOnly: true
+                    coverOnly: true,
+                    hideEntryHint: true
                 )
             } else if rankDetailLoading {
                 HStack {

@@ -2194,6 +2194,20 @@ private struct FlatRingCard: View {
     let coverOnly: Bool = false
     let onTap: () -> Void
 
+    /// r37-9fix：显式初始化器——编译器给出的成员初始化器是
+    /// `init(track:width:isDark:onTap:)`（run 44927178729），带默认值的
+    /// `coverOnly` 没进成员初始化器，调用方传 `coverOnly:` 会报
+    /// extra arguments；这里显式声明（coverOnly 带默认值），
+    /// 旧调用 `(track:width:isDark:onTap:)` 与新调用
+    /// `(track:width:isDark:coverOnly:onTap:)` 都能走。
+    init(track: Track, width: CGFloat, isDark: Bool, coverOnly: Bool = false, onTap: @escaping () -> Void) {
+        self.track = track
+        self.width = width
+        self.isDark = isDark
+        self.coverOnly = coverOnly
+        self.onTap = onTap
+    }
+
     /// r37-1 追加：这张卡的封面图是否已显示（`CoverImageLoader` 进程内
     /// 缓存观测；false = 占位底 + 歌名占位，true = 只剩封面）。
     /// 观测与 `CoverImageView`（`ProxyImageView`）走同一份加载器、同一

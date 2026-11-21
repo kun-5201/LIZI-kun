@@ -941,8 +941,8 @@ struct HomeView: View {
                     dailyTracks: rankDetailTracks,
                     marqueeSpeed: viewModel.marqSpeedPxPerSecond,
                     tier: tier,
-                    screenWidth: screenWidth, // r39-5：第 5 件
                     panelIsDark: isDark,
+                    screenWidth: screenWidth, // r39-5：第 5 件（成员初始化器顺序：panelIsDark 在 screenWidth 前）
                     coverOnly: true,
                     hideEntryHint: true
                 )
@@ -1156,8 +1156,8 @@ struct HomeView: View {
             dailyEmptyReason: viewModel.dailyEmptyReason,
             marqueeSpeed: viewModel.marqSpeedPxPerSecond,
             tier: tier,
-            screenWidth: screenWidth, // r39-5：第 5 件
             panelIsDark: panelTone.isDark,
+            screenWidth: screenWidth, // r39-5：第 5 件（成员初始化器顺序：panelIsDark 在 screenWidth 前）
             queueTitle: nil, // r38-1：每日推荐不带队列标题
             coverOnly: true
         )
@@ -1182,8 +1182,8 @@ struct HomeView: View {
             dailyEmptyReason: playback.queue.isEmpty ? "还没有正在播放的歌曲。" : nil,
             marqueeSpeed: viewModel.marqSpeedPxPerSecond,
             tier: tier,
-            screenWidth: screenWidth, // r39-5：第 5 件
             panelIsDark: panelTone.isDark,
+            screenWidth: screenWidth, // r39-5：第 5 件（成员初始化器顺序：panelIsDark 在 screenWidth 前）
             queueTitle: playback.queueTitle,
             coverOnly: true
         )

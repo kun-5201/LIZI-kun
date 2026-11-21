@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>664 · 歌词散字</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;-webkit-font-smoothing:antialiased}
+html,body{margin:0;height:100%;overflow:hidden;background:#0b0b10}
+body{font-family:"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+     -webkit-user-select:none;user-select:none;cursor:default}
+
+/* ================= 背景：当前歌封面铺底（压暗 + 模糊），无封面时退回深色渐变 ================= */
+.bg{position:fixed;inset:0;
+    background:
+      radial-gradient(120% 90% at 50% 0%,#262638 0%,#151522 46%,#0b0b10 78%,#07070a 100%)}
+.bg::after{content:'';position:absolute;inset:0;
+    background:radial-gradient(60% 42% at 50% 108%,rgba(var(--ac,150,165,255),.16),rgba(var(--ac,150,165,255),0) 70%)}
+#coverBg{position:fixed;inset:-6%;width:112%;height:112%;object-fit:cover;display:block;
+    filter:blur(18px) brightness(.52) saturate(1.12);
+    opacity:0;transition:opacity .8s ease}
+#coverBg.on{opacity:1}
+.scrim{position:fixed;inset:0;pointer-events:none;z-index:1;
+    background:
+      linear-gradient(180deg,rgba(0,0,0,.30) 0%,rgba(0,0,0,.12) 34%,rgba(0,0,0,.16) 66%,rgba(0,0,0,.42) 100%),
+      radial-gradient(118% 100% at 50% 46%,rgba(0,0,0,0) 55%,rgba(0,0,0,.38) 100%)}
+
+/* ================= 舞台 ================= */
+.stage{position:fixed;inset:0;z-index:2}
+
+/* 每句一个容器；旧句整体淡出，新句的字逐字淡入 */
+.line{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;
+      transition:opacity .6s ease}
+.line.old{opacity:0}
+.line.old .ch{transition:none}
+.ch{position:absolute;left:0;top:0;display:block;line-height:1;
+    font-weight:400;white-space:pre;
+    will-change:transform,opacity;opacity:0;
+    /* 手写毛笔字：系统行楷优先，退回楷体（见文件头字体注释） */
+    font-family:"Xingkai SC","Kaiti SC","STKaiti","Kaiti TC","Songti SC",serif;
+    text-shadow:0 0 14px rgba(0,0,0,.55),0 2px 18px rgba(0,0,0,.6)}
+.ch.white{color:#ffffff}
+.ch.lav{color:#cfcef7}
+
+/* 底部曲目信息 */
+.meta{position:fixed;left:0;right:0;bottom:calc(4vh + 10px);z-index:4;text-align:center;
+      pointer-events:none;opacity:0;transition:opacity 1s ease;
+      color:rgba(255,255,255,.55);font-size:12px;letter-spacing:.18em;
+      text-shadow:0 1px 10px rgba(0,0,0,.7);white-space:nowrap;overflow:hidden;
+      text-overflow:ellipsis;padding:0 8vw}
+.meta.on{opacity:1}
+
+/* 空歌词 */
+.empty{position:fixed;left:0;right:0;top:42%;text-align:center;z-index:4;pointer-events:none;
+       opacity:0;transition:opacity .7s ease}
+.empty.on{opacity:1}
+.empty__t{font-size:15px;color:rgba(255,255,255,.6);letter-spacing:.3em}
+.empty__s{font-size:12px;color:rgba(255,255,255,.32);letter-spacing:.2em;margin-top:10px}
+
+@media (prefers-reduced-motion: reduce){
+  .line{transition:opacity .3s ease}
+}
+</style>
+</head>
+<body>
+
+<div class="bg"></div>
+<img id="coverBg" alt="">
+<div class="scrim"></div>
+<div class="stage" id="stage">
+  <div class="empty" id="empty">
+    <div class="empty__t" id="emptyT">歌词散字</div>
+    <div class="empty__s">等 一 句 词 散 开</div>
+  </div>
+</div>
+
+<div class="meta" id="meta">—</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ==========================================================
+   664 · 歌词散字（r36 第 17 件，用户 2026-11-21 23:13 视频定稿）
+   参考：视频里同一行「对么你可怎能描绘浅写」的字一个一个先后出现——
+   0 秒只隐约有「对」「么」「怎」，1 秒多出大半，2 秒多「浅」「写」才在
+   右下角冒出来，3 秒多整行才全亮。字是跟着唱、逐字淡入的。
+   接线照 663/627/429 抄：init 拿歌 + 歌词 + 封面、tick 拿时间、
+   rAF 主循环 + 本地 dt 插值；不建 AudioContext、不碰 audio 元素。
+
+   字体：stages/assets/ 里现成的 web 字体没有毛笔/手写体——实测
+   508-han-black.woff2 / 507-han-black.woff2 是 Noto Sans SC 子集（黑体），
+   627-smiley-sans.woff2 是得意黑（俏皮黑体），507-kurobara.woff2 是日文
+   哥特体，372-blackletter.woff2 只有拉丁字母；没有可用的毛笔 web 字体，
+   也不从网上现下字体文件。所以用系统最接近的手写体栈：
+   "Xingkai SC"（行楷，半行草毛笔字）优先，退回 "Kaiti SC"（楷体），
+   再退回宋体/serif。
+
+   背景：当前歌封面全屏铺底（429 的 setCover 套路），blur 18px +
+   brightness .52 压暗，封面无图/加载失败时退回深色渐变；不用参考图那张
+   特定同人图当固定背景，背景跟歌走。
+
+   散字：当前行拆成单个字，按行种子伪随机散开——同一行内位置固定、
+   不乱跳。布局是抖动网格：按行字数与屏幕宽高比算格子，每字占一格、
+   格内随机偏移；字号、倾斜角、颜色（白 / 淡紫蓝）都由种子随机数出，
+   同一行每次算出来一样，竖屏横屏换尺寸也只按同一颗种子重算。
+
+   逐字淡入：YRC 逐字时间驱动（init 的 lines[].chars，桥的 lyricSchedule
+   原样带过来）。有逐字时间就用逐字时间：词内多字按词跨度均分；
+   没有就按行内均匀分。每个字到它该唱的时间点，才在它那个散开的位置上
+   淡入（0.45 秒 + 轻微由大到小落定）；行中间进场/快进时，已唱的字直接
+   全亮、没唱的字还是 0。一行唱完切下一行：旧行整体淡出，新行再逐字淡入。
+   只显示当前行，不显示整段歌词。
+   ========================================================== */
+
+/* ---------- 1) 自检口 ---------- */
+var S = { lines: [], idx: -1, t: 0, playing: true, frames: 0, js: 0, err: "" };
+var RM = false;
+try { RM = !!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches); } catch (e) {}
+
+window.__stage = function(){
+  var i = S.idx;
+  var lit = 0, total = 0, scattered = false;
+  if (curLine){
+    total = curLine.chars.length;
+    for (var k = 0; k < total; k++) if (curLine.chars[k].lit) lit++;
+    scattered = curLine.scattered;
+  }
+  var cg = document.getElementById('coverBg');
+  return {
+    lines:   S.lines.length,
+    idx:     i,
+    t:       S.t,
+    playing: S.playing,
+    frames:  S.frames,
+    js:      Math.round(S.js * 100) / 100,
+    err:     S.err,
+    text:    (i >= 0 && S.lines[i] && S.lines[i].text) ? String(S.lines[i].text) : "",
+    lit:     lit,
+    total:   total,
+    coverOn: !!(cg && cg.classList.contains('on') && cg.naturalWidth > 0),
+    scattered: scattered,
+    gl:      false,
+    rm:      RM
+  };
+};
+
+var lastErrAt = 0;
+function fail(e){
+  try { S.err = String((e && e.message) || e); } catch (_){ S.err = 'error'; }
+  var n = performance.now();
+  if (n - lastErrAt > 1000){ lastErrAt = n; try { console.error(e); } catch (_){} }
+}
+
+/* ---------- 2) ready —— 第一个 rAF 无条件发，全局只发一次 ---------- */
+var readySent = false;
+function sendReady(){
+  if (readySent) return;
+  readySent = true;
+  try { parent.postMessage({ __c100:1, type:"ready" }, "*"); } catch (e){ console.error(e); }
+}
+requestAnimationFrame(sendReady);
+setTimeout(sendReady, 800);
+
+/* ---------- 2.5) 设置面板（宿主画 UI，这里只声明） ---------- */
+window.__stagePanel = {
+  title: '歌词散字',
+  hint: '当前行逐字淡入、散开满屏；调完自动记住，切歌不变。',
+  items: [
+    { key:'scale',   label:'字号',     type:'range', min:0.8, max:1.4, step:0.05, def:1 },
+    { key:'scatter', label:'散开程度', type:'range', min:0.7, max:1.3, step:0.05, def:1 }
+  ]
+};
+var P = { scale: 1, scatter: 1 };
+
+/* ---------- 3) 工具 ---------- */
+function $(id){ return document.getElementById(id); }
+function clamp(v,a,b){ return v < a ? a : (v > b ? b : v); }
+function toRGB(a){
+  if (!Array.isArray(a) || a.length < 3) return null;
+  var r = Math.round(Number(a[0])), g = Math.round(Number(a[1])), b = Math.round(Number(a[2]));
+  if (!isFinite(r) || !isFinite(g) || !isFinite(b)) return null;
+  r = clamp(r,0,255)|0; g = clamp(g,0,255)|0; b = clamp(b,0,255)|0;
+  if (r + g + b < 26) return null;
+  return [r,g,b];
+}
+/* FNV-1a 行哈希 + mulberry32：同一行永远同一颗种子，位置不乱跳 */
+function hashStr(s){
+  var h = 2166136261 >>> 0;
+  for (var i = 0; i < s.length; i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function mulberry32(seed){
+  var a = seed >>> 0;
+  return function(){
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* ---------- 4) 时间轴（照 663 的 lineTimes 抄，再把词内多字按词跨度均分） ---------- */
+function lineTimes(line){
+  var chars = Array.from(line.text || '').filter(function(c){ return c.trim() !== ''; });
+  var n = chars.length, out = [], i;
+  var cs = line.chars;
+  if (cs && cs.length){
+    var c0 = cs[0];
+    var rel = !!(c0 && isFinite(Number(c0.t)) && Number(c0.t) < line.t - 0.08);
+    /* 逐字时间表：词内多字按该词跨度（本词起点 → 下一词起点/行尾）均分 */
+    var per = [];
+    for (i = 0; i < cs.length; i++){
+      var rec = cs[i];
+      if (!rec || typeof rec !== 'object') continue;
+      var wt = Number(rec.t);
+      if (!isFinite(wt)) continue;
+      if (rel) wt += line.t;
+      var wchars = Array.from((rec.c == null) ? '' : String(rec.c)).filter(function(c){ return c.trim() !== ''; });
+      if (!wchars.length) wchars = ['?'];
+      var next = (i + 1 < cs.length && cs[i + 1] && isFinite(Number(cs[i + 1].t)))
+        ? Number(cs[i + 1].t) + (rel ? line.t : 0) : (line.t + (line.dur > 0 ? line.dur : 3.4));
+      var span = Math.max(0.12, next - wt);
+      for (var j = 0; j < wchars.length; j++) per.push(wt + span * j / wchars.length);
+    }
+    if (per.length === n){
+      return per;
+    }
+    if (per.length > 0){
+      /* 词字数与行字数对不上（空格/标点口径差）：按比例映射 */
+      for (i = 0; i < n; i++){
+        var k = Math.min(per.length - 1, Math.floor(i * per.length / n));
+        out.push(per[k]);
+      }
+      return out;
+    }
+  }
+  var d = line.dur > 0 ? line.dur : 3.4;
+  for (i = 0; i < n; i++) out.push(line.t + d * 0.9 * i / Math.max(1, n));
+  return out;
+}
+function idxAt(t){
+  var a = S.lines, lo = 0, hi = a.length - 1, best = -1;
+  while (lo <= hi){
+    var m = (lo + hi) >> 1;
+    if (a[m].t <= t + 0.02){ best = m; lo = m + 1; } else hi = m - 1;
+  }
+  return best;
+}
+
+/* ---------- 5) 封面背景（照 429 的 setCover 抄） ---------- */
+var coverEl = $('coverBg'), coverUrl = '';
+function setCover(url){
+  if (!coverEl) return;
+  if (!url || typeof url !== 'string'){ coverEl.classList.remove('on'); coverEl.removeAttribute('src'); coverUrl = ''; return; }
+  if (url === coverUrl) return;
+  coverUrl = url;
+  coverEl.onerror = function(){ coverEl.classList.remove('on'); };
+  coverEl.onload = function(){ coverEl.classList.add('on'); };
+  coverEl.src = url;
+}
+
+/* ---------- 6) 散字布局：抖动网格，位置/字号/倾斜/颜色全由行种子出 ---------- */
+var FADE = 0.45; /* 单字淡入时长（秒），视频里每字约 0.4–0.5 秒由淡转实 */
+var stageEl = $('stage'), emptyEl = $('empty'), metaEl = $('meta');
+var curLine = null;   /* { el, chars:[{el,ch,t,x,y,rot,size,lit}], idx, scattered } */
+var oldLines = [];
+var fontPx = 56;
+
+function fit(){
+  var W = innerWidth || 1440, H = innerHeight || 900;
+  if (!isFinite(W) || W <= 0) W = 1440;
+  if (!isFinite(H) || H <= 0) H = 900;
+  fontPx = clamp(Math.min(W, H) * 0.115, 30, 96) * P.scale;
+  if (curLine) layoutLine(curLine);
+}
+
+/* 按行种子算每字的落点（x,y 像素）、字号、倾斜角、颜色；同一行重算结果相同 */
+function layoutLine(l){
+  var W = innerWidth || 1440, H = innerHeight || 900;
+  var n = l.chars.length;
+  if (!n){ l.scattered = false; return; }
+  var rng = mulberry32(l.seed);
+  /* 抖动网格：按字数与宽高比算格子，字多格小、字少格大，整行铺满屏 */
+  var aspect = W / H;
+  var cols = Math.max(1, Math.ceil(Math.sqrt(n * aspect)));
+  var rows = Math.ceil(n / cols);
+  var areaX0 = W * 0.06, areaX1 = W * 0.94, areaY0 = H * 0.10, areaY1 = H * 0.84;
+  var cellW = (areaX1 - areaX0) / cols, cellH = (areaY1 - areaY0) / rows;
+  /* 字号：基准字号再受格子约束（长句自动缩小，字不挤出格子） */
+  var fp = Math.min(fontPx, cellW * 0.92, cellH * 1.02);
+  var jit = 0.32 * P.scatter, rotMax = 30 * P.scatter;
+  var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (var i = 0; i < n; i++){
+    var o = l.chars[i];
+    var col = i % cols, row = Math.floor(i / cols);
+    var cx = areaX0 + (col + 0.5) * cellW, cy = areaY0 + (row + 0.5) * cellH;
+    o.x = cx + (rng() * 2 - 1) * cellW * jit - fp / 2;
+    o.y = cy + (rng() * 2 - 1) * cellH * jit - fp / 2;
+    o.size = fp * (0.78 + rng() * 0.55);
+    o.rot = (rng() * 2 - 1) * rotMax;
+    o.lav = rng() < 0.45; /* 约 45% 淡紫蓝，其余白色 */
+    o.el.style.fontSize = o.size.toFixed(1) + 'px';
+    o.el.classList.toggle('lav', o.lav);
+    o.el.classList.toggle('white', !o.lav);
+    minX = Math.min(minX, o.x); maxX = Math.max(maxX, o.x + o.size);
+    minY = Math.min(minY, o.y); maxY = Math.max(maxY, o.y + o.size);
+  }
+  /* 散开判定（自检口用）：横向与纵向跨度都够大才算散开，不是排成一行 */
+  l.scattered = (maxX - minX) > W * 0.4 && (maxY - minY) > H * 0.25;
+  l.fontPx = fp;
+}
+
+function buildLine(idx){
+  var line = S.lines[idx];
+  if (!line) return null;
+  var el = document.createElement('div');
+  el.className = 'line';
+  var chars = Array.from(line.text || '').filter(function(c){ return c.trim() !== ''; });
+  var times = lineTimes(line);
+  var objs = [];
+  for (var i = 0; i < chars.length; i++){
+    var sp = document.createElement('span');
+    sp.className = 'ch white';
+    sp.textContent = chars[i];
+    el.appendChild(sp);
+    objs.push({ el: sp, ch: chars[i], t: (times[i] != null ? times[i] : line.t),
+                x: 0, y: 0, rot: 0, size: fontPx, lav: false, lit: false });
+  }
+  stageEl.appendChild(el);
+  var out = { el: el, chars: objs, idx: idx, seed: hashStr(idx + '|' + line.text), scattered: false, fontPx: fontPx };
+  layoutLine(out);
+  return out;
+}
+
+function retireLine(l){
+  if (!l) return;
+  l.el.classList.add('old');
+  oldLines.push(l);
+  setTimeout(function(){
+    if (l.el.parentNode) l.el.parentNode.removeChild(l.el);
+    var k = oldLines.indexOf(l);
+    if (k >= 0) oldLines.splice(k, 1);
+  }, 700);
+}
+
+function setIdx(i){
+  if (i === S.idx && curLine) return;
+  S.idx = i;
+  if (curLine) retireLine(curLine);
+  curLine = null;
+  if (i >= 0 && S.lines[i] && S.lines[i].text){
+    curLine = buildLine(i);
+  }
+  emptyEl.classList.toggle('on', S.lines.length === 0);
+}
+
+/* ---------- 7) 逐字淡入：每个字到它该唱的时间点才在散开的位置上淡入 ---------- */
+function paintChars(){
+  if (!curLine) return;
+  var chars = curLine.chars, i, o, p;
+  for (i = 0; i < chars.length; i++){
+    o = chars[i];
+    if (S.t < o.t){
+      /* 还没唱到：不出现 */
+      if (o.lit){ o.lit = false; }
+      o.el.style.opacity = '0';
+      continue;
+    }
+    p = (S.t - o.t) / FADE;
+    if (p >= 1){
+      p = 1;
+      if (!o.lit){ o.lit = true; }
+    }
+    o.el.style.opacity = p.toFixed(3);
+    /* 淡入时由 1.18 倍轻微收回 1 倍（RM 下只淡入不缩放） */
+    var sc = RM ? 1 : (1.18 - 0.18 * p);
+    o.el.style.transform =
+      'translate(' + o.x.toFixed(1) + 'px,' + o.y.toFixed(1) + 'px)' +
+      ' rotate(' + o.rot.toFixed(1) + 'deg) scale(' + sc.toFixed(3) + ')';
+  }
+}
+
+/* ---------- 8) 宿主消息 ---------- */
+function setAccent(a){
+  var c = toRGB(a) || [150, 165, 255];
+  document.documentElement.style.setProperty('--ac', c[0] + ',' + c[1] + ',' + c[2]);
+}
+function onInit(p){
+  p = (p && typeof p === 'object') ? p : {};
+  var song = (p.song && typeof p.song === 'object') ? p.song : {};
+  var name = (song.name == null) ? '' : String(song.name).trim();
+  if (!name) name = '未知歌曲';
+  var ar = song.artists;
+  if (Array.isArray(ar)){
+    ar = ar.filter(function(x){ return x != null && String(x).trim(); })
+           .map(function(x){ return String(x).trim(); }).join(' / ');
+  } else {
+    ar = (ar == null) ? '' : String(ar).trim();
+  }
+  if (!ar) ar = '未知歌手';
+  setAccent(p.accent);
+  metaEl.textContent = name + ' · ' + ar;
+  metaEl.classList.add('on');
+  $('emptyT').textContent = name;
+  setCover(song.cover);
+  var dur = Number(p.duration);
+  S.lines = (Array.isArray(p.lines) ? p.lines : [])
+    .filter(function(l){ return l && typeof l === 'object'; })
+    .map(function(l){
+      var t = Number(l.t), du = Number(l.dur);
+      return {
+        t: isFinite(t) ? t : 0,
+        dur: isFinite(du) ? du : 0,
+        text: (l.text == null) ? '' : String(l.text),
+        chars: (Array.isArray(l.chars) && l.chars.length) ? l.chars : null
+      };
+    })
+    .sort(function(a, b){ return a.t - b.t; });
+  S.playing = (typeof p.playing === 'boolean') ? p.playing : true;
+  if (curLine){ retireLine(curLine); curLine = null; }
+  S.idx = -1;
+  setIdx(idxAt(S.t));
+  S.err = '';
+}
+function onSetting(p){
+  if (!p || typeof p.key !== 'string') return;
+  var k = p.key, v = p.value;
+  if (k === 'scale'){ var sv = Number(v); P.scale = isFinite(sv) ? clamp(sv, 0.5, 2) : 1; fit(); }
+  else if (k === 'scatter'){ var cv = Number(v); P.scatter = isFinite(cv) ? clamp(cv, 0.3, 2) : 1; if (curLine) layoutLine(curLine); }
+}
+
+addEventListener("message", function(ev){
+  var d = ev.data;
+  if (!d || d.__c100 !== 1) return;
+  var p = d.payload || {};
+  try {
+    if (d.type === "init"){
+      onInit(p);
+    } else if (d.type === "tick"){
+      var t = Number(p.time);
+      if (isFinite(t)) S.t = t;                        /* 无条件采纳，只挡 NaN/Infinity */
+      if (typeof p.playing === 'boolean') S.playing = p.playing;
+    } else if (d.type === "setting"){
+      onSetting(p);
+    }
+  } catch (e){ fail(e); }
+});
+
+addEventListener("mousemove", function(){
+  try { parent.postMessage({ __c100:1, type:'activity' }, '*'); } catch (e){}
+}, { passive:true });
+addEventListener("keydown", function(e){
+  if (e.code === 'Space' || e.key === ' '){
+    e.preventDefault();
+    try { parent.postMessage({ __c100:1, type:'key', payload:{ key:'Space' } }, '*'); } catch (_){}
+  }
+});
+
+/* ---------- 9) 主循环：行切换 + 逐字淡入 ---------- */
+var lastNow = performance.now();
+
+function frame(now){
+  var js0 = performance.now();
+  try {
+    var dt = (now - lastNow) / 1000;
+    lastNow = now;
+    if (!isFinite(dt) || dt < 0) dt = 0;
+    if (dt > 0.05) dt = 0.05;
+    if (S.playing) S.t += dt;
+
+    var i = idxAt(S.t);
+    if (i !== S.idx) setIdx(i);
+    if (curLine) paintChars();
+
+    S.frames++;
+  } catch (e){ fail(e); }
+  S.js = performance.now() - js0;
+  requestAnimationFrame(frame);
+}
+
+/* ---------- 10) 启动 ---------- */
+fit();
+addEventListener("resize", fit);
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>

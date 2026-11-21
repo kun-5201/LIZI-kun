@@ -791,6 +791,11 @@ function frame(nowMs) {
   requestAnimationFrame(frame);
 }
 resize();
+addEventListener('resize', resize); // r36-16：横屏修——此前 resize() 只在解析期调一次，
+  // 没有 resize 监听；竖屏进舞台后旋转到横屏，canvas 后备尺寸一直留在竖屏
+  // 780x1688（实测：844x390 视口里 canvas 仍是 780x1688），画面被拉伸错位、
+  // 横屏下舞台失效。补一行监听，与 001/002/008 等其它 83 个形态同一写法；
+  // 竖屏行为不动（resize 只在尺寸真变时才跑，初次 resize() 调用原样保留）。
 requestAnimationFrame(frame);
 
 /* ---- 与播放器通信 ---- */

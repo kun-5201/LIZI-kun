@@ -46,7 +46,7 @@ final class StageBridge: NSObject, ObservableObject {
     /// r31：相机形态不再有任何别的特殊——胶囊不再默认收起、「显示控制」
     /// 药丸已删（用户 06:18），控制行与唤醒方式与其它形态一致。
     @Published private(set) var isCamera = false
-    /// 当前形态声明的设置面板（`window.__stagePanel`；r31 起 85 个已收录形态
+    /// 当前形态声明的设置面板（`window.__stagePanel`；r31 起 86 个已收录形态
     /// 全有声明，359 在 r31 补了 shake 面板，此前是唯一没有的）。
     @Published private(set) var panelSpec: StagePanelSpec?
     /// HUD 是否可见（壳版 `stage-hud` 的 `is-idle` 反状态：2.6 秒无操作自动藏起）。
@@ -736,6 +736,17 @@ struct StageWebView: UIViewRepresentable {
             let readAccess = StageBridge.readAccessURL() ?? url.deletingLastPathComponent()
             uiView.loadFileURL(url, allowingReadAccessTo: readAccess)
         }
+        // r36-16 横屏：旋转进出横屏时显式通知形态重算尺寸。宿主此前完全依赖
+        // WebKit 在 webView frame 变化时补发 resize 事件，没有任何一处主动
+        // 管旋转；竖屏进舞台时那一次基本能到，但横屏下 012 形态（resize()
+        // 只在解析期调一次、无 resize 监听）转屏后 canvas 一直留在竖屏尺寸
+        // （实测：844x390 视口里 canvas 仍是 780x1688，画面拉伸错位、舞台
+        // 横屏失效）。012 本身已补监听；这里再补一道宿主侧的显式通知：只在
+        // 横竖屏翻转的那一次发（竖屏里从不发，竖屏行为一字不动；直接横屏进
+        // 舞台时首次布局不翻转、不发，靠 WebKit 原生 resize + 形态自己的监听
+        // 恢复）。形态收到后按新视口重算 canvas/布局；没有监听的形态收不到，
+        // 等同无操作；tick/init/切歌/切形态都不动，不重载文档、不丢状态。
+        context.coordinator.noteViewportSize(uiView.bounds.size)
     }
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: StageWebViewCoordinator) {
@@ -757,6 +768,9 @@ final class StageWebViewCoordinator: NSObject, WKNavigationDelegate, UIGestureRe
     private weak var bridge: StageBridge?
     private weak var webView: WKWebView?
     private var tapRecognizer: UITapGestureRecognizer?
+    /// r36-16 横屏：上次见到的 webView 朝向（横屏 true / 竖屏 false），只记朝向
+    /// 是否翻转，不记具体尺寸；首次布局（nil）只记录、不发通知。
+    private var lastLandscape: Bool?
 
     init(bridge: StageBridge) {
         self.bridge = bridge
@@ -786,6 +800,23 @@ final class StageWebViewCoordinator: NSObject, WKNavigationDelegate, UIGestureRe
 
     @objc private func handleStageTap() {
         bridge?.wakeHUD()
+    }
+
+    /// r36-16 横屏：横竖屏翻转时给形态补一个 `resize` 事件（见 updateUIView
+    /// 的注释）。0 尺寸（makeUIView 刚建完、还没布局的 .zero 帧）直接跳过、
+    /// 不记朝向；首次有尺寸时只记、不发；朝向没翻时不发——竖屏里全程不发，
+    /// 竖屏行为一字不动。发的是合成 `resize` 事件，形态自己的监听收到后按
+    /// 新视口重算；没有监听的形态收不到，等同无操作。只发事件，不重载文档、
+    /// 不碰 tick/init/切歌/切形态，状态不丢。
+    func noteViewportSize(_ size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        let landscape = size.width > size.height
+        if let last = lastLandscape, last != landscape {
+            webView?.evaluateJavaScript(
+                "window.dispatchEvent(new Event('resize'))",
+                completionHandler: nil)
+        }
+        lastLandscape = landscape
     }
 
     /// 与 WKWebView 内部手势同时识别：本识别器只认轻点，拖动/滚动不抢，

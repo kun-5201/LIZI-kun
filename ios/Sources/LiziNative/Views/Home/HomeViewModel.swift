@@ -367,25 +367,38 @@ final class HomeViewModel: ObservableObject {
     /// 壳版 renderRailNode 同款不缓存——每次切回喜欢栏都重拉）。
     /// 每栏加载/失败/空态走 RailDetailView 同款三态（RailResult.error /
     /// emptyReason，文案由 RailsBridge 原样给）。
+    /// r34：整栏包一层 25s 硬超时（`NativeBridge.dailyTimeout`，
+    /// 与每日推荐同一把尺子）：之前这里没有超时壳，腿一挂起
+    /// （慢网 / 上游不回），`railLoadingPages` 永远不清，面板就一直
+    /// 转圈——每日推荐在 r31/r33 修的是同一毛病，栏这里是漏网的。
+    /// 超时按失败处理（`error` 带文案，面板显示红字原因，不留 spinner）。
     func loadRailPage(_ page: HomeRailPage, force: Bool = false) {
         guard page != .daily else { return }
         if page != .liked, !force, railResults[page] != nil { return }
         if railLoadingPages.contains(page) { return }
         railLoadingPages.insert(page)
         Task {
+            let platform = selectedPlatform
             let fetched: RailResult
-            switch page {
-            case .daily:
-                railLoadingPages.remove(page)
-                return
-            case .featured:
-                fetched = await NativeBridge.railFeatured(platform: selectedPlatform)
-            case .liked:
-                fetched = await NativeBridge.railLiked(platform: selectedPlatform)
-            case .created:
-                fetched = await NativeBridge.railMyPlaylists(platform: selectedPlatform)
-            case .radio:
-                fetched = await NativeBridge.railRadio(platform: selectedPlatform)
+            do {
+                fetched = try await NativeBridge.withTimeout(seconds: NativeBridge.dailyTimeout) {
+                    switch page {
+                    case .daily:
+                        // 上面 guard 已拦 daily，这里到不了；穷举 switch 用。
+                        return RailResult(kind: .featured, platform: platform)
+                    case .featured:
+                        return await NativeBridge.railFeatured(platform: platform)
+                    case .liked:
+                        return await NativeBridge.railLiked(platform: platform)
+                    case .created:
+                        return await NativeBridge.railMyPlaylists(platform: platform)
+                    case .radio:
+                        return await NativeBridge.railRadio(platform: platform)
+                    }
+                }
+            } catch {
+                fetched = RailResult(kind: page.railKind ?? .featured, platform: platform,
+                                     error: "该栏拉取超时（25 秒无响应），请检查网络后重试。")
             }
             // 切台后旧结果回来直接丢（selectPlatform 已清缓存；
             // fetched.platform 是取数时的平台，对不上当前平台就是旧单）。

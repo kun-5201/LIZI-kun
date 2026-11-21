@@ -817,14 +817,16 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
     /// 只在主腿回空时由 dailyRecommendUntimed 调用；主腿有数据时不走；
     /// 合成也空时回 []，调用方给诚实空态。
     /// 各平台推荐歌单路由：网易 /api/top/playlist、QQ /api/qq/recommend/playlists、
-    /// 酷狗 /api/kugou/recommend/playlists、酷我 /api/kuwo/recommend/playlists。
+    /// 酷狗 /api/kugou/top/playlists（壳版精选歌单同款；旧写法 /api/kugou/recommend/playlists
+    /// 是 yueku http 端点，壳版根本没有这条路由，且 iOS ATS 会拦掉 http，
+    /// 真机上合成腿永远到不了——r34 改走 top/playlists）、酷我 /api/kuwo/recommend/playlists。
     /// 汽水/波点没有合成腿（Moumusic 无对照），Apple Music 不用（RSS 通）。
     private static func synthesizedDailyTracks(platform: String) async -> [DailyTrack] {
         let listPath: String
         switch platform {
         case "netease": listPath = "/api/top/playlist"
         case "qq": listPath = "/api/qq/recommend/playlists"
-        case "kugou": listPath = "/api/kugou/recommend/playlists"
+        case "kugou": listPath = "/api/kugou/top/playlists"
         case "kuwo": listPath = "/api/kuwo/recommend/playlists"
         default: return []
         }
@@ -914,7 +916,8 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
             let leg = await dailyTracks(path: "/api/kugou/everyday/recommend", platform: platform)
             if !leg.tracks.isEmpty { return DailyResult(tracks: leg.tracks, emptyReason: nil) }
             // r33：主腿（everyday_song_recommend，先保留）空，走推荐歌单合成兜底
-            // （/api/kugou/recommend/playlists 前 3 张）。
+            // （/api/kugou/top/playlists 前 3 张，壳版精选歌单同款；r34：
+            // 旧推荐端点是 yueku http，壳版无此路由且真机 ATS 拦 http）。
             let synth = await synthesizedDailyTracks(platform: platform)
             if !synth.isEmpty { return DailyResult(tracks: synth, emptyReason: nil) }
             return DailyResult(tracks: leg.tracks,

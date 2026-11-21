@@ -1314,11 +1314,14 @@ final class PlaybackStore: ObservableObject {
             // 再问 LX（照 .official 分支同款写法）；再云盘腿；最后 LX 腿。
             // 酷狗已知非会员不走官方腿（分流原样保留），云盘是用户自己
             // 的文件，不随会员分流。
+            // r34 落雪强势兜底：升级闭包里落雪回了有效地址就强占（见
+            // upgradeIfLower strongLX）——官方已拿到低档地址时，落雪的
+            // 地址不再被档位比较丢掉；顺序仍是官方 → 云盘 → 落雪。
             if !kugouNonMemberLXOnly,
                let platform = await platformLeg(track: track, gen: gen, skips: skips, quality: requested) {
                 lastReason = platform.reason
                 if platform.url != nil {
-                    return await upgradeIfLower(platform, requested: requested) {
+                    return await upgradeIfLower(platform, requested: requested, strongLX: true) {
                         if let cloud = await self.cloudLeg(track: track, gen: gen, skips: skips, quality: requested) {
                             return cloud
                         }
@@ -1462,11 +1465,23 @@ final class PlaybackStore: ObservableObject {
     /// 先拿到的结果档位低于请求档时，向另一腿要高档；另一腿拿不到
     /// 或更低时用回先拿到的（绝不丢掉已有的可播地址）。
     /// `other` 只在需要时才跑，不多烧一次请求。
+    /// r34 落雪强势兜底：`strongLX` 只 .automatic 传 true——`other`
+    /// 回来的结果若是 LX 腿的（via == "lx"，即云盘没给、落雪给了有效
+    /// 地址），直接用落雪的，不再跟先拿到的比档位：落雪一旦有数据就
+    /// 强占，立即用、停链、播。旧逻辑里落雪档位 ≤ 官方档位时会被
+    /// higherQualityResult 丢掉（官方的试听地址档位高反而赢，落雪的
+    /// 整首地址被扔）；云盘回来的结果仍走老比较（云盘腿逻辑不动），
+    /// .official 分支不传 strongLX，行为一字不动。
     private func upgradeIfLower(_ first: NativeBridge.SongURLResult, requested: AudioQuality,
+                                strongLX: Bool = false,
                                 other: () async -> NativeBridge.SongURLResult?) async -> NativeBridge.SongURLResult {
         let firstRank = first.actualQuality?.rank ?? 0
         guard firstRank < requested.rank else { return first }
         guard let second = await other(), second.url != nil else { return first }
+        if strongLX, second.via == "lx" {
+            DiagLog.shared.recordPlaybackStep("resolve lx strong fallback wins first=\(first.actualQuality?.rawValue ?? "-") lx=\(second.actualQuality?.rawValue ?? "-") requested=\(requested.rawValue)")
+            return second
+        }
         DiagLog.shared.recordPlaybackStep("resolve upgrade compare first=\(first.actualQuality?.rawValue ?? "-") second=\(second.actualQuality?.rawValue ?? "-") requested=\(requested.rawValue)")
         return Self.higherQualityResult(first, second)
     }

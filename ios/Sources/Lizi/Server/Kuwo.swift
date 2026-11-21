@@ -802,24 +802,29 @@ final class KuwoService {
                            "total": scNum(d["total"]) != 0 ? scNum(d["total"]) : list.count])
     }
 
-    /// 推荐歌单（r33：上游改 wapi getRcmPlayList，order 必须是文字 hot/new；
-    /// 旧 www rcm/index 在部分环境回空。VM 实测：order=hot 回 code 200、
-    /// total 1756、30 条；order=5（数字）回 200 但 data 空）。
+    /// 推荐歌单（r34：改回 www rcm/index——r33 那句「旧 www rcm/index 在部分
+    /// 环境回空」是裸 curl（无 Secret 头）的结果；壳版边车与原生 www()
+    /// 都带 token/secret +「非法请求」重试，VM 经边车实测通。wapi
+    /// getRcmPlayList 虽也通，但与壳版不是同一条路，按任务对齐壳版。）
     /// 详情复用已有的 playlist/tracks（playListInfo，pid=裸数字 id；
     /// 上游项带的 digest 字段（如 "8"）是歌单类型标记，详情不拼前缀，
     /// 沿用 kuwoPlaylist 的裸 id——若真机详情取空，再试 digest_id 形式）。
+    /// 推荐歌单（壳版 `services/kuwo-api` 的 `/recommend/playlists` 同款）：
+    /// `GET www.kuwo.cn /api/www/rcm/index/playlist?id=37&pn=1&rn=<limit>&httpsStatus=1`
+    ///（www() 自带 token/secret +「非法请求」重试），解析 `data.list` → kuwoPlaylist。
+    /// 旧写法调 `wapi.kuwo.cn /api/pc/classify/playlist/getRcmPlayList`——
+    /// 另一条上游，与壳版走的不是同一条路（r34：VM 实测两条都回数据，
+    /// 仍按任务要求对齐壳版；探针见 verification/r34-data.cjs §酷我合成腿）。
     private func recommendPlaylists(_ req: HttpRequest) async throws -> HttpResponse {
         let limit = scClamp(req.int("limit", 12), 1, 50)
-        guard let url = URL(string: "https://wapi.kuwo.cn/api/pc/classify/playlist/getRcmPlayList?loginUid=0&loginSid=0&appUid=76039576&pn=1&rn=\(limit)&order=hot") else {
-            return .json(200, ["code": 502, "source": "kuwo", "playlists": [],
-                               "error": "酷我推荐歌单请求构造失败"])
-        }
-        let j = try await Upstream.fetchJSON(url, headers: ["User-Agent": Self.uaWeb], timeout: 20) as? [String: Any] ?? [:]
+        let id = req.string("id", "37")
+        let r = try await www("/api/www/rcm/index/playlist?id=\(scURLEncode(id))&pn=1&rn=\(limit)&httpsStatus=1")
+        let j = scParseJSONObject(r.text)
         guard scNum(j["code"]) == 200 else {
             return .json(200, ["code": upstreamCode(j), "source": "kuwo", "playlists": [],
                                "error": upstreamError(j, "取推荐歌单失败")])
         }
-        let list = scArr(scDict(j, "data"), "data")
+        let list = scArr(scDict(j, "data"), "list")
         let playlists = list.compactMap { kuwoPlaylist($0) }.filter { !($0["name"] as? String ?? "").isEmpty }
         return .json(200, ["code": 200, "source": "kuwo", "playlists": playlists])
     }

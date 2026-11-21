@@ -842,7 +842,9 @@ extension NetEaseService {
             // NetEase.swift 路由表 "recommend/songs"）。
             return await passthroughWeapi("/v1/discovery/recommend/songs", p2)
         case "dj/recommend":
-            return await passthroughWeapi("/api/djradio/recommend/v1", [:])
+            // r34：limit 透传（壳版 API.neteaseDjRecommend(8) 带 limit=8；
+            // 旧写法传 [:]，上游用默认条数，与壳版不是同一参数）。
+            return await passthroughWeapi("/api/djradio/recommend/v1", ["limit": req.int("limit", 8)])
         case "dj/program":
             var p3: [String: Any] = [
                 "radioId": req.int("rid"), "limit": req.int("limit", 30),

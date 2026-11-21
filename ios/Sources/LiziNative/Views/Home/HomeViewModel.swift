@@ -550,8 +550,17 @@ final class HomeViewModel: ObservableObject {
     /// 同批起、缓存已恢复（见 initialLoad / selectPlatform /
     /// resetHomeContent），切过去直接画；没拉到且不在加载中才补一次
     /// `loadRankBoards()`。点当前来源且榜单已在时直接 return。
+    /// r38-1：正在播放（.nowPlaying）同款——不取数，只切来源+写持久化键；
+    /// 内容是直播队列，HomeView 直接读 `playback.queue`，点当前来源直接 return。
     func selectSource(_ page: HomeRailPage) {
         closeOpened()
+        // r38-1：正在播放单独走（不进下面 loadRailPage 那条路，不取数）。
+        if page == .nowPlaying {
+            if page == selectedSource { return }
+            selectedSource = page
+            UserDefaults.standard.set(page.rawValue, forKey: Self.sourceKey)
+            return
+        }
         // r36：排行榜单独走（不进下面 loadRailPage 那条路）。
         if page == .rank {
             if page == selectedSource {
@@ -652,6 +661,8 @@ final class HomeViewModel: ObservableObject {
     /// emptyReason，文案由 RailsBridge 原样给）。
     /// r36：排行榜（.rank）不走这里（见 selectSource：榜单与每日推荐
     /// 同批起、切过去直接画），guard 与 switch 里都拦住。
+    /// r38-1：正在播放（.nowPlaying）也不走这里（内容是直播队列，不取数），
+    /// guard 与 switch 里同款拦住。
     /// r35-9：整栏包一层 60s 硬超时（`NativeBridge.legTimeout`，
     /// 与每日推荐每条腿同一把尺子，套壳每腿 60 秒同款；旧 25 秒作废）：
     /// 之前这里没有超时壳，腿一挂起（慢网 / 上游不回），`railLoadingPages`
@@ -659,7 +670,7 @@ final class HomeViewModel: ObservableObject {
     /// 栏这里是漏网的。
     /// 超时按失败处理（`error` 带文案，面板显示红字原因，不留 spinner）。
     func loadRailPage(_ page: HomeRailPage, force: Bool = false) {
-        guard page != .daily, page != .rank else { return }
+        guard page != .daily, page != .rank, page != .nowPlaying else { return } // r38-1：正在播放不取数
         // r35：缓存守卫对所有栏生效（含 .liked）。喜欢栏例外：星标旗
         // 置起（播放页点了星标）时不走缓存、要重拉看新星标；旗子等到
         // 真的开始拉取时才清——在飞的请求挡住时不清旗，下次出现再拉。
@@ -685,8 +696,8 @@ final class HomeViewModel: ObservableObject {
             do {
                 fetched = try await NativeBridge.withTimeout(seconds: NativeBridge.legTimeout) {
                     switch page {
-                    case .daily, .rank:
-                        // 上面 guard 已拦 daily 与 rank，这里到不了；穷举 switch 用。
+                    case .daily, .rank, .nowPlaying:
+                        // 上面 guard 已拦 daily、rank 与 nowPlaying，这里到不了；穷举 switch 用。
                         return RailResult(kind: .featured, platform: platform)
                     case .featured:
                         return await NativeBridge.railFeatured(platform: platform)
@@ -834,7 +845,7 @@ final class HomeViewModel: ObservableObject {
     }
 }
 
-/// 每日推荐面板的 6 个来源（r28 定稿顺序，用户 2026-11-21 01:21–01:38 确认；
+/// 每日推荐面板的 7 个来源（r28 定稿顺序，用户 2026-11-21 01:21–01:38 确认；
 /// r30：上下翻页器撤掉，改点平台条标题弹菜单切来源，一次只显示一个来源；
 /// r31：用户 2026-11-21 06:02 决定删掉「用户收藏」（数据并进「我喜欢」），
 /// 「用户创建的歌单」改名「我的歌单」；
@@ -842,6 +853,11 @@ final class HomeViewModel: ObservableObject {
 /// （菜单第 6 行，点它切到排行榜面板）；`case rank` 追加在末尾，已有
 /// 0–4 的 rawValue 不动，已持久化的来源键兼容；取数不走 rails，
 /// 见 `selectSource` 的 rank 分支与 `loadRankBoards`）。
+/// r38-1：用户 2026-11-22 定稿（稿图 lizi-now-playing-menu-mockup.png）——
+/// 菜单加「正在播放」（菜单第 2 行，点它切到当前播单面板）；`case nowPlaying`
+/// 追加在末尾（rawValue 6），0–5 不动，已持久化的来源键兼容；内容就是直播
+/// 队列 `PlaybackStore.queue`，不取数，见 `selectSource` 的 nowPlaying 分支
+/// 与 HomeView 的 nowPlayingRingContent。
 enum HomeRailPage: Int, CaseIterable {
     case daily = 0
     case featured
@@ -849,6 +865,11 @@ enum HomeRailPage: Int, CaseIterable {
     case created
     case radio
     case rank
+    case nowPlaying
+
+    /// 菜单显示顺序（r38-1：与 rawValue 顺序不同——「正在播放」排第 2，
+    /// 在每日推荐之后、精选之前；rawValue 顺序不动，只影响菜单排列）。
+    static var menuOrder: [HomeRailPage] = [.daily, .nowPlaying, .featured, .liked, .created, .radio, .rank]
 
     /// 栏目名（喜欢那栏按平台取真名，唯一事实来源 `RailKind.likedTitle(for:)`）。
     func title(platform: String) -> String {
@@ -859,11 +880,12 @@ enum HomeRailPage: Int, CaseIterable {
         case .created: return "我的歌单"
         case .radio: return "电台"
         case .rank: return "排行榜"
+        case .nowPlaying: return "正在播放" // r38-1
         }
     }
 
-    /// 点「查看全部」进的详情页 kind（每日推荐与排行榜没有详情页，返回 nil；
-    /// 排行榜点卡直接进榜单详情，见 HomeView.rankCards）。
+    /// 点「查看全部」进的详情页 kind（每日推荐、排行榜与正在播放没有详情页，
+    /// 返回 nil；排行榜点卡直接进榜单详情，见 HomeView.rankCards）。
     var railKind: RailKind? {
         switch self {
         case .daily: return nil
@@ -872,12 +894,13 @@ enum HomeRailPage: Int, CaseIterable {
         case .liked: return .liked
         case .radio: return .radio
         case .rank: return nil
+        case .nowPlaying: return nil // r38-1
         }
     }
 
     /// 来源在菜单里的序号（1-based；r30：栏头「n/6」已随翻页器撤掉，
-    /// r31 起是 5 个来源，r36 加排行榜成 6 个，序号只留作来源顺序的
-    /// 事实来源，不再显示）。
+    /// r31 起是 5 个来源，r36 加排行榜成 6 个，r38-1 加正在播放成 7 个，
+    /// 序号只留作来源顺序的事实来源，不再显示）。
     var position: Int { rawValue + 1 }
 }
 

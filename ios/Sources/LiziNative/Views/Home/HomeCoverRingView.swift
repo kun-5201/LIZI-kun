@@ -69,6 +69,17 @@ import UIKit
 ///   槽距 step 40°（侧卡实测倾角约 40°）；pitch = 卡宽×1.14
 ///   （壳版 ring.js；旧视频 pitch=卡宽已作废）；
 ///   R = pitch / (2·sin 20°) ≈ 235 / 248 / 273。
+/// r38-8：平面卡不再按 tier 分档——卡宽 = ⌊(带宽 − 2×16)/3⌋，带宽 =
+///   屏宽 − 72（一屏可见 3 张；竖屏 402pt → 99，横屏 852pt → 249）。
+/// r38-9：环卡与全部几何按壳版 ring.js openRing 1:1：cardW =
+///   clamp(vw×0.24, 84, 112)，R = max((vw/2−14−cardW/2)/0.762, cardW×0.8)，
+///   P = max(3.2R, 520)，cap = clamp(round(2πR/pitch), 7, 64)，
+///   step = min(360/n, 2·asin(pitch/(2R)))；旧 tier 表（环卡 141/149/164、
+///   step 写死 40°、cap 9）只剩 screenWidth=0 的回落——r38-fix ⑧/⑨-3 起
+///   歌单详情页也传实测宽（PlaylistDetailView contentView 的 GeometryReader），
+///   不再有调用方走 0 回落。
+///   壳版 cardH = cardW+28 是一行歌名，原生环卡两行（歌名+歌手）故
+///   ringCardHeight 仍 +46，只取壳版封面宽。
 /// - 7 个平台同一套环，不分平台分支。
 ///
 /// 内容：队列优先、每日兜底（与 r20 同款），两份都空就不显示环、
@@ -615,17 +626,33 @@ final class HomeCoverRingModel: ObservableObject {
     @Published var dailyEmptyReason: String?
     @Published var marqueeSpeed: CGFloat = 24
     @Published var tier: PlayerTokens.PlayerSizeTier = .standard
+    /// r38-8/r38-9：调用方同步进来的实测屏宽（HomeView 外层 GeometryReader
+    /// 的 outer.size.width；全屏环覆盖层与壳版 window.innerWidth 同值）。
+    /// flatCard / ringCard / ringRadius / ringStep 全从它现算（横竖屏各按
+    /// 自家屏宽算）；0 = 调用方没传（歌单详情页那路），回落旧 tier 分档，
+    /// 那路尺寸不动。
+    @Published var screenWidth: CGFloat = 0
     /// 面板是否为深场（调用方按专辑取色 field 同步，见 HomeView AlbumTone）：
     /// 深场时平面卡歌名/歌手/提示用白字，浅场用墨字。默认 true
     /// （默认 tone #5b5bd6/#b04f8c/#2f6f8f 是深场，见 AlbumTone.default）。
     @Published var panelIsDark = true
     /// r37-1：平面带卡片只放封面（调用方 HomeView 每日推荐那路传 true，
     /// 见 `HomeCoverRingView.coverOnly`；榜单详情 / 歌单详情那路默认 false，
-    /// 卡片仍带歌名/歌手）。只影响平面带 `FlatRingCard` 的渲染与
-    /// `flatHeight`（true 时带高 = 卡宽，不再留两行字的 52pt）；
-    /// 3D 环展开态的环卡（`RingCardView`）标题不动；环几何只读 flatCard，
-    /// 不读 flatHeight（`ringCardCenterYLocal`），锚点不受影响。
+    /// 卡片仍带歌名/歌手）。
+    /// r38-10：第 10 件起 coverOnly 不再藏卡下两行字——平面带卡片在两种
+    /// 模式下卡下都画歌名 + 演唱者（`FlatRingCard`），带高也不再按
+    /// coverOnly 分支（见 `flatHeight`，恒为卡宽 + 两行字高 + 上抬顶空）。
+    /// coverOnly 现在只剩一个作用：封面还没显示出来时的歌名占位
+    /// （盖在封面框里的那两行，见 `FlatRingCard` 的 r37-1 追加）只在
+    /// coverOnly 时出现；3D 环展开态的环卡（`RingCardView`）标题不动；
+    /// 环几何只读 flatCard，不读 flatHeight（`ringCardCenterYLocal`），
+    /// 锚点不受影响（只跟 r38-10 的 6pt 顶空走，见该函数）。
     @Published var coverOnly = false
+    /// r38-10：点中的平面带卡片下标（`playTrack` 里写，内容换了清掉，
+    /// 见 `syncInputs`）。`FlatRingCard` 认它上抬 6pt（`isSelected`）；
+    /// 环卡不认它（环卡在圆柱面上，上抬会破弧线；点环卡播歌后环收回，
+    /// 平带上同一首卡片上抬）。nil = 没点中任何卡。
+    @Published var selectedFlatIndex: Int?
     /// r36：点卡播歌时一并带上的队列标题（`PlaybackStore.setQueue(_:startAt:title:)`，
     /// 队列非空时不传标题会把 queueTitle 置 nil——搜索带若不传，
     /// 搜索 queueTitle + 置顶行会丢）。每日推荐那路传 nil（环本来不带标题）。
@@ -823,6 +850,7 @@ final class HomeCoverRingModel: ObservableObject {
                     emptyReason: String?, playing: Track?,
                     speed: CGFloat,
                     tier: PlayerTokens.PlayerSizeTier,
+                    screenWidth: CGFloat = 0, // r38-8/r38-9：实测屏宽，见 screenWidth
                     panelIsDark: Bool = true,
                     queueTitle: String? = nil,
                     coverOnly: Bool = false) {
@@ -836,6 +864,7 @@ final class HomeCoverRingModel: ObservableObject {
         dailyEmptyReason = emptyReason
         marqueeSpeed = speed
         self.tier = tier
+        self.screenWidth = screenWidth // r38-8/r38-9
         self.panelIsDark = panelIsDark
         self.coverOnly = coverOnly
         if tracks.map(\.id) != oldIDs {
@@ -843,6 +872,7 @@ final class HomeCoverRingModel: ObservableObject {
             flatOffsetX = 0
             flatDwellUntil = Date().addingTimeInterval(Self.initialDwell)
             flatDwellReason = "ids-changed"
+            selectedFlatIndex = nil // r38-10：内容换了（切平台/重拉），点中态清掉，不指到另一首上
         }
         // r33-marquee：带宽兜底（与 rail 的 ensureSetWidth 同款）：
         // flatSetWidth 正常由 FlatSetWidthKey 偏好上报；偏好没到时 tickFlat
@@ -859,9 +889,41 @@ final class HomeCoverRingModel: ObservableObject {
 
     // MARK: 尺寸（视频实测，见文件头分档表）
 
-    /// 平面卡宽：compact 180 / standard 190 / large 209（≈0.486vw，
-    /// 39.6s 新视频卡 350px/720px）。
+    /// r38-10：卡下两行字高 52（歌名 16 + 间距 7 + 歌手 14 + 行高余量，
+    /// 与旧非 coverOnly 的 +52 同值；见 `flatHeight`）。
+    static let titleArtistHeight: CGFloat = 52
+    /// r38-10：点中卡片的上抬量 6pt（整体上抬，封面 + 两行字一起；
+    /// 带高里预留这 6pt 作顶空，平时卡片顶距带顶 6pt，点中那张回到带顶，
+    /// 其余卡片不动——都在同一平行线上，只有点中的高一点点）。
+    static let selectedLift: CGFloat = 6
+    /// r38-10：横屏卡宽封顶 100pt（宽屏上 `flatCardWidth` 的计算值
+    /// 852pt 屏是 249、874pt 屏是 256；文字底 = 卡宽 + 158，
+    /// 375 档内容高 265 时 100 + 158 = 258 ≤ 265，面板拉到最大也放得下；
+    /// 249 的卡文字底 407，面板拉满也放不下。竖屏 402pt 算出来 99，
+    /// 封顶碰不到，竖屏卡宽不动）。
+    static let landscapeCardCap: CGFloat = 100
+
+    /// r38-8：平面卡宽 = ⌊(带宽 − 2×间距)/3⌋（一屏可见 3 张，总共约 5 张
+    /// 是曲目数、不由卡宽定）：带宽 = 屏宽 − 72（页面左右 16×2 +
+    /// 面板内边距 10×2 + 本视图内边距 10×2，见 panelRect 注释；r37-5
+    /// 「面板宽约 358pt」就是 430 − 72 的实测值）；间距 16（flatGap）。
+    /// 竖屏 402pt → 带宽 330 → 99；横屏 852pt → 带宽 780 → 249、
+    /// 874pt → 256（r38-10：再封顶 100，见 `landscapeCardCap`）。
+    /// 旧 tier 分档（180/190/209）只剩 screenWidth = 0 的回落。
+    static func flatCardWidth(screenWidth: CGFloat) -> CGFloat {
+        let stripW = screenWidth - 72
+        let w = (stripW - 2 * 16) / 3
+        // r38-10：横屏封顶 100（见 landscapeCardCap；竖屏算出来 ≤99，
+        // 封顶碰不到）。rank 榜单卡 / rail 跑马带卡共用本函数（r38-8 同档），
+        // 横屏它们也跟着收到 ≤100，高度仍是各自 cover-only 的老样子。
+        return max(60, min(w.rounded(.down), landscapeCardCap))
+    }
+
+    /// 平面卡宽（r38-8：有实测屏宽时按 flatCardWidth 现算，横竖屏各按
+    /// 自家屏宽算；没传屏宽时回落旧 tier 分档：compact 180 / standard
+    /// 190 / large 209，≈0.486vw，39.6s 新视频卡 350px/720px）。
     var flatCard: CGFloat {
+        if screenWidth > 0 { return Self.flatCardWidth(screenWidth: screenWidth) }
         switch tier {
         case .compact: return 180
         case .standard: return 190
@@ -873,14 +935,30 @@ final class HomeCoverRingModel: ObservableObject {
 
     var flatPitch: CGFloat { flatCard + flatGap }
 
-    /// 平面带高：卡 + 间距 7 + 16pt 歌名行 + 间距 7 + 14pt 歌手行
-    /// （r28：字号 14/13→16/14，行高跟着涨 3pt，旧 +49 会裁掉歌手行）。
-    /// r37-1：coverOnly 时带高 = 卡宽（只放封面，两行字不画、不留空）。
-    var flatHeight: CGFloat { coverOnly ? flatCard : flatCard + 52 }
+    /// 平面带高：顶空 6（r38-10 点中上抬预留）+ 卡 + 间距 7 + 16pt 歌名行
+    /// + 间距 7 + 14pt 歌手行（= 卡宽 + 58）。
+    /// r38-10：第 10 件——coverOnly 不再减带高：每日推荐 / 榜单详情 /
+    /// 正在播放那几路（coverOnly: true）卡下也画歌名 + 演唱者两行，
+    /// 与歌单详情那路（false）同高；r37-1 的「coverOnly 时带高 = 卡宽」
+    /// 作废。卡高推导只在这里（与 `ringCardHeight` 同款单一位置）。
+    /// r38-10 衔接（已施工）：第 10 件平面带卡下加歌名 + 演唱者两行，
+    /// 卡高就是这一处改的（coverOnly 分支改成卡宽 + 两行字高 + 6pt
+    /// 上抬顶空），卡宽与别处不动。
+    var flatHeight: CGFloat { flatCard + Self.titleArtistHeight + Self.selectedLift }
 
-    /// 环卡宽：compact 141 / standard 149 / large 164（≈0.382vw，
-    /// 39.6s 新视频中心卡 275px/720px）。
+    /// r38-9：环卡宽 = clamp(vw×0.24, 84, 112)（壳版 ring.js openRing 原式，
+    /// vw = 实测屏宽，覆盖层全屏、与 window.innerWidth 同值）。
+    /// 竖屏 402pt → 96.5；横屏 852/874pt → 112（顶格）。
+    /// 旧 tier 分档（compact 141 / standard 149 / large 164，≈0.382vw，
+    /// 39.6s 新视频中心卡 275px/720px）只剩 screenWidth = 0 的回落。
+    static func ringCardWidth(screenWidth: CGFloat) -> CGFloat {
+        min(max(screenWidth * 0.24, 84), 112)
+    }
+
+    /// 环卡宽（r38-9：有实测屏宽时按 ringCardWidth 现算；没传屏宽时
+    /// 回落旧 tier 分档）。
     var ringCard: CGFloat {
+        if screenWidth > 0 { return Self.ringCardWidth(screenWidth: screenWidth) }
         switch tier {
         case .compact: return 141
         case .standard: return 149
@@ -888,15 +966,23 @@ final class HomeCoverRingModel: ObservableObject {
         }
     }
 
-    /// 相邻槽位夹角 40°（壳版公式 step = min(360/n, 2·asin(pitch/(2R)))，
-    /// n = min(曲数, cap)，cap = round(2πR/pitch) = 9：曲数 ≥ 9 时
-    /// 360/9 = 40°，第二项 2·asin(pitch/(2R)) = 40.0°（弦长公式反推，
-    /// pitch/(2R) = sin20°），min 取 40°；曲数 < 9 时 360/n > 40°，
-    /// 第二项仍约 40.0°——三档、任意曲数下公式值都在 40° 上，
-    /// 写死 40 与公式值一致，见驱动 §R3 镜像。r35 前旧值也是 40°，
-    /// 但旧 pitch=卡宽、R≈218pt 时它是「视频实测」的数；现在
-    /// pitch/R 换回壳版，40° 是公式算出来的）。
-    var ringStep: CGFloat { 40 }
+    /// 环槽位数 n = min(曲数, cap)（r38-9：壳版 openRing 原式；旧 ringCap
+    /// 已是公式值，n 之前没单独成量，ringStep 写死 40° 时用不上）。
+    var ringSlotCount: Int {
+        min(tracks.count, Int(ringCap))
+    }
+
+    /// 相邻槽位夹角（r38-9：壳版公式 step = min(360/n, 2·asin(pitch/(2R)))，
+    /// 角度制；r35 的写死 40° 是旧 ringCard（141/149/164）+ 旧 R 下的
+    /// 公式值，卡宽/R 换成套壳版后不再成立——竖屏 402pt 约 35.2°、
+    /// 横屏 852pt（10 首）约 15.7°。asin 入参夹到 [-1, 1]（壳版同款）。
+    /// 没传屏宽时回落 40°（与旧弦长半径配套，见 ringRadius）。
+    /// 曲数为 0 时 step 无意义，回 40° 免得除零（visibleSlots 已空）。
+    var ringStep: CGFloat {
+        guard screenWidth > 0, ringSlotCount > 0 else { return 40 }
+        let asinDeg = 2 * asin(min(max(ringPitch / (2 * ringRadius), -1), 1)) * 180 / .pi
+        return min(360 / CGFloat(ringSlotCount), asinDeg)
+    }
 
     /// 槽距 = 卡宽×1.14（r35：换回壳版 ring.js openRing 原式
     /// pitch = cardW * 1.14；r31 的「视频实测 pitch≈卡宽」已被用户
@@ -907,22 +993,31 @@ final class HomeCoverRingModel: ObservableObject {
     var ringPitch: CGFloat { ringCard * 1.14 }
 
     /// 环容量 cap = clamp(round(2πR/pitch), 7, 64)（壳版 openRing 原式；
-    /// 三档都是 round(9.18) = 9）。n = min(曲数, cap)，见 ringStep。
+    /// r38-9：竖屏 402pt round(10.40) = 10，横屏 852pt round(22.99) = 23；
+    /// 旧值 9 是旧 ringCard/R 下的数）。n = min(曲数, cap)，见 ringSlotCount。
     var ringCap: CGFloat {
         min(max((2 * .pi * ringRadius / ringPitch).rounded(), 7), 64)
     }
 
-    /// 圆柱半径（弦长公式 pitch = 2R·sin(step/2)；r35：pitch 换回
-    /// 卡宽×1.14 后标准档 169.86/(2·sin20°) ≈ 248pt，
-    /// compact ≈ 235pt，large ≈ 273pt；r31 的 218/206/240pt 是
-    /// pitch=卡宽时的旧值，已作废）。
+    /// 圆柱半径（r38-9：壳版 openRing 原式 R = max(Rview, cardW×0.8)，
+    /// Rview = (vw/2 − edgePad − cardW/2) / 0.762，edgePad = 14；
+    /// 竖屏 402pt ≈ 182pt，横屏 852pt ≈ 467pt。
+    /// 与弦长公式同值（step 取 asin 分支时 R = pitch/(2·sin(step/2))；
+    /// step 取 360/n 分支时两者差 <1pt，壳版以 Rview 为准）。
+    /// 没传屏宽时回落旧弦长公式（r35：pitch 换回卡宽×1.14 后标准档
+    /// 169.86/(2·sin20°) ≈ 248pt，compact ≈ 235pt，large ≈ 273pt）。
     var ringRadius: CGFloat {
-        ringPitch / (2 * sin(ringStep * .pi / 360))
+        if screenWidth > 0 {
+            let rView = (screenWidth / 2 - 14 - ringCard / 2) / 0.762
+            return max(rView, ringCard * 0.8)
+        }
+        return ringPitch / (2 * sin(ringStep * .pi / 360))
     }
 
     /// 透视距离 P = max(3.2R, 520)（壳版 ring.js openRing 原式：
-    /// `P = Math.max(R * 3.2, 520)`；标准档 3.2×248 ≈ 795pt > 520，
-    /// 三档都取 3.2R）。卡片旋转不再用 SwiftUI perspective 0.5，
+    /// `P = Math.max(R * 3.2, 520)`；r38-9：竖屏 402pt 3.2×182 ≈ 583pt、
+    /// 横屏 852pt 3.2×467 ≈ 1495pt，都 > 520、都取 3.2R）。
+    /// 卡片旋转不再用 SwiftUI perspective 0.5，
     /// 透视全程只走这个显式 P（见 cylinderZ / perspectiveFactor）。
     var ringPerspective: CGFloat {
         max(3.2 * ringRadius, 520)
@@ -935,6 +1030,11 @@ final class HomeCoverRingModel: ObservableObject {
 
     /// 环卡总高：封面 + 间距 5 + 15pt 歌名行 + 间距 5 + 13pt 歌手行
     /// （r28：歌名 13→15、歌手 11→13，见 RingCardView）。
+    /// r38-9：壳版 cardH = cardW + 28 是一行歌名（11px + 间距 5 + 余量）；
+    /// 原生环卡是两行（歌名 + 歌手，视频规格、每张环卡下都有），故 +46
+    /// 不动——只取壳版的封面宽 cardW，不取它的一行卡高；23pt 文字段
+    /// （(ringCardHeight − ringCard)/2，见 ringCardCenterYLocal）随之不变。
+    /// 卡高推导只在这里（与 flatHeight 同款单一位置）。
     var ringCardHeight: CGFloat { ringCard + 46 }
 
     // MARK: 平面跑马带
@@ -1147,9 +1247,10 @@ final class HomeCoverRingModel: ObservableObject {
     // MARK: 平面带触摸状态机（壳版 ring.js onPressMove strip 分支，
     // 由 StripTouchView 的 UIPanGestureRecognizer 驱动；x/y 均为平面带本地坐标）
 
-    /// 平面带触摸的移动结果：`.failGesture` = 竖向占优，
+    /// 平面带触摸的移动结果：`.failGesture` = 竖向占优且下滑，
     /// 识别器自毁、把手势交还 ScrollView（ring.js「下滑 = 交还页面」同款；
-    /// r24 起上/下都交还，上滑开环已删，见 stripTouchMoved）。
+    /// r38-fix ⑨-1：改回壳版 onPressMove，上滑开环、下滑交还、横向手滚跑马带，
+    /// r24 那版（横向拖动开环）作废，见 stripTouchMoved）。
     enum StripMoveOutcome {
         case handled
         case failGesture
@@ -1169,19 +1270,19 @@ final class HomeCoverRingModel: ObservableObject {
         )
     }
 
-    /// 手指移动（pan .changed；r24 重写，第 3 件）：
+    /// 手指移动（pan .changed；r38-fix ⑨-1 改回壳版 ring.js onPressMove
+    /// strip 分支，r24 那版「横向开环、上/下都交还」作废）：
     /// - 环已开（同一根手指）：环拖动还没走出 5px 之前，下滑 >90px 且
     ///   竖向占优 → 收回（ring.js onPressMove ring 分支「明显向下滑 =
     ///   退出环」；5px 死区是 RING_THRESHOLD）；否则继续转环。
     /// - 环没开：10px 内不判方向（ring.js DRAG_THRESHOLD=10）；
-    ///   横向占优（|dx|>|dy|×1.25）→ 开环（锚点 = 手指下最近的卡，
-    ///   ring.js nearestFlatIdx；手指不抬起继续拖就是转环，
-    ///   ring.js enterRing 同款语义）；
-    ///   竖向占优（上/下都一样）→ `.failGesture`（识别器自毁，
-    ///   ScrollView 接管滚页面；上滑开环这一步按用户指令已删掉，
-    ///   视频 0.9–1.0s 的上滑展开不再是必要步骤）。
-    /// - 平面带不再支持横向手滚（横向拖动现在开环；跑马带本身
-    ///   自动 24px/s 走，见 tickFlat）。
+    ///   竖向占优（|dy|>|dx|×1.25）：向上滑（dy<0）→ 开环（锚点 = 手指下
+    ///   最近的卡，ring.js nearestFlatIdx；手指不抬起继续拖就是转环，
+    ///   ring.js enterRing 同款语义）；向下滑 → `.failGesture`
+    ///   （识别器自毁，ScrollView 接管滚页面；ring.js「下滑 = 交还页面」）。
+    /// - 横向拖动 → 手滚跑马带（flatOffsetX 1:1 跟手，ring.js
+    ///   `flat.scroll -= stepDx` 同款，符号已按原生 offset 换算），不弹环；
+    ///   判向时阈值内的位移也算进去（壳版 prevX = x0 同款）。
     func stripTouchMoved(x: CGFloat, y: CGFloat) -> StripMoveOutcome {
         flatLastStripActivity = Date() // r34：活拖动每步都刷新，看门狗不误清
         if ringPhase == .open {
@@ -1208,16 +1309,34 @@ final class HomeCoverRingModel: ObservableObject {
         let dy = y - press.startY
         if press.decided == .undecided {
             if hypot(dx, dy) < Self.dragThreshold { return .handled }
-            if abs(dx) > abs(dy) * 1.25 {
-                let anchor = anchorNearestFlatCard(x: x)
-                openRing(anchor: anchor, atX: x, atY: y)
-                press.decided = .openedRing
+            if abs(dy) > abs(dx) * 1.25 {
+                // r38-fix ⑨-1：竖向占优——上滑开环，下滑交还页面（壳版同款）。
+                if dy < 0 {
+                    let anchor = anchorNearestFlatCard(x: x)
+                    openRing(anchor: anchor, atX: x, atY: y)
+                    press.decided = .openedRing
+                    stripPress = press
+                    return .handled
+                }
+                press.decided = .handedToScroll
                 stripPress = press
-                return .handled
+                return .failGesture
             }
-            press.decided = .handedToScroll
+            // r38-fix ⑨-1：横向拖动只是手滚跑马带，不弹环（壳版同款）；
+            // 第一下把阈值内的位移也算进去，之后 1:1 跟手。
+            press.decided = .scrollingFlat
+            press.prevX = press.startX
             stripPress = press
-            return .failGesture
+        }
+        if press.decided == .scrollingFlat {
+            // r38-fix ⑨-1：壳版 `flat.scroll -= stepDx` 的原生换算——
+            // 卡片 x = j·pitch − scroll，手指右移卡片跟右移；原生带子
+            // 偏移就是 flatOffsetX，故 flatOffsetX += stepDx，再归一化。
+            let stepDx = x - press.prevX
+            press.prevX = x
+            flatOffsetX = normalizedFlat(flatOffsetX + stepDx)
+            stripPress = press
+            return .handled
         }
         return .handled
     }
@@ -1240,8 +1359,9 @@ final class HomeCoverRingModel: ObservableObject {
 
     // MARK: 开环 / 收回
 
-    /// 开环（r28：入口只剩一处——平面带横向拖动 stripTouchMoved；
-    ///   入口按钮点按已删，上滑入口 r24 已删）。
+    /// 开环（r38-fix ⑨-1：入口只剩一处——平面带上滑 stripTouchMoved，
+    /// 改回壳版 onPressMove；入口按钮点按已删；横向拖动不再开环，
+    /// 改手滚跑马带）。
     /// - `beginDrag: true`（平面带横向拖动）：展开这根手指不用抬起，直接记为
     ///   拖动起点，继续拖就是转环（ring.js enterRing 同款；同一根手指的后续移动
     ///   由平面带的 `StripTouchView` 接着转发，不走覆盖层新挂的手势）。
@@ -1317,7 +1437,9 @@ final class HomeCoverRingModel: ObservableObject {
         withAnimation(.timingCurve(0.32, 0, 0.67, 0, duration: ms / 1000)) {
             closeT = 1
         }
-        withAnimation(.easeOut(duration: ms / 1000)) {
+        // r38-9：壳版 renderRing 里覆盖层透明度 = 1 − easeInCubic(closeT)，
+        // 与 closeT 同曲线；旧 .easeOut 先快后慢、与壳版反向。
+        withAnimation(.timingCurve(0.32, 0, 0.67, 0, duration: ms / 1000)) {
             overlayOpacity = 0
         }
         let gen = closeGeneration
@@ -1389,7 +1511,11 @@ final class HomeCoverRingModel: ObservableObject {
 
     func ringDragMoved(toX x: CGFloat) {
         guard ringPhase == .open, ringDragging else { return }
-        angle = ringStartAngle + (x - ringStartX) * ringPerPixel
+        // r38-9：壳版 `if (s.n > 1)`——只有一张卡时不转（angle 钉在 0，
+        // 见 ringDragEnded 的 n≤1 分支）；采样/带子同步/预取照常。
+        if ringSlotCount > 1 {
+            angle = ringStartAngle + (x - ringStartX) * ringPerPixel
+        }
         let now = Date()
         ringSamples.append((now, angle))
         while ringSamples.count > 2,
@@ -1427,6 +1553,14 @@ final class HomeCoverRingModel: ObservableObject {
         ringDragging = false
         isRingDragging = false
         guard ringPhase == .open else { return }
+        // r38-9：壳版 releaseRing 的 n≤1 分支——只有一张卡时 angle 钉 0、
+        // 不算速度、不起弹簧，直接排 1s 收回（正在播放队列只有 1 首时命中）。
+        if ringSlotCount <= 1 {
+            angle = 0
+            stopRingSpring()
+            scheduleHoldClose()
+            return
+        }
         let now = Date()
         var v: CGFloat = 0
         if ringSamples.count > 1 {
@@ -1607,7 +1741,11 @@ final class HomeCoverRingModel: ObservableObject {
     /// 见 verification/r25.cjs 的 U6e 更新说明）。
     func playTrack(at index: Int, store: PlaybackStore) {
         guard tracks.indices.contains(index) else { return }
-        store.setQueue(tracks, startAt: index, title: queueTitle)
+        selectedFlatIndex = index // r38-10：点中的卡整体上抬 6pt（FlatRingCard 的 isSelected）
+        // r38-fix ①：点卡切歌保留待播「下一首」标记（setQueue 整队重建时
+        // 按曲目身份重映射，不清空 playNextQueueIds；只这一处传 true，
+        // 搜索/歌单/歌手等其他 setQueue 调用点仍清空，语义不动）。
+        store.setQueue(tracks, startAt: index, title: queueTitle, preservePlayNext: true)
     }
 
     /// 点环卡：播歌 + 收回环（壳版 selectItem 同款）。
@@ -1645,13 +1783,18 @@ final class HomeCoverRingModel: ObservableObject {
     /// 一字不动（见 ringDragMoved / ringDragEnded）；文件里没有
     /// rasterize / .drawingGroup / .blur（拖影不是栅格化糊的），
     /// 拖动路径上也没有 .animation（没有动画滞后/过冲）。
+    /// r38-9：±2 是 step=40° 时的数（2×40=80°）；step 换成壳版公式后
+    /// 窗口按角度算：span = ceil(86.5/step)（竖屏约 35° → 3 格、
+    /// 横屏约 15.7° → 6 格），|world| ≤ 86.5° 的过滤仍在——step=40°
+    /// 时 span=3、±3 格全被过滤，与旧 ±2 同集。
     func visibleSlots() -> [RingSlot] {
         guard !tracks.isEmpty else { return [] }
         let q = -angle / ringStep
         let center = Int(q.rounded())
         var seen = Set<Int>()
         var out: [RingSlot] = []
-        for s in (center - 2)...(center + 2) {
+        let span = max(2, Int(ceil(86.5 / ringStep))) // r38-9：窗口按角度算
+        for s in (center - span)...(center + span) {
             let world = (CGFloat(s) - q) * ringStep
             guard abs(world) <= 86.5 else { continue }
             let idx = mod(anchorIndex + s, tracks.count)
@@ -1772,13 +1915,15 @@ final class HomeCoverRingModel: ObservableObject {
     }
 
     /// 环卡中心纵坐标（带内局部坐标，r34，第 2/4 件：环就定在平带卡片的位置）。
-    /// 带内原点 = 带顶，带高 flatHeight = flatCard + 52；平带盖面中心在
-    /// flatCard/2。环卡是 VStack（封面 ringCard + 5 + 歌名 + 5 + 歌手，
+    /// 带内原点 = 带顶，带高 flatHeight = flatCard + 52 + 6；平带盖面中心在
+    /// 6 + flatCard/2（r38-10：卡片顶距带顶 6pt 上抬顶空）。环卡是 VStack（封面 ringCard + 5 + 歌名 + 5 + 歌手，
     /// 总高 ringCardHeight = ringCard + 46），盖面中心比卡中心高
     /// (ringCardHeight - ringCard) / 2 = 23pt；相机 -5° 再把每张卡往下推
     /// 各自的 tiltDrop（正前方最大，越靠两侧越小）。
     /// 中心卡盖面中心对齐平带盖面中心：
-    ///   卡中心 = flatCard/2 + 23 - tiltDrop(1.0) + tiltDrop(facing)
+    ///   卡中心 = 6 + flatCard/2 + 23 - tiltDrop(1.0) + tiltDrop(facing)
+    /// （r38-10：开头的 6 是上抬顶空，见上；没有它环盖面会比平带盖面高 6pt，
+    /// 开环瞬间锚点卡跳位）。
     /// 展开/收回中 tiltDrop 跟有效半径走：中心卡盖面中心全程钉在
     /// flatCard/2（只长尺寸、不挪位置——就是“原地变成 3D”），
     /// 侧卡盖面中心比中心卡高 tiltDrop(1.0) - tiltDrop(facing)
@@ -1789,7 +1934,9 @@ final class HomeCoverRingModel: ObservableObject {
     /// 本函数只用 flatCard / tiltDrop，不读 stripCenter：渲染不再依赖
     /// 存下来的锚点，带子在哪、环就在哪。
     func ringCardCenterYLocal(forWorld world: CGFloat) -> CGFloat {
-        flatCard / 2 + (ringCardHeight - ringCard) / 2
+        // r38-10：+6pt 上抬顶空（平带卡片顶距带顶 6pt），环盖面中心跟着下移
+        // 6pt，环开时盖面与平带盖面对齐（原地变 3D 不跳位）。
+        Self.selectedLift + flatCard / 2 + (ringCardHeight - ringCard) / 2
             - tiltDrop(facing: 1) + tiltDrop(facing: facing(forWorld: world))
     }
 
@@ -1801,7 +1948,9 @@ final class HomeCoverRingModel: ObservableObject {
     func ringCardCenterScreenY(forWorld world: CGFloat, screenHeight: CGFloat) -> CGFloat {
         let centerCardY: CGFloat
         if stripCenter.y > 0 {
-            centerCardY = stripCenter.y - flatHeight / 2 + flatCard / 2 + (ringCardHeight - ringCard) / 2
+            // r38-10：+6pt 上抬顶空（与 ringCardCenterYLocal 同款），命中盒
+            // 跟渲染走，点按盒与眼睛看到的卡片位置一致。
+            centerCardY = stripCenter.y - flatHeight / 2 + Self.selectedLift + flatCard / 2 + (ringCardHeight - ringCard) / 2
         } else {
             centerCardY = ringCenterY(screenHeight: screenHeight, topEdge: 95)
         }
@@ -1856,19 +2005,30 @@ final class HomeCoverRingModel: ObservableObject {
     }
 }
 
-/// 平面带按压判定（r24：第 3 件后只剩三种——没判向、已开环、已交还 ScrollView；
-/// 旧的 `.horizontal`（横向手滚跑马带）与 `.vertical`（上滑开环）已随
-/// 上滑门槛一起删掉）。
+/// 平面带按压判定（r38-fix ⑨-1 改回壳版：四种——没判向、已开环、
+/// 已交还 ScrollView、横向手滚跑马带；r24 删掉的 `.scrollingFlat`
+/// （横向手滚）与上滑开环一并恢复）。
 struct StripPress {
     var startX: CGFloat
     var startY: CGFloat
     var decided: StripDecision
+    /// 手滚跑马带时的上一帧手指 x（壳版 onPressMove 的 p.prevX；
+    /// 判向那一下置为 startX，阈值内的位移也算进去，之后 1:1 跟手）。
+    var prevX: CGFloat
+
+    init(startX: CGFloat, startY: CGFloat, decided: StripDecision) {
+        self.startX = startX
+        self.startY = startY
+        self.decided = decided
+        self.prevX = startX
+    }
 }
 
 enum StripDecision {
     case undecided
     case openedRing
     case handedToScroll
+    case scrollingFlat // r38-fix ⑨-1：横向手滚跑马带（壳版 flat.scroll 同款）
 }
 
 // MARK: - 平面带（常态）
@@ -1888,6 +2048,10 @@ struct HomeCoverRingView: View {
     var marqueeSpeed: CGFloat = 24
     /// 尺寸档（调用方按实测屏宽经 `PlayerTokens.sizeTier(for:topInset:)` 传入）。
     var tier: PlayerTokens.PlayerSizeTier = .standard
+    /// r38-8/r38-9：实测屏宽（调用方传外层 GeometryReader 的 outer.size.width；
+    /// 模型 flatCard/ringCard/ringRadius/ringStep 全从它现算）。默认 0 =
+    /// 没传，走旧 tier 分档（歌单详情页那路）。
+    var screenWidth: CGFloat = 0
     /// 面板深场（调用方传 HomeView 的专辑取色 field；默认深场）。
     var panelIsDark = true
     /// r36：点卡播歌时带上的队列标题（透传给模型 → setQueue(title:)；
@@ -1896,17 +2060,21 @@ struct HomeCoverRingView: View {
     var queueTitle: String? = nil
     /// r37-1：面板卡片只放封面（默认 false；HomeView 每日推荐那路传 true，
     /// 榜单详情那路也传 true——面板里的卡都走这条；歌单详情页那路不传，
-    /// 卡片仍带歌名/歌手）。true 时平面带卡片不画歌名/歌手（`FlatRingCard`），
-    /// 带高 = 卡宽（模型 `flatHeight`）；3D 环卡（`RingCardView`）不受
-    /// coverOnly 影响——00:42:43 纠正：1:1 复刻只限 3D 环卡，环卡按套壳版
-    /// （封面 + 歌名）显示，标题常在。
+    /// 卡片仍带歌名/歌手）。
+    /// r38-10：第 10 件起 coverOnly 不再藏卡下两行字——`FlatRingCard` 在
+    /// 两种模式下卡下都画歌名 + 演唱者，带高也不再按 coverOnly 分支
+    /// （模型 `flatHeight` 恒为卡宽 + 两行字高 + 6pt 上抬顶空）。
+    /// coverOnly 现在只剩一个作用：封面还没显示出来时的歌名占位
+    /// （盖在封面框里的那两行）只在 coverOnly 时出现；3D 环卡
+    /// （`RingCardView`）不受 coverOnly 影响——00:42:43 纠正：1:1 复刻只限
+    /// 3D 环卡，环卡按套壳版（封面 + 歌名）显示，标题常在。
     /// r37-1 追加（用户 2026-11-22 00:39 显示逻辑，长期规则）：
     /// 封面没加载出来时卡片先显示歌名/标题文字占位（盖在封面框上，
     /// 用户能先滑动、认出是哪首歌），封面加载出来后只渲染封面图、
     /// 不显示歌名；占位只在封面未显示时出现，不变常驻标题。
     /// 无封面 URL 的曲目永远无图可显，占位标题会一直显示（唯一能认出歌的办法）。
     var coverOnly = false
-    /// r36（用户 21:44）：榜单详情那路不显示入口提示行（「拖动展开 3D 环 ·
+    /// r36（用户 21:44）：榜单详情那路不显示入口提示行（「上滑展开 3D 环 ·
     /// 拖动旋转」）——详情页下面不加任何提示文字。每日推荐 / 搜索带
     /// 那路默认 false，提示行照旧。
     var hideEntryHint = false
@@ -1927,7 +2095,7 @@ struct HomeCoverRingView: View {
             } else {
                 // 平面带 + 入口提示行（r22c）：提示行是环的可见入口
                 // （r28：「展开 3D 环」按钮已删，点按开环不在触发里；
-                // 只留提示文字 + 平面带横向拖动开环）。
+                // 只留提示文字 + 平面带上滑开环）。
                 // r28：外面一块更深的圆角底（黑 0.18）——39.6s 视频 f_001
                 // 里卡行就在一块比面板再暗一档的圆角底上。
                 VStack(alignment: .leading, spacing: 6) {
@@ -1973,6 +2141,7 @@ struct HomeCoverRingView: View {
         .onChange(of: dailyEmptyReason) { _ in sync() }
         .onChange(of: marqueeSpeed) { _ in sync() }
         .onChange(of: tier) { _ in sync() }
+        .onChange(of: screenWidth) { _ in sync() } // r38-8/r38-9：转屏改宽即重算卡宽
         .onChange(of: panelIsDark) { _ in sync() }
         .onChange(of: queueTitle) { _ in sync() }
         .onChange(of: coverOnly) { _ in sync() }
@@ -1992,6 +2161,7 @@ struct HomeCoverRingView: View {
             playing: playback.currentTrack,
             speed: marqueeSpeed,
             tier: tier,
+            screenWidth: screenWidth, // r38-8/r38-9
             panelIsDark: panelIsDark,
             queueTitle: queueTitle,
             coverOnly: coverOnly
@@ -2040,7 +2210,7 @@ struct HomeCoverRingView: View {
                     ForEach(0..<2, id: \.self) { _ in
                         HStack(spacing: model.flatGap) {
                             ForEach(model.tracks.indices, id: \.self) { i in
-                                FlatRingCard(track: model.tracks[i], width: model.flatCard, isDark: model.panelIsDark, coverOnly: model.coverOnly) {
+                                FlatRingCard(track: model.tracks[i], width: model.flatCard, isDark: model.panelIsDark, coverOnly: model.coverOnly, isSelected: model.selectedFlatIndex == i) { // r38-10：点中态传进卡片，上抬 6pt
                                     model.playTrack(at: i, store: playback)
                                 }
                             }
@@ -2052,6 +2222,11 @@ struct HomeCoverRingView: View {
                         )
                     }
                 }
+                // r38-10：顶空 6pt（点中上抬预留）——平时卡片顶距带顶 6pt，
+                // 点中的那张 offset -6 回到带顶；不留这 6pt，点中卡的卡顶会
+                // 被下面 `.clipped()` 裁掉 6pt。带高 flatHeight 里已含这 6pt，
+                // 卡下两行字不顶出带底。
+                .padding(.top, HomeCoverRingModel.selectedLift)
                 .offset(x: model.flatOffsetX)
                 .onPreferenceChange(FlatSetWidthKey.self) {
                     // r34，第 1 件——布局完成前偏好先报 0，旧代码直接写成
@@ -2156,18 +2331,18 @@ struct HomeCoverRingView: View {
         .frame(height: model.flatHeight)
     }
 
-    /// 入口提示行：只剩手势提示文字（「拖动展开 3D 环 · 拖动旋转」），
+    /// 入口提示行：只剩手势提示文字（「上滑展开 3D 环 · 拖动旋转」），
     /// 不再有按钮。
-    /// r24：第 3 件后提示改成拖动（上滑入口已删，chevron.up 图标也换掉，
-    /// 别再暗示用户去上滑）。
-    /// r28：「展开 3D 环」按钮已删（点按开环不在 r24 定好的触发里）；
-    /// 开环只剩平面带横向拖动（`stripTouchMoved` → `openRing`），
+    /// r38-fix ⑨-1：触发改回壳版（上滑开环、横向手滚跑马带），提示文字与
+    /// 图标同步改成上滑；r24 那版（横向拖动开环）作废。
+    /// r28：「展开 3D 环」按钮已删（点按开环不在触发里）；
+    /// 开环只剩平面带上滑（`stripTouchMoved` → `openRing`），
     /// 不加替代的提示按钮；颜色跟面板深场走（深场白字，浅场墨字）。
     private var entryHintRow: some View {
         HStack(spacing: 6) {
-            Image(systemName: "arrow.left.and.right")
+            Image(systemName: "arrow.up")
                 .font(.system(size: 10, weight: .semibold))
-            Text("拖动展开 3D 环 · 拖动旋转")
+            Text("上滑展开 3D 环 · 拖动旋转")
                 .font(.liziBody(size: LiziTokens.size12))
         }
         .foregroundColor(model.panelIsDark ? .white.opacity(0.75) : LiziTokens.ink3)
@@ -2175,13 +2350,24 @@ struct HomeCoverRingView: View {
     }
 }
 
-/// 平面带里的一张卡：封面 + 歌名 + 歌手（r28：卡宽按档走 180/190/209；
+/// 平面带里的一张卡：封面 + 歌名 + 歌手（r38-8：卡宽按屏宽现算，
+/// 一屏可见 3 张，见 HomeCoverRingModel.flatCardWidth；
 /// 歌名 16pt、歌手 14pt，39.6s 新视频实测；颜色跟面板深场走——
 /// 深场白字 + 灰字，浅场墨字）。
-/// r37-1：coverOnly 时只放封面（歌名/歌手不画，带高 = 卡宽）；
+/// r38-10：第 10 件——卡下两行字（歌名粗体 + 演唱者）两种模式都画，
+/// 只加这两个，不加专辑名；文字在卡片下面（封面下方、卡片外面），
+/// 卡片里面只有封面，文字不叠在封面里面。歌名/演唱者取 `Track.title` /
+/// `Track.artist`（见 body）。
+/// r37-1：coverOnly 时只放封面（歌名/歌手不画，带高 = 卡宽）——已作废
+/// （r38-10：两种模式都画两行字，带高恒为卡宽 + 两行字高 + 6pt 上抬顶空，
+/// 见模型 `flatHeight`）；coverOnly 现在只剩封面未显示时的歌名占位开关。
 /// r37-1 追加（用户 2026-11-22 00:39 显示逻辑）：coverOnly 且封面还没
 /// 显示出来时，先盖歌名/歌手文字占位（白字盖在深色占位底上），用户能先滑、
 /// 认出是哪首歌；封面一到占位消失、只剩封面。占位盖在封面框里，不占带高。
+/// r38-10 注意：占位逻辑原样不动——封面加载中歌名会同时出现两次
+/// （封面框里的占位 + 卡下的常驻行），封面一到占位消失，只剩卡下那行。
+/// 点中的卡整体上抬 6pt（`isSelected`，封面 + 两行字一起；其余卡片
+/// 保持同一水平线，见模型 `selectedLift` / 带顶 6pt 顶空）。
 ///
 /// 不是 Button：带子的触摸层（`StripTouchView`，盖在卡片上方）统一接管点按；
 /// Button 和识别器的 tap 会双重触发。VoiceOver 激活走 `.accessibilityAction`。
@@ -2191,11 +2377,16 @@ private struct FlatRingCard: View {
     let isDark: Bool
     /// r37-1：只放封面（默认 false；歌单详情页 / 榜单详情页那路不传，
     /// 卡片仍带歌名/歌手）。
+    /// r38-10：本开关不再藏卡下两行字（两种模式都画），只剩封面未显示时
+    /// 的歌名占位开关（见 body 的占位分支与 `.task` 观测）。
     /// r37-9fix：必须是 `var` 不能是 `let`——`let` 带默认值时，默认值就算
     /// 一次初始化，成员初始化器不含它、显式 init 里再赋值会报
     /// immutable value may only be initialized once（run 44928276799）；
     /// `var` 带默认值才能进成员初始化器、调用方才能传 `coverOnly:`。
     var coverOnly: Bool = false
+    /// r38-10：是不是点中的那张（调用方传 `model.selectedFlatIndex == i`；
+    /// `var` 带默认值，同 coverOnly 的 r37-9fix 理由）。true 时整卡上抬 6pt。
+    var isSelected: Bool = false
     let onTap: () -> Void
 
     /// r37-1 追加：这张卡的封面图是否已显示（`CoverImageLoader` 进程内
@@ -2245,18 +2436,25 @@ private struct FlatRingCard: View {
                     .shadow(color: .black.opacity(0.6), radius: 6, x: 0, y: 1)
                 }
             }
-            if !coverOnly {
-                Text(track.title)
-                    .font(.liziBody(size: LiziTokens.size16, weight: .medium))
-                    .foregroundColor(isDark ? .white : LiziTokens.ink)
-                    .lineLimit(1)
-                Text(track.artist)
-                    .font(.liziBody(size: LiziTokens.size14))
-                    .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
-                    .lineLimit(1)
-            }
+            // r38-10：卡下两行字两种模式都画（只加歌名 + 演唱者，不加专辑名；
+            // 歌名取 track.title、演唱者取 track.artist；文字在封面下方、
+            // 卡片外面，不叠在封面里面）。歌名粗体 16pt、演唱者 14pt，
+            // 各一行、超长截断（lineLimit 1）。
+            Text(track.title)
+                .font(.liziBody(size: LiziTokens.size16, weight: .semibold))
+                .foregroundColor(isDark ? .white : LiziTokens.ink)
+                .lineLimit(1)
+            Text(track.artist)
+                .font(.liziBody(size: LiziTokens.size14))
+                .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
+                .lineLimit(1)
         }
         .frame(width: width, alignment: .leading)
+        // r38-10：点中的卡整体上抬 6pt（封面 + 两行字一起）；offset 只改
+        // 渲染不改布局，其余卡片保持同一水平线。带顶留了 6pt 顶空
+        // （flatStrip 的 .padding(.top, selectedLift)），上抬不被裁。
+        .offset(y: isSelected ? -HomeCoverRingModel.selectedLift : 0)
+        .animation(.easeOut(duration: 0.18), value: isSelected) // r38-10：上抬/落回短动画，不跳变
         .accessibilityElement(children: .combine)
         .accessibilityLabel("播放：\(track.title)")
         .accessibilityAddTraits(.isButton)

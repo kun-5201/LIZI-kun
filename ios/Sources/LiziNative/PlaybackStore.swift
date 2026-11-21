@@ -363,11 +363,40 @@ final class PlaybackStore: ObservableObject {
     /// r35-3：可选标题（默认 nil，其他调用点不动）：搜完点歌传
     /// 「搜索：\(query)」，队列就立为这次搜索的歌单列表；别的来源不传，
     /// 标题跟着清掉（搜新词点新歌时 setQueue 整队替换，标题也换成新的）。
-    func setQueue(_ tracks: [Track], startAt index: Int, title: String? = nil) {
+    /// r38-fix ①：`preservePlayNext`（默认 false，其他调用点不动）——
+    /// 点卡切歌（环的 playTrack）传 true，保留待播「下一首」标记。
+    /// 不能直接把旧 playNextQueueIds 数组搬过来：QueueItem 每次新建都
+    /// 生成新 UUID queueId（Models.swift），旧 id 在新队列里永远对不上，
+    /// 只会留下残留 id、把面板「· 下一首 N 首」计数虚高（removeFromQueue
+    /// 的注释同款教训）。所以先按曲目身份（id + platform）把待播曲目
+    /// 快照下来，重建后再映射到新队列里同曲目的新 queueId 上（按原顺序，
+    /// 同一首待播多次时逐个占位）；新队列里没有的待播曲目丢掉——它本来
+    /// 就不在新队列里，标了也播不到。映射在起播之前完成，起播的
+    /// play(queueItem:) 会把正播的那首从待播里摘掉（已播 = 不再待播），
+    /// 语义与原来一致。
+    func setQueue(_ tracks: [Track], startAt index: Int, title: String? = nil, preservePlayNext: Bool = false) {
+        let pendingTracks: [Track] = preservePlayNext
+            ? playNextQueueIds.compactMap { id in queue.first(where: { $0.queueId == id })?.track }
+            : []
         playNextQueueIds = []
         queue = tracks.map { QueueItem(track: $0) }
         queueTitle = queue.isEmpty ? nil : title
         currentIndex = queue.indices.contains(index) ? index : (queue.isEmpty ? -1 : 0)
+        if preservePlayNext, !pendingTracks.isEmpty {
+            var usedIds = Set<String>()
+            var remapped: [String] = []
+            remapped.reserveCapacity(pendingTracks.count)
+            for track in pendingTracks {
+                if let item = queue.first(where: {
+                    $0.track.id == track.id && $0.track.platform == track.platform
+                        && !usedIds.contains($0.queueId)
+                }) {
+                    usedIds.insert(item.queueId)
+                    remapped.append(item.queueId)
+                }
+            }
+            playNextQueueIds = remapped
+        }
         if queue.indices.contains(currentIndex) {
             play(queueItem: queue[currentIndex])
         }

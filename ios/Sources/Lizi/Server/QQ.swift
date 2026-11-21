@@ -2265,6 +2265,11 @@ extension QQService {
         let singers = scArr(it, "singer")
         let artists = singers.map { scStr($0, "name") }.filter { !$0.isEmpty }.joined(separator: " / ")
         let album = scDict(it, "album")
+        // r36-6：搜索行封面兜底——QQ 搜索行有的把专辑 mid 放顶层
+        // albumMid/albummid，不放 album.mid 里；只读 album.mid 时那几行
+        // 封面恒为空（全白的根因之一）。同文件 rankList（约 3347 行）
+        // 的既有兜底写法。
+        let albumMid = scStr(album, "mid").isEmpty ? qqFirstStr(it, ["albumMid", "albummid"]) : scStr(album, "mid")
         let pay = scDict(it, "pay")
         return [
             "id": mid, "source": "qq",
@@ -2272,7 +2277,7 @@ extension QQService {
             "artists": artists.isEmpty ? "未知歌手" : artists,
             "artistIds": singers.map { scStr($0, "mid") }.filter { !$0.isEmpty },
             "album": qqFirstStr(album, ["name", "title"]),
-            "cover": qqCover(scStr(album, "mid")),
+            "cover": qqCover(albumMid),
             "duration": scInt(it, "interval") * 1000,
             "fee": scInt(pay, "pay_play") > 0 ? 1 : 0,
             "mid": mid,

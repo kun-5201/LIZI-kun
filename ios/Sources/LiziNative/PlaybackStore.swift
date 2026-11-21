@@ -1357,7 +1357,22 @@ final class PlaybackStore: ObservableObject {
                let platform = await platformLeg(track: track, gen: gen, skips: skips, quality: requested) {
                 lastReason = platform.reason
                 if platform.url != nil {
-                    return await upgradeIfLower(platform, requested: requested, strongLX: true) {
+                    // r36-kugou-vip：已确认的酷狗会员，官方腿的结果不吃
+                    // LX 强占——strongLX 是 r34 为救官方试听地址加的
+                    // （官方试听档位虚高反而赢、落雪整首被扔）；酷狗
+                    // 官方腿从不产试听标记（服务端 songUrl 从不设 preview），
+                    // 会员官方地址按档位比高低，落雪只有档位更高时才赢。
+                    // 已知非会员走不到这里（分流已挡），会员态未知时
+                    // 保持强占不变。kugouIsVip 从分流结果反推，不再另问
+                    // 一次（本文件会员查询只分流处一处；已登录 + 会员态
+                    // 已知 + 没被分流挡住 ⟺ 已确认的酷狗会员）。
+                    // 放在 .automatic 分支内，不动分支外的 resolveURL
+                    // 其余部分（r32 §3d 锁定）。
+                    let kugouIsVip = track.platform == "kugou"
+                        && LoginStore.shared.isLoggedIn(platform: "kugou")
+                        && LoginStore.shared.vipKnown(platform: "kugou")
+                        && !kugouNonMemberLXOnly
+                    return await upgradeIfLower(platform, requested: requested, strongLX: !kugouIsVip) {
                         if let cloud = await self.cloudLeg(track: track, gen: gen, skips: skips, quality: requested) {
                             return cloud
                         }

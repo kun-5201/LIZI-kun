@@ -64,7 +64,8 @@ import UniformTypeIdentifiers
 ///    开场引导壳版已隐藏（hidden），不复刻。
 ///    动画插图原在这里，r31-settings-sections 挪进上面的「显示与性能」分区。
 /// 7. 关于：版本（Bundle）、构建（LiziNativeBuildInfo，CI 生成）、诊断日志
-///    （查看/复制/清空，读/清 DiagLog）、QQ 群、赞助（支付宝收款码链接，均照抄壳版）。
+///    （查看/复制/清空，读/清 DiagLog）、QQ 群、赞助（支付宝收款码链接，均照抄壳版）、
+///    免责声明（r36：点行进全文页，文案只在下面的 `liziDisclaimerText` 一处）。
 ///
 /// r31-settings-organization 去重清单（删了哪个 → 留了哪个）：
 /// - 设置页 9 档选档 → 留（改）：音质替换工在「音乐与音质」分区重加了
@@ -93,6 +94,10 @@ import UniformTypeIdentifiers
 /// 磁盘上没有这个文件是正常的，代码直接引用该类型即可，CI 生成后才编译。
 /// P2 报告说它因无 UI 引用被 strip 掉——本页真实引用它（短 commit + build
 /// 号 + 日期），让它进包。
+/// r36 免责声明（用户 2026-11-21 22:26 定）：文案全文只放这一处常量，
+/// 关于页入口行与全文页都读它——用户改措辞只改这一行，不许散在多处。
+/// 标题「免责声明」是页标题，不在正文里；正文逐字如下。
+private let liziDisclaimerText = "本软件仅供个人学习交流使用。软件内的音乐、歌词、封面等内容版权归原平台及版权方所有。本软件不提供、不存储任何音乐内容，所有播放均来自用户已授权的平台账号或用户自行添加的音源。使用本软件即表示您已阅读并同意本声明。"
 struct SettingsView: View {
     @StateObject private var settings = SettingsStore.shared
     /// r31-mquality 残留补（构建工 r31 修）：musicQualitySection 的默认音质
@@ -102,6 +107,9 @@ struct SettingsView: View {
     /// PlatformStripView 同款），这里直接取环境对象；不改调 SettingsStore
     /// 写口，因为 setPreferredQuality 还负责写盘 + 推 shared 刷新。
     @EnvironmentObject private var playback: PlaybackStore
+    /// r36-12 听歌排行：设置页入口直接走导航（`nav.show(.listeningRank)`），
+    /// 与 AccountDetailView 快捷入口同一路由；RootView 已下发 AppNavigation。
+    @EnvironmentObject private var nav: AppNavigation
     /// r23f：登录底座（r23a，`Views/Login/`）——设置页只消费它的接口
     /// （约定见 `LoginSheetTarget.swift` 文件头）；登录/登出成功后它发布
     /// 变化，账号行随之重绘。未落地前本引用编译不过（见 r23f 驱动 GAP）。
@@ -142,25 +150,90 @@ struct SettingsView: View {
     @State private var backgroundStatus: String? = nil
     /// r31-download：下载管理页 sheet 开关。
     @State private var showDownloads = false
+    /// r36 免责声明：关于页「免责声明」行点开全文页的开关。
+    @State private var showDisclaimer = false
+    /// v3 稿图（r36 第⑨⑩⑪件，2026-11-21 22:07 定稿）：设置页标签分组
+    ///（平台账号 / 自定义源管理 / 本地音乐 / 音效），点标签切分组并回顶部。
+    @State private var selectedSettingsTab: SettingsTab = .accounts
+    /// 标签栏是否已吸顶（头自身 minY ≤ 1 时吸顶，见 settingsTabHeader）：
+    /// 吸顶时头里只剩 LI 标记居中，LIZI + kun 已随大标题滑走。
+    @State private var settingsTabPinned = false
+
+    /// 设置页标签（v3 稿图）：4 项，与现有分节平级。
+    private enum SettingsTab: String, CaseIterable {
+        case accounts, lx, local, sound
+        var title: String {
+            switch self {
+            case .accounts: return "平台账号"
+            case .lx: return "自定义源管理"
+            case .local: return "本地音乐"
+            case .sound: return "音效"
+            }
+        }
+    }
+
+    /// 标签栏吸顶头自身位置（在 settingsScroll 坐标系的 minY）：
+    /// 吸顶时 minY ≈ 0，未吸顶时是它在流内的位置（大标题下面，> 0）。
+    private struct SettingsTabHeaderOffsetKey: PreferenceKey {
+        static var defaultValue: CGFloat = .infinity
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = nextValue()
+        }
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                accountSection
-                lxSection
-                localMusicSection
-                musicQualitySection
-                storageDownloadSection
-                lyricsSection
-                displayPerformanceSection
-                appearanceSection
-                aboutSection
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16, pinnedViews: [.sectionHeaders]) {
+                    // v3 稿图（r36 第⑨⑩⑪件，2026-11-21 22:07 定稿）：
+                    // 顶部品牌锁扣（LI + LIZI + kun 紧挨着一排，居中）+
+                    // 大标题「设置」+ 副标题，全部随内容滑走；下滑后顶部
+                    // 只剩 LI 标记（见 settingsTabHeader 的吸顶头）。
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Spacer()
+                            BrandLockupView()
+                            Spacer()
+                        }
+                        .padding(.top, 8)
+                        Text("设置")
+                            .font(.liziDisplay(size: 28))
+                            .foregroundColor(LiziTokens.ink)
+                        Text("账号、音源、音效与外观。")
+                            .font(.liziBody(size: LiziTokens.size13))
+                            .foregroundColor(LiziTokens.ink3)
+                    }
+                    .padding(.horizontal, 16)
+                    .id("settingsTop")
+                    Section(header: settingsTabHeader(proxy: proxy)) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            switch selectedSettingsTab {
+                            case .accounts:
+                                accountSection
+                                rankSection
+                            case .lx:
+                                lxSection
+                            case .local:
+                                localMusicSection
+                                storageDownloadSection
+                            case .sound:
+                                musicQualitySection
+                                lyricsSection
+                                displayPerformanceSection
+                                appearanceSection
+                                aboutSection
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                }
+                .padding(.bottom, 32)
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
-            .padding(.bottom, 32)
-        }
-        .background(LiziTokens.paper)
+            .coordinateSpace(name: "settingsScroll")
+            .onPreferenceChange(SettingsTabHeaderOffsetKey.self) { minY in
+                settingsTabPinned = minY <= 1
+            }
+            .background(LiziTokens.paper)
         .onAppear {
             settings.refreshLXSources()
             // r31-signin：进设置页时重读最近一次签到结果（自动签可能
@@ -182,6 +255,9 @@ struct SettingsView: View {
         }
         .sheet(isPresented: $showDownloads) {
             DownloadsView()
+        }
+        .sheet(isPresented: $showDisclaimer) {
+            DisclaimerView()
         }
         .alert(item: $notice) { n in
             Alert(title: Text(n.title), message: Text(n.message),
@@ -213,6 +289,7 @@ struct SettingsView: View {
             if newMode == .image && background.backgroundImage == nil { showImagePicker = true }
             if newMode == .video && !background.hasVideoFile { showVideoPicker = true }
         }
+        } // ScrollViewReader（标签切分组时回顶部用 proxy）
     }
 
     // MARK: - 通用小组件
@@ -293,13 +370,21 @@ struct SettingsView: View {
                         }
                         rowLabel(account.name, hint: account.limit)
                         Spacer()
-                        Text(nickname ?? (account.loggedIn ? "已登录" : "未登录"))
-                            .font(.liziBody(size: LiziTokens.size13))
-                            .foregroundColor(account.loggedIn ? .green : LiziTokens.ink3)
-                            .lineLimit(1)
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(LiziTokens.ink3)
+                        // v2 稿图（r36 第⑨⑩⑪件，2026-11-21 22:00 定稿）：
+                        // 右半边同一行：头像 → 用户名（绿字）→ VIP 标识 → 「>」；
+                        // 左边平台真 Logo + 平台名 + 副标题不变。整行点按进详情/
+                        // 登录页（行为不动）；VIP 牌与用户名同一行、在用户名右边。
+                        HStack(spacing: 6) {
+                            accountAvatarView(platform: account.id)
+                            Text(nickname ?? (account.loggedIn ? "已登录" : "未登录"))
+                                .font(.liziBody(size: LiziTokens.size13))
+                                .foregroundColor(.green)
+                                .lineLimit(1)
+                            vipBadgeView(platform: account.id)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(LiziTokens.ink3)
+                        }
                     }
                 }
                 .buttonStyle(.plain)
@@ -399,6 +484,149 @@ struct SettingsView: View {
                         .foregroundColor(LiziTokens.ink3)
                 }
             }
+        }
+    }
+
+    /// v2 稿图（r36 第⑨件）：平台账号行右侧头像。有头像 URL 显示真头像
+    ///（CoverImageView，第⑥件链路：代理 → 直链 → 深色占位，3 次重试，不许白框）；
+    /// 没头像 / 未登录显示可见人形占位（person.circle.fill，ink3），不留白。
+    /// Apple Music 没有头像来源——登录后也只能显示人形占位，老实说明。
+    private func accountAvatarView(platform: String) -> some View {
+        Group {
+            if let url = loginStore.avatarURL(platform: platform) {
+                CoverImageView(url: url, placeholderIconSize: 12)
+                    .frame(width: 24, height: 24)
+                    .clipShape(Circle())
+            } else {
+                Image(systemName: "person.circle.fill")
+                    .font(.system(size: 24))
+                    .foregroundColor(LiziTokens.ink3)
+                    .frame(width: 24, height: 24)
+            }
+        }
+    }
+
+    /// v2 稿图（r36 第⑩件）：VIP 标识，紧跟用户名右边、同一行。
+    /// 复用 `loginStore.vipLabel(platform:)`（r31 会员校验，不另起一套）；
+    /// SVIP 橙实心、VIP 红实心、其余（已知非会员 / 会员态未知 / 未登录）
+    /// 一律灰描边「普通用户」——按 22:00 批的 v2 稿图三态；SVIP 绝不降级成 VIP。
+    /// 注意：酷我 / Apple Music / 汽水 / 波点没有会员校验接口，列表牌按稿图
+    /// 显示「普通用户」；详情页（AccountDetailView）仍保留诚实的「未知」+ 脚注。
+    private func vipBadgeView(platform: String) -> some View {
+        let label = loginStore.vipLabel(platform: platform)
+        let badge: (text: String, fill: Color?, fg: Color, bold: Bool) = {
+            switch label {
+            case "SVIP": return ("SVIP", Color(hex: 0xFF8C00), .white, true)
+            case "VIP": return ("VIP", Color(hex: 0xE60026), .white, true)
+            default: return ("普通用户", nil, LiziTokens.ink3, false)
+            }
+        }()
+        return Text(badge.text)
+            .font(.system(size: 10, weight: badge.bold ? .bold : .regular))
+            .foregroundColor(badge.fg)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(
+                Group {
+                    if let fill = badge.fill {
+                        RoundedRectangle(cornerRadius: 7).fill(fill)
+                    } else {
+                        RoundedRectangle(cornerRadius: 7)
+                            .stroke(Color(hex: 0xB4B4B4), lineWidth: 1)
+                    }
+                }
+            )
+    }
+
+    /// 听歌排行独立模块（r36-12，用户 2026-11-21 22:02「听歌排行在设置里面
+    /// 做一个单独的模块」）：与「平台账号」「自定义源管理」平级的独立一节，
+    /// 同款 sectionCard 样式；点行进排行页。
+    /// 复用 r31 的 `ListeningRankView` + `PlayRecord`（网易 weapi
+    /// `/v1/play/record` 服务端排行，周/总榜切换），不重建、不另拉接口；
+    /// 入口固定传网易（其余 6 台没有等价服务端接口，副标题写清仅网易）。
+    private var rankSection: some View {
+        sectionCard(title: "听歌排行", note: "网易云音乐服务端听歌记录排行（最近一周 / 所有时间）。") {
+            Button(action: { nav.show(.listeningRank(platform: "netease")) }) {
+                HStack(spacing: 10) {
+                    Image(systemName: "chart.bar.fill")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(LiziTokens.accent)
+                    rowLabel("听歌排行", hint: "最近一周 / 所有时间 · 仅网易云音乐有服务端记录")
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(LiziTokens.ink3)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("听歌排行，查看网易云音乐听歌排行")
+        }
+    }
+
+    /// 吸顶头（v3 稿图，r36 第⑨⑩⑪件）：标签栏 + 下滑后只剩的 LI 标记。
+    /// - 未吸顶（在顶部）：头在流内、大标题下面，只显示标签栏；LI 收起
+    ///   （高 0，不留空隙），品牌锁扣在上面正常显示。
+    /// - 已吸顶（头顶到 ScrollView 顶，minY ≤ 1）：LI 展开居中置顶，
+    ///   标签栏贴在 LI 下面；LIZI + kun 已随大标题滑走（它们只在
+    ///   BrandLockupView 里，不在这里）。
+    /// 吸顶状态由头自身位置判定（GeometryReader 量它在 settingsScroll
+    /// 坐标系的 minY）：吸顶时 minY ≈ 0；在流内时 minY 是它离内容顶的
+    /// 距离（> 0）。头自身高度不影响自己的 minY（顶边），无反馈环。
+    private func settingsTabHeader(proxy: ScrollViewProxy) -> some View {
+        VStack(spacing: 0) {
+            BrandMarkView()
+                .frame(height: settingsTabPinned ? 11.7 : 0)
+                .opacity(settingsTabPinned ? 1 : 0)
+                .padding(.bottom, settingsTabPinned ? 8 : 0)
+                .animation(.easeInOut(duration: 0.2), value: settingsTabPinned)
+            settingsTabBar(proxy: proxy)
+        }
+        .background(
+            GeometryReader { g in
+                Color.clear.preference(
+                    key: SettingsTabHeaderOffsetKey.self,
+                    value: g.frame(in: .named("settingsScroll")).minY
+                )
+            }
+        )
+        .background(LiziTokens.paper)
+    }
+
+    /// 标签栏（v3 稿图）：4 项一排；选中黑底白字 pill，未选中墨字；
+    /// 点标签切分组并回顶部（新分组内容从顶开始看）。
+    private func settingsTabBar(proxy: ScrollViewProxy) -> some View {
+        HStack(spacing: 16) {
+            ForEach(SettingsTab.allCases, id: \.self) { tab in
+                Button(action: { selectSettingsTab(tab, proxy: proxy) }) {
+                    Text(tab.title)
+                        .font(.liziBody(size: LiziTokens.size13,
+                                        weight: selectedSettingsTab == tab ? .bold : .regular))
+                        .foregroundColor(selectedSettingsTab == tab ? .white : LiziTokens.ink)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(
+                            Group {
+                                if selectedSettingsTab == tab {
+                                    RoundedRectangle(cornerRadius: 13.5).fill(LiziTokens.ink)
+                                } else {
+                                    Color.clear
+                                }
+                            }
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("设置分组：\(tab.title)")
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+    }
+
+    private func selectSettingsTab(_ tab: SettingsTab, proxy: ScrollViewProxy) {
+        selectedSettingsTab = tab
+        withAnimation {
+            proxy.scrollTo("settingsTop", anchor: .top)
         }
     }
 
@@ -1005,6 +1233,19 @@ private struct PickedVideoFile: Transferable {
                 }
             }
             .buttonStyle(.plain)
+            // r36 免责声明：关于页入口行（QQ 群/赞助同款 Button + chevron 行），
+            // 点开 sheet 全文页；文案只在文件顶 `liziDisclaimerText` 一处。
+            Button(action: { showDisclaimer = true }) {
+                HStack {
+                    rowLabel("免责声明")
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(LiziTokens.ink3)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("免责声明")
             Text("折射和形态渲染已固定为默认值；形态切换在播放页右侧抽屉里。")
                 .font(.liziBody(size: LiziTokens.size13))
                 .foregroundColor(LiziTokens.ink3)
@@ -1020,5 +1261,31 @@ private struct PickedVideoFile: Transferable {
     /// 无引用的死代码。
     private var buildSummary: String {
         "build #\(LiziNativeBuildInfo.build) · \(LiziNativeBuildInfo.shortCommit) · \(LiziNativeBuildInfo.date)"
+    }
+}
+
+/// r36 免责声明全文页：设置 → 关于 → 「免责声明」行点开的 sheet。
+/// 正文只读文件顶的 `liziDisclaimerText` 一处常量，不另写一份。
+private struct DisclaimerView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(liziDisclaimerText)
+                    .font(.liziBody(size: LiziTokens.size14))
+                    .foregroundColor(LiziTokens.ink)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
+            }
+            .background(LiziTokens.paper)
+            .navigationTitle("免责声明")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
     }
 }

@@ -10,11 +10,9 @@ import SwiftUI
 /// - AppNavigation 由这里以 @StateObject 持有，经 environmentObject 下发。
 ///
 /// 深链（`lizinative://`）：
-/// - `lizinative://now` → 打开播放页（灵动岛点任何位置都走这条，
-///   r35-11 重加岛后扩展重新发深链）。
 /// - `lizinative://airplay` → 打开 App 后弹系统音频路由选择页
-///  （AVRoutePickerView sheet，照抄壳版 ContentView.AirPlayPickerSheet；
-///   岛上 AirPlay 钮走这条，原地弹面板没有公开 API）。
+///  （AVRoutePickerView sheet，照抄壳版 ContentView.AirPlayPickerSheet）。
+/// r36：`now` 深链（灵动岛点按进播放页）随自定义岛一起删了。
 struct RootView: View {
     @StateObject private var nav = AppNavigation()
     @StateObject private var stageForms = StageFormStore()
@@ -30,12 +28,17 @@ struct RootView: View {
             case .player:
                 PlayerView()
             case .stage(let formId, let openSettings):
-                StageView(initialFormId: formId, openSettings: openSettings)
-            case .playlist(let platform, let id, let isRank, let title, let coverURL, let showRankNumbers):
+                // r36-7 形态解析顺序：显式 formId（画廊「进入这个形态」/
+                // 深链 `?id=`）> 本次播放器会话里切的形态
+                // （AppNavigation.sessionStageFormId，内存，回首页即清）
+                // > `StageCatalog.savedFormId()`（StageBridge 的回落：画廊
+                // 上次选的 / 默认 001）。回首页后会话值已清，`.stage()` 不会
+                // 把上个会话切的形态带回来；`savedFormId()` 本身一字不动。
+                StageView(initialFormId: formId ?? nav.sessionStageFormId, openSettings: openSettings)
+            case .playlist(let platform, let id, let isRank, let title, let coverURL):
                 DetailWithBack {
                     PlaylistDetailView(platform: platform, id: id, isRank: isRank,
-                                       title: title, coverURL: coverURL,
-                                       showRankNumbers: showRankNumbers)
+                                       title: title, coverURL: coverURL)
                 }
             case .artist(let platform, let id):
                 DetailWithBack {
@@ -81,14 +84,12 @@ struct RootView: View {
         }
     }
 
-    /// 深链路由：只认 `lizinative` scheme；host 为 now/airplay，其他一律忽略。
+    /// 深链路由：只认 `lizinative` scheme；host 为 airplay/forms/gallery/stage，其他一律忽略。
     /// P3-B 增加：`lizinative://forms`（形态长廊）、`lizinative://gallery`
     /// （球面画廊）、`lizinative://stage?id=001`（进指定形态的舞台页）。
     private func handleDeepLink(_ url: URL) {
         guard url.scheme == "lizinative" else { return }
         switch url.host {
-        case "now":
-            nav.show(.player)
         case "airplay":
             showAirPlay = true
         case "forms":

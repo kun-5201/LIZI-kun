@@ -26,10 +26,11 @@ enum AppView: Hashable {
     /// /api/kuwo/rank/tracks（见 NativeBridge.playlistDetail）。
     /// r35-10：title / coverURL 是排行榜块点卡时传的种子（详情页第一
     /// 阶段先用它们显示头部，第二阶段回来保留真名真封面只补曲目，
-    /// 见 PlaylistDetailViewModel）；showRankNumbers 为真时行首显示
-    /// 排名数字（榜单详情页）。三个都是可选参数，旧调用点走默认值不动。
+    /// 见 PlaylistDetailViewModel）。r36（用户 21:43）：行首排名数字
+    /// 作废，showRankNumbers 参数已删。title / coverURL 都是可选参数，
+    /// 旧调用点走默认值不动。
     case playlist(platform: String, id: String, isRank: Bool = false,
-                  title: String? = nil, coverURL: URL? = nil, showRankNumbers: Bool = false)
+                  title: String? = nil, coverURL: URL? = nil)
     /// 歌手页（P2-B）。
     case artist(platform: String, id: String)
     /// 专辑页（P2-B）。
@@ -55,8 +56,31 @@ enum AppView: Hashable {
 final class AppNavigation: ObservableObject {
     @Published var current: AppView = .home
 
+    /// r36-7 本次播放器会话里选中的舞台形态（只放内存，不写 UserDefaults）。
+    ///
+    /// 语义：舞台形式只在本次进入播放器内切换时有效——舞台页里切形态
+    /// （StageView 选择器 → `noteStageFormSelected`）只记在这里，不再写
+    /// `lizi.native.playerMode`（见 StageBridge.load 的 r36-7 注释）；
+    /// 回首页即重置（`show(.home)` / `goHome` 里清掉），下次进播放器是
+    /// 传统播放器、再点舞台也不会把上个会话切的形态带回来。
+    /// `.stage()` 无 formId 时 RootView 用它做第一回落（见 RootView
+    /// `.stage` 分支）；它为空时再走 `StageCatalog.savedFormId()`（画廊
+    /// 上次选的 / 默认 001），`savedFormId()` 本身一字不动。
+    @Published private(set) var sessionStageFormId: String? = nil
+
     func show(_ view: AppView) {
+        // r36-7：回首页 = 本次播放器会话结束，会话级舞台选择清掉；
+        // 所有回首页的路（舞台页返回、播放页返回、详情页返回栏……）都走
+        // show(.home)，重置只放这一处，不用每个调用点各自清。
+        if view == .home {
+            sessionStageFormId = nil
+        }
         current = view
+    }
+
+    /// 舞台页里切了形态：只记本次会话，不写持久化键（见上）。
+    func noteStageFormSelected(_ id: String) {
+        sessionStageFormId = id
     }
 
     /// 进传统播放器（r20 首页大卡片单击 / 双击共用）。
@@ -75,6 +99,7 @@ final class AppNavigation: ObservableObject {
     }
 
     func goHome() {
-        current = .home
+        // r36-7：经 show(.home) 走，会话级舞台选择随之清掉（见 show）。
+        show(.home)
     }
 }

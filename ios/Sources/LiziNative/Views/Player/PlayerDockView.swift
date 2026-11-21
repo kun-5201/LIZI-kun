@@ -34,6 +34,11 @@ struct PlayerProgressBar: View {
     /// 尺寸档（调用方按实测屏宽经 `PlayerTokens.sizeTier(for:topInset:)` 传入）。
     var tier: PlayerTokens.PlayerSizeTier = .standard
 
+    /// 填充色（r36 横屏传统：传 traditionalRed 时走纯红填充，稿里
+    /// 进度条就是纯红 + 白圆点；nil = 原来的 barA→barB 蓝紫渐变，
+    /// 竖屏 / dock 一字不动）。
+    var fillColor: Color? = nil
+
     /// 触摸区高（r20 工人 E）：32pt。视觉细条仍 4pt，贴框底。
     /// 总高账 +28pt：compact 最紧 608+28=636 ≤ 667（状态角标行再 +22
     /// 也 658 ≤ 667），standard / large 余量更大，均在 PlayerTokens 的
@@ -58,17 +63,24 @@ struct PlayerProgressBar: View {
                 ZStack(alignment: .leading) {
                     // 未走过的轨道（壳版 .dock__bar 的淡白底）。
                     Color.white.opacity(0.08)
-                    // 走过的渐变（壳版 .dock__paint：bar-a → bar-b）。
-                    LinearGradient(
-                        colors: [
-                            PlayerTokens.barA.opacity(0.75),
-                            PlayerTokens.barA,
-                            PlayerTokens.barB,
-                            PlayerTokens.barB.opacity(0.9),
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
+                    // 走过的部分：fillColor 有值时纯色（r36 横屏传统红条），
+                    // 否则走过的渐变（壳版 .dock__paint：bar-a → bar-b）。
+                    Group {
+                        if let fillColor {
+                            fillColor
+                        } else {
+                            LinearGradient(
+                                colors: [
+                                    PlayerTokens.barA.opacity(0.75),
+                                    PlayerTokens.barA,
+                                    PlayerTokens.barB,
+                                    PlayerTokens.barB.opacity(0.9),
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        }
+                    }
                     .frame(width: max(0, fraction * width))
                     // 播放头：圆点（r22k：审计图里进度条上有圆点播放头，旧代码
                     // 只有 2pt 白线；圆点直径 10，中心落在 fraction 处，

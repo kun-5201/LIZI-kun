@@ -16,8 +16,8 @@ import SwiftUI
 ///   接口本身带名/封面/总数；酷我榜单是 tracks-only（r35-10 起排行榜块
 ///   点卡时传目录卡片的榜单名/封面当种子，第一阶段先用种子显示头部，
 ///   第二阶段回来保留真名真封面只补曲目；没种子的旧入口仍显示
-///   「〈平台名〉歌单」通用名，封面用白色底 + 音符占位，曲目数显示
-///   已加载数）；Apple Music tracks 回包带 name/cover（r25-B4：
+///   「〈平台名〉歌单」通用名，封面用深色默认封面（r36：第⑥件全站占位
+///   统一深色，不许白底），曲目数显示已加载数）；Apple Music tracks 回包带 name/cover（r25-B4：
 ///   服务端 playlistTracks 透 iTunes lookup 首条的歌单名/封面），显示真名真封面。
 /// - 标题与曲目同时为空 = 接口没有返回数据或请求失败（两种情况桥接层无法区分，
 ///   空态文案把两种可能都写清，不谎称是哪一种）。
@@ -26,19 +26,19 @@ struct PlaylistDetailView: View {
     let platform: String
     let id: String
     let isRank: Bool
-    /// 行首显示排名数字（r35-10 P0-3：排行榜块点卡进详情时为 true）。
-    let showRankNumbers: Bool
 
     @EnvironmentObject private var playback: PlaybackStore
     @StateObject private var viewModel: PlaylistDetailViewModel
+    /// r36：排行榜详情的封面轮播状态机（独立实例，与首页环分开；
+    /// 只在 isRank 分支用，普通歌单详情不用）。
+    @StateObject private var rankRingModel = HomeCoverRingModel()
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     init(platform: String, id: String, isRank: Bool = false,
-         title: String? = nil, coverURL: URL? = nil, showRankNumbers: Bool = false) {
+         title: String? = nil, coverURL: URL? = nil) {
         self.platform = platform
         self.id = id
         self.isRank = isRank
-        self.showRankNumbers = showRankNumbers
         _viewModel = StateObject(wrappedValue: PlaylistDetailViewModel(
             platform: platform, id: id, isRank: isRank, title: title, coverURL: coverURL))
     }
@@ -80,12 +80,39 @@ struct PlaylistDetailView: View {
                 Divider()
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
-                ForEach(Array(playlist.tracks.enumerated()), id: \.offset) { index, track in
-                    trackRow(track, in: playlist.tracks, at: index)
+                if isRank && !playlist.tracks.isEmpty {
+                    // r36（用户 21:27 + 21:41 + 21:43 + 21:44 + v4）：
+                    // 排行榜详情里的歌按首页那样一张一张卡片显示——首页封面
+                    // 轮播（真封面、横向轮播、当前大张居中、左右露出相邻封面、
+                    // 封面下歌名 + 歌手），不是普通列表、不是网格。
+                    // 不带排名数字（21:43 作废 r35-10 的行首排名数字）、
+                    // 不显示多少首（21:44）、不加任何提示文字（21:44，
+                    // hideEntryHint）。全量曲目（100/1000 首）都进轮播，
+                    // 取数走 playlistDetail isRank 全量（见 NativeBridge）。
+                    // 点卡播歌走环自带的 playTrack（setQueue 整队从该下标
+                    // 起播）；「播放全部」按钮保留，点行播放逻辑不动。
+                    // 只改排行榜详情这支，普通歌单详情保持原样（下面的
+                    // ForEach 列表行）。
+                    HomeCoverRingView(
+                        model: rankRingModel,
+                        dailyTracks: playlist.tracks,
+                        marqueeSpeed: 24,
+                        tier: PlayerTokens.sizeTier(for: UIScreen.main.bounds.size, topInset: 0),
+                        panelIsDark: false,
+                        hideEntryHint: true
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                } else {
+                    ForEach(Array(playlist.tracks.enumerated()), id: \.offset) { index, track in
+                        trackRow(track, in: playlist.tracks, at: index)
+                    }
                 }
             }
             .padding(.bottom, 24)
         }
+        // 环的 3D 展开态要这个坐标空间锚点（HomeView 同款，见 HomeView.swift）。
+        .coordinateSpace(name: "liziHome")
     }
 
     /// 头部：封面大图 + 标题 + 创建者 + 曲目数 + 简介。
@@ -117,9 +144,13 @@ struct PlaylistDetailView: View {
                             .foregroundStyle(SearchDesignTokens.ink2)
                             .lineLimit(1)
                     }
-                    Text(countText(playlist))
-                        .font(SearchDesignTokens.font(SearchDesignTokens.size13))
-                        .foregroundStyle(SearchDesignTokens.ink3)
+                    // r36（用户 21:44）：榜单详情页不显示歌的数量（「共 N 首」
+                    // 之类）；普通歌单详情照旧显示。
+                    if !isRank {
+                        Text(countText(playlist))
+                            .font(SearchDesignTokens.font(SearchDesignTokens.size13))
+                            .foregroundStyle(SearchDesignTokens.ink3)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -154,23 +185,14 @@ struct PlaylistDetailView: View {
         return "共 \(total) 首"
     }
 
-    /// 封面大图（120pt）：有图显示图，无图白色底 + 音符占位，不用金色。
+    /// 封面大图（120pt）：有图显示真图，无图/加载失败深色默认封面
+    /// （r36 第⑥件：全站占位统一深色 DefaultCoverArt，不许白底）。
+    /// CoverImageView 自带重试（见 CoverImageLoader.swift）。
     @ViewBuilder
     private func coverView(url: URL?) -> some View {
-        Group {
-            ProxyImageView(url: url) { coverPlaceholder }
-        }
-        .frame(width: 120, height: 120)
-        .clipShape(RoundedRectangle(cornerRadius: SearchDesignTokens.radius14))
-    }
-
-    private var coverPlaceholder: some View {
-        ZStack {
-            Color.white
-            Image(systemName: "music.note")
-                .font(.system(size: 36))
-                .foregroundStyle(SearchDesignTokens.ink3)
-        }
+        CoverImageView(url: url, placeholderIconSize: 36)
+            .frame(width: 120, height: 120)
+            .clipShape(RoundedRectangle(cornerRadius: SearchDesignTokens.radius14))
     }
 
     /// 「播放全部」：整队设为队列从第 0 首开始播；无曲目时禁用。
@@ -215,24 +237,9 @@ struct PlaylistDetailView: View {
                 playback.setQueue(list, startAt: index)
             }
         }
-        // r35-10（P0-3）：榜单详情页行首显示排名数字（{index+1}，13pt，
-        // 前 3 名主题强调色；长名沿用 TrackRowView 单行省略）。数字列在
-        // Button 外面（只作标签，不可点）；TrackRowView 自带左右 16
-        // 内边距，这里只补左侧 16，数字列占 24 + 间距 8。
-        if showRankNumbers {
-            HStack(spacing: 8) {
-                Text("\(index + 1)")
-                    .font(SearchDesignTokens.font(SearchDesignTokens.size13,
-                                                  weight: index < 3 ? .semibold : .regular))
-                    .foregroundStyle(index < 3 ? SearchDesignTokens.accent : SearchDesignTokens.ink3)
-                    .frame(width: 24, alignment: .center)
-                    .monospacedDigit()
-                row
-            }
-            .padding(.leading, 16)
-        } else {
-            row
-        }
+        // r36（用户 21:43）：行首排名数字作废（r35-10 的 P0-3 已删）——
+        // 榜单详情页的歌正常显示，不带排名数字。点行播放逻辑不动。
+        row
     }
 
     // MARK: - 空态

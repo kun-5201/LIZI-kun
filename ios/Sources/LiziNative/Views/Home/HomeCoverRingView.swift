@@ -531,8 +531,65 @@ import UIKit
 /// 发生在 |world| = 86.5°（facing 0.06、透明度 ≈ 0）处，再经 0.06–0.30
 /// smoothstep 淡入/淡出——套壳 ring.js 9 槽固定身份绕圆柱转同款；
 /// 静止时边缘多两张约 0.46 透明度的淡卡（壳版同款）。拖动 1:1 /
-/// 松手惯性 + 弹簧 / pitch / 压暗 / 后仰 / 位置 / 绑定一字不动。
+/// 松手惯性 + 弹簧 / pitch / 压暗 / 后仰 / 位置 / 绑定一律不动。
 /// 驱动见 verification/r35.cjs §O。
+///
+/// r36-8（2026-11-21，用户 21:31 原生视频 + 21:32 套壳视频「你好好看
+/// 套壳版的」：逐帧对比后按五项修——亮度/位置/卡片数/透视/顺滑。
+/// 视频：原生 ~/workspace/user/media_library/video/32/321205c7…1cac.mp4
+/// （8.3s，帧 ~/workspace/ring-video-frames/f001–f033，4fps）；
+/// 套壳 ~/workspace/user/media_library/video/7e/7ed8a9f8…7a0e.mp4
+/// （12.5s，帧 ~/workspace/ring-shell-frames/s001–s038，3fps）。
+/// 量取（640×1392 文件坐标，PIL 亮度均值/90 分位；数字进驱动 §H）：
+/// 1. 亮度：环带 P90（最亮一档 ≈ 卡面）壳版约 155、原生约 56（2.8 倍）；
+///    同曲《回到你身边》壳版卡面 135、原生 45（3 倍）；顶栏壳版 53–56、
+///    原生 19.5；本地音乐行壳版 42、原生 28。壳版开环/闭合比：顶栏
+///    ×0.45、本地行 ×0.34（压暗比与原生一致，绝对差来自面板底色——
+///    壳版浅绿面板闭合 117、原生专辑取色深场约 40）。
+///    根因（两处，都是层级不是数值）：① 壳版压暗是 `.mring` 的背景，
+///    卡片是它的孩子、画在压暗上面，卡片根本不被压（只剩 0.038 shade）；
+///    原生压暗层在覆盖层里、盖在环卡上面（卡在页里、压暗层在覆盖层里），
+///    中心卡先被 ×0.64；② r33 的远缘渐变 shadeFarEdge（40° 时 0.42）
+///    是 11 倍于壳版的压暗（壳版 flat 公式 40° 时 3.8%）。
+///    修法：压暗层在环卡带上开洞（scrimHoleMask：活的带子矩形、上下
+///    16pt 羽化，洞里卡片全亮、洞外页面照常压暗；r34 的环在带子里的
+///    绑定不动，不把环搬回覆盖层）；删 shadeFarEdge/shadeGradient，
+///    只留壳版 flat 公式 shadeOpacity；删拖动顶部加暗层（0.14 黑，
+///    壳版 ring.js 里没有，壳版视频拖动中 Hero 亮度与静止时一样）。
+///    压暗三档 0.36/0.58/0.78 不动——已比壳版 CSS 的 0.40/0.70/0.88
+///    轻，页面的压暗比实测与壳版一致（×0.45/×0.34），重的不是数值。
+/// 2. 位置：顶栏底→环顶壳版约 133pt、原生约 110pt，环偏高 23pt、
+///    贴着顶栏；壳版环中心约 60% 屏高（ring.js --my 默认 60vh）、
+///    原生约 55%。修法：带子容器顶加 stripTopInset = 24pt（平带与环
+///    一起下移，r34 绑定不动；面板封顶账里有约 36–43pt 余量，不顶出
+///    提示行；搜索块里的同一视图也跟着下移 24pt，账见交回）。
+/// 3. 卡片数/透视：实测壳版卡间距 241 文件像素 ≈ 原生 projectedX(40°)，
+///    卡宽也一致——pitch = 卡宽×1.14、R = 弦长公式 248、cap = 9、
+///    step = 40°、P = max(3.2R, 520)、perspective = 卡高/P，
+///    六个数本来就是 ring.js 公式原样，一字不动。「只露 3 张」不是
+///    几何数错，是亮度：原生 ±80° 的两张边卡是 21pt、0.44 透明度
+///    的暗条，糊在全黑底上看不见；壳版同位置的边卡是亮的。亮度修好
+///    后边卡重新可见，静止 3 大 + 2 边、拖动中 4–5 张，与壳版一致；
+///    侧卡「太平」同理——0.42 远缘渐变把梯形盖死了，删掉后梯形
+///    （perspective 卡高/P）重新可见。visibleSlots 仍是中心±2、
+///    |world| ≤ 86.5°（r35-8 的拖影修法不动）。
+/// 4. 顺滑：拖动本身 1:1 是对的（ringDragMoved 直接写角、无量化、
+///    无 .animation，HomeView 里也没有对 angle 的 animation；
+///    visibleSlots 换槽发生在透明度 ≈ 0 处，r35-8 已钉死）——顿挫
+///    在两处：① 松手弹簧是 SwiftUI `.spring(response: 0.58,
+///    dampingFraction: 1.0)`，只对上了频率（2π/√118 ≈ 0.58s），
+///    吃不到初速度——松手先死停再爬过去，与壳版「带着速度飞过去
+///    再稳稳停住」不是同一种手感，且不是 1/240s 积分；② 每步触摸
+///    都写 angle（@Published，全模型观察者重算）+ onChange 再同步
+///    一次带子，渲染一超 16ms 就丢帧、中间角被跳过去，看着就是丢包。
+///    修法：松手改走显式弹簧驱动（startRingSpring/ringSpringFired：
+///    CADisplayLink + 1/240s 子步半隐式欧拉，stiffness 118、阻尼
+///    2√118、初速度 v 直接带进、停稳条件与壳版同款；新拖动上手先
+///    停弹簧，收回/释放时停表）；拖动 1:1 公式、110ms 采样、±1400
+///    限幅、τ=1.08s 投影目标一字不动。
+/// 驱动见 verification/r36-ring.cjs（§A–§G 断言 + §H 实测证据）。
+/// 诚实残留见交回（顺滑与亮度须用户真机录屏确认；浅色专辑时卡缝
+/// 比壳版亮一档；SwiftUI perspective 与 CSS px 无精确换算）。
 
 // MARK: - 状态机
 
@@ -562,6 +619,11 @@ final class HomeCoverRingModel: ObservableObject {
     /// 深场时平面卡歌名/歌手/提示用白字，浅场用墨字。默认 true
     /// （默认 tone #5b5bd6/#b04f8c/#2f6f8f 是深场，见 AlbumTone.default）。
     @Published var panelIsDark = true
+    /// r36：点卡播歌时一并带上的队列标题（`PlaybackStore.setQueue(_:startAt:title:)`，
+    /// 队列非空时不传标题会把 queueTitle 置 nil——搜索带若不传，
+    /// 搜索 queueTitle + 置顶行会丢）。每日推荐那路传 nil（环本来不带标题）。
+    /// 非 Published：只在 playTrack 里读，不驱动渲染。
+    var queueTitle: String?
 
     // MARK: 平面跑马带
 
@@ -620,6 +682,7 @@ final class HomeCoverRingModel: ObservableObject {
     deinit {
         flatDisplayLink?.invalidate()
         flatWatchdog?.invalidate()
+        ringSpringLink?.invalidate()
         if let frameRateObserver { NotificationCenter.default.removeObserver(frameRateObserver) }
     }
     /// 平面带上的按压判定（非 Published：只在手势闭包里读写，不驱动渲染）。
@@ -643,7 +706,9 @@ final class HomeCoverRingModel: ObservableObject {
     /// 展开时的锚点卡下标（手指下最近的那张，壳版 nearestFlatIdx）。
     var anchorIndex = 0
     var ringDragging = false
-    /// 正在拖动环（手指按下且在转环，或开环手指未抬起）：覆盖层顶部再暗一档。
+    /// 正在拖动环（手指按下且在转环，或开环手指未抬起）。
+    /// r36-8：它原来驱动覆盖层「拖动时顶部再暗一档」那层（已删，壳版没有）；
+    /// 现在没有视图读它，只保留作拖动状态（诊断/以后用）。
     @Published var isRingDragging = false
     /// 开环时手指的纵坐标（平面带本地坐标），环里下滑退出用（>90px）。
     var ringOpenY: CGFloat = 0
@@ -655,6 +720,24 @@ final class HomeCoverRingModel: ObservableObject {
     var ringDragStartY: CGFloat = 0
     /// 最近 110ms 的（时间，转角）采样，用于松手角速度。
     var ringSamples: [(time: Date, angle: CGFloat)] = []
+    /// 松手弹簧的驱动状态（r36-8，壳版 advanceRing 的原生版）：
+    /// - ringSpringTarget：弹簧目标槽位角，nil = 没在跑；
+    /// - ringSpringVelocity：当前角速度（度/秒），松手那一刻的 v 直接带进来
+    ///   （壳版 advanceRing 就是从这个 v 起步积分；SwiftUI spring 吃不到
+    ///   初速度，松手先死停再爬过去，是「一顿」的来源之一，见 ringDragEnded）；
+    /// - link/proxy/lastTimestamp：CADisplayLink 驱动（与平面带的
+    ///   FlatDisplayLinkProxy 同款弱引用代理，不让 link 强持模型）。
+    var ringSpringTarget: CGFloat?
+    var ringSpringVelocity: CGFloat = 0
+    private var ringSpringLink: CADisplayLink?
+    private var ringSpringProxy: RingSpringDisplayLinkProxy?
+    private var ringSpringLastTimestamp: CFTimeInterval = 0
+    /// 带子上沿到环顶的距离（r36-8，第 2 条）：壳版视频里顶栏底到环顶
+    /// 约 133pt，原生约 110pt，差 23pt——环在面板里偏高、贴着顶栏。
+    /// 本文件内给带子容器加这段顶距（平带与环一起下移，r34 的绑定不动；
+    /// 壳版闭合态带子也在面板下半部，闭合态一起对上）。面板封顶账里有
+    /// 约 36–43pt 余量（flatCard+217，见 HomeView），24pt 不顶出提示行。
+    static let stripTopInset: CGFloat = 24
     /// 收回任务代号：新开环 / 新拖动即 +1，旧任务醒来发现代号变了就作废。
     var closeGeneration = 0
     /// 展开动画代号（r33，第 5 条）：openRing +1，closeRing +1；deferred 的
@@ -689,6 +772,14 @@ final class HomeCoverRingModel: ObservableObject {
     static let quickCloseMs: Double = 220        // 点空白快收
     static let tau: CGFloat = 1.08               // 惯性时间常数
     static let springStiffness: CGFloat = 118    // 弹簧
+    /// 临界阻尼 2√118 ≈ 21.73（壳版 advanceRing 原式；r36-8 前的
+    /// SwiftUI `.spring(response: 0.58, dampingFraction: 1.0)` 只对上了
+    /// 频率（2π/√118 ≈ 0.58s），吃不到初速度、也不是 1/240s 积分——见
+    /// ringDragEnded / startRingSpring）。
+    static var springDamping: CGFloat { 2 * sqrt(springStiffness) }
+    /// 弹簧积分步长 1/240s（壳版 advanceRing 原式：每帧 dt 内按 1/240s
+    /// 子步半隐式欧拉，只把每帧末的角发出去渲染）。
+    static let springStep: Double = 1.0 / 240
     static let maxVelocity: CGFloat = 1400       // 角速度限幅（度/秒）
     static let sampleMs: Double = 0.110          // 角速度采样窗
     static let dragGain: CGFloat = 1.45          // 拖动增益
@@ -725,10 +816,12 @@ final class HomeCoverRingModel: ObservableObject {
                     emptyReason: String?, playing: Track?,
                     speed: CGFloat,
                     tier: PlayerTokens.PlayerSizeTier,
-                    panelIsDark: Bool = true) {
+                    panelIsDark: Bool = true,
+                    queueTitle: String? = nil) {
         startFlatTimer()
         let oldIDs = tracks.map(\.id)
         dailyTracks = daily
+        self.queueTitle = queueTitle
         playingKey = playing.map { $0.platform + ":" + $0.id }
         isLoadingDaily = isLoading
         dailySpinnerVisible = spinnerVisible
@@ -1204,6 +1297,7 @@ final class HomeCoverRingModel: ObservableObject {
     func closeRing(quick: Bool = false) {
         guard ringPhase == .open else { return }
         ringPhase = .closing
+        stopRingSpring() // r36-8：收回时弹簧停掉，不让它在 closing 里继续推角
         closeGeneration += 1
         entryGeneration += 1 // r33，第 5 条：还没跑的 deferred 展开动画作废
         ringDragging = false
@@ -1258,6 +1352,8 @@ final class HomeCoverRingModel: ObservableObject {
     /// 同时取消待执行的松手收回（代号 +1；ring.js beginPress clearHold 同款）。
     func ringDragStart(x: CGFloat, y: CGFloat? = nil) {
         guard ringPhase == .open, !ringDragging else { return }
+        stopRingSpring() // r36-8：弹簧没跑完就上手抓——先停弹簧再跟手，
+        // 不然 display link 还在推角、手指也在推角，两边打架就是一顿一顿。
         ringDragging = true
         isRingDragging = true
         ringStartAngle = angle
@@ -1288,10 +1384,15 @@ final class HomeCoverRingModel: ObservableObject {
     }
 
     /// 松手：最近 110ms 角速度（限幅 ±1400°/s）投影目标槽位，
-    /// 临界阻尼弹簧（stiffness 118 → response ≈ 2π/√118 ≈ 0.58s）
-    /// 吸附到最近槽位中心；随后保持 1000ms 再收回。
-    /// 与壳版唯一差别：SwiftUI spring 不吃初速度，初速度已折进目标槽位
-    /// （projected），弹簧只负责走过去，不另做 overshoot。
+    /// 临界阻尼弹簧（stiffness 118、阻尼 2√118、1/240s 步长，
+    /// 壳版 advanceRing 原样，见 startRingSpring）吸附到最近槽位中心；
+    /// 随后保持 1000ms 再收回。
+    /// r36-8：旧的 `withAnimation(.spring(response: 0.58,
+    /// dampingFraction: 1.0))` 只对上了频率（2π/√118 ≈ 0.58s）——
+    /// SwiftUI spring 吃不到初速度，松手那一刻 v 被扔掉、环先死停再爬
+    /// 过去，与壳版「带着速度飞过去再稳稳停住」不是同一种手感；且它走
+    /// 渲染服务器自己的计时，不是 1/240s 显式积分。现在初速度 v 直接
+    /// 带进 startRingSpring（壳版 advanceRing 就是从 v 起步）。
     func ringDragEnded() {
         guard ringPhase == .open else { return }
         ringDragging = false
@@ -1322,10 +1423,10 @@ final class HomeCoverRingModel: ObservableObject {
         let targetAngle = -CGFloat(Int((-projected / ringStep).rounded())) * ringStep
         if abs(targetAngle - angle) < 1e-6, abs(v) < 1 {
             angle = targetAngle
+            stopRingSpring()
         } else {
-            withAnimation(.spring(response: 0.58, dampingFraction: 1.0)) {
-                angle = targetAngle
-            }
+            // r36-8：显式弹簧（壳版 advanceRing），不用 SwiftUI spring。
+            startRingSpring(target: targetAngle, velocity: v)
         }
         // r33，第 2 条：弹簧落点那首前后各 5 槽的封面提前取（落点槽位在
         // 弹簧动画里才走到，onChange(of: angle) 的带子同步会跟过去；
@@ -1336,6 +1437,63 @@ final class HomeCoverRingModel: ObservableObject {
             prefetchRingCovers(aroundCenterSlot: targetSlot)
         }
         scheduleHoldClose()
+    }
+
+    /// 松手弹簧驱动（r36-8，壳版 ring.js advanceRing 一比一）：
+    /// CADisplayLink 每帧一调，帧内按 1/240s 子步半隐式欧拉积分，
+    /// 只把帧末的角发出去渲染（壳版同款：advanceRing 子步、renderRing 一帧一次）。
+    /// - 初速度就是松手那一刻的 v（限幅 ±1400°/s 已在 ringDragEnded 里夹过），
+    ///   不像 SwiftUI spring 那样扔掉；
+    /// - 停稳条件与壳版同款：越过目标、或 |target−angle| < 0.004 且
+    ///   |velocity| < 0.03，停下时角钉死在目标槽位；
+    /// - dt 按 link.timestamp 的真差算、上限夹 0.05s（壳版 ringFrame 同款），
+    ///   丢帧后下一步自动补量，位移严格按时间走。
+    func startRingSpring(target: CGFloat, velocity: CGFloat) {
+        stopRingSpring()
+        ringSpringTarget = target
+        ringSpringVelocity = velocity
+        ringSpringLastTimestamp = 0
+        let proxy = RingSpringDisplayLinkProxy(model: self)
+        let link = CADisplayLink(target: proxy, selector: #selector(RingSpringDisplayLinkProxy.fired(_:)))
+        link.add(to: .main, forMode: .common)
+        ringSpringProxy = proxy
+        ringSpringLink = link
+    }
+
+    /// 停弹簧（新拖动上手、收回、模型释放时调；幂等）。
+    func stopRingSpring() {
+        ringSpringLink?.invalidate()
+        ringSpringLink = nil
+        ringSpringProxy = nil
+        ringSpringTarget = nil
+        ringSpringVelocity = 0
+        ringSpringLastTimestamp = 0
+    }
+
+    /// display link 回调：1/240s 子步半隐式欧拉（壳版 advanceRing 原式）。
+    func ringSpringFired(_ link: CADisplayLink) {
+        guard let target = ringSpringTarget else { stopRingSpring(); return }
+        let dt: Double
+        if ringSpringLastTimestamp == 0 {
+            dt = 1.0 / 60.0
+        } else {
+            dt = min(max(link.timestamp - ringSpringLastTimestamp, 0), 0.05)
+        }
+        ringSpringLastTimestamp = link.timestamp
+        let prev = angle
+        var remaining = dt
+        while remaining > 0 {
+            let h = min(remaining, Self.springStep)
+            let accel = Self.springStiffness * (target - angle) - Self.springDamping * ringSpringVelocity
+            ringSpringVelocity += accel * CGFloat(h)
+            angle += ringSpringVelocity * CGFloat(h)
+            remaining -= h
+        }
+        if (prev - target) * (angle - target) <= 0 ||
+            (abs(target - angle) < 0.004 && abs(ringSpringVelocity) < 0.03) {
+            angle = target
+            stopRingSpring()
+        }
     }
 
     /// 松手 1000ms 后收回；中途再拖动即作废（代号 +1）。
@@ -1409,7 +1567,7 @@ final class HomeCoverRingModel: ObservableObject {
     /// 见 verification/r25.cjs 的 U6e 更新说明）。
     func playTrack(at index: Int, store: PlaybackStore) {
         guard tracks.indices.contains(index) else { return }
-        store.setQueue(tracks, startAt: index)
+        store.setQueue(tracks, startAt: index, title: queueTitle)
     }
 
     /// 点环卡：播歌 + 收回环（壳版 selectItem 同款）。
@@ -1489,26 +1647,18 @@ final class HomeCoverRingModel: ObservableObject {
         return 1
     }
 
-    /// 远端压暗（壳版：0.55·((1-facing)/2)^1.25）。保留作壳版对照值——
-    /// r33 起环卡不再用它直接盖一层平色，见 shadeFarEdge。
+    /// 远端压暗（壳版：0.55·((1-facing)/2)^1.25）。r36-8 起环卡又只走
+    /// 这一层平色（r33 的远缘渐变 shadeFarEdge 已删，见下条注释）。
     func shadeOpacity(facing: CGFloat) -> Double {
         0.55 * pow(Double((1 - facing) / 2), 1.25)
     }
 
-    /// 侧卡远缘压暗（r33，第 1 条：沿卡面横向渐变的远缘黑度，近缘 0 → 远缘本值）。
-    /// 壳版 flat shade 在 40° 槽位只有 3.8%（0.55·((1−cos40°)/2)^1.25），
-    /// 壳版靠 CSS 透视梯形补立体感所以够用；原生 r31 的正交旋转没有梯形，
-    /// 3.8% 肉眼不可见——实测 f_010 侧卡亮度只比中心卡低约 7%（音符占位
-    /// 本身也有明暗），三张卡看着就是平铺重叠。圆柱面的明暗本来就该沿
-    /// 卡面渐变（远缘更暗），这里按 (1−facing) 线性拉到 40° 槽位远缘 0.42：
-    /// 中心卡 facing=1 → 0 不压暗；40° 侧卡近缘 0、远缘 0.42、平均约 0.21，
-    /// 肉眼可辨、又不至于把封面盖死。不是壳版原值（原值 3.8% 见 shadeOpacity），
-    /// 是原生缺梯形时的视觉补偿，真机确认强度，见 r33.cjs 断言建议。
-    func shadeFarEdge(facing: CGFloat) -> Double {
-        guard facing < 1 else { return 0 }
-        let unit = (1 - Double(facing)) / (1 - cos(40 * .pi / 180))
-        return min(0.42, 0.42 * unit)
-    }
+    /// r36-8，删：`shadeFarEdge`（r33，第 1 条：沿卡面横向渐变，40° 槽位
+    /// 远缘 0.42）已删——它是「正交旋转没有梯形」时的视觉补偿；r33 同轮
+    /// 已把 perspective 从 0 改成卡高/P、梯形回来了，且壳版视频里侧卡
+    /// 是亮的（同曲《回到你身边》壳版卡面亮度 135、原生 45，3 倍差的
+    /// 大头就是这层 0.42 + 压在卡上的全屏压暗）。壳版 shade 只有 flat
+    /// 公式（`shadeOpacity`，40° 时 3.8%），侧卡明暗只走这一层。
 
     /// 卡内透视（r33，第 1 条）：rotation3DEffect 的 perspective 参数，
     /// 目标是壳版透视距离 P=3.2R（标准档 ≈697pt）——侧卡按这个距离再压一次
@@ -1700,6 +1850,14 @@ struct HomeCoverRingView: View {
     var tier: PlayerTokens.PlayerSizeTier = .standard
     /// 面板深场（调用方传 HomeView 的专辑取色 field；默认深场）。
     var panelIsDark = true
+    /// r36：点卡播歌时带上的队列标题（透传给模型 → setQueue(title:)；
+    /// 搜索带传 playback.queueTitle，丢了它搜索置顶行就没了）。
+    /// 每日推荐 / 榜单详情那路不传（nil）。
+    var queueTitle: String? = nil
+    /// r36（用户 21:44）：榜单详情那路不显示入口提示行（「拖动展开 3D 环 ·
+    /// 拖动旋转」）——详情页下面不加任何提示文字。每日推荐 / 搜索带
+    /// 那路默认 false，提示行照旧。
+    var hideEntryHint = false
 
     var body: some View {
         Group {
@@ -1722,9 +1880,16 @@ struct HomeCoverRingView: View {
                 // 里卡行就在一块比面板再暗一档的圆角底上。
                 VStack(alignment: .leading, spacing: 6) {
                     flatStrip
-                    entryHintRow
+                    if !hideEntryHint {
+                        entryHintRow
+                    }
                 }
                 .padding(10)
+                // r36-8，第 2 条：带子下移 stripTopInset（24pt）——壳版顶栏底
+                // 到环顶约 133pt，原生约 110pt；环在面板内偏高、贴着顶栏。
+                // 平带与环同在 flatStrip 里，一起下移（r34 绑定不动）；
+                // 面板封顶账里有约 36–43pt 余量，24pt 不顶出提示行。
+                .padding(.top, HomeCoverRingModel.stripTopInset)
                 // r30 v5：环开着时平面带彻底让位（壳版
                 // `body.is-ring .mstrip { opacity: 0 }` 同款，透明度跟
                 // overlayOpacity 走：展开 0.26s 淡出、收回跟 closeT 淡入），
@@ -1749,6 +1914,7 @@ struct HomeCoverRingView: View {
         .onChange(of: marqueeSpeed) { _ in sync() }
         .onChange(of: tier) { _ in sync() }
         .onChange(of: panelIsDark) { _ in sync() }
+        .onChange(of: queueTitle) { _ in sync() }
         .accessibilityLabel("封面环")
     }
 
@@ -1765,7 +1931,8 @@ struct HomeCoverRingView: View {
             playing: playback.currentTrack,
             speed: marqueeSpeed,
             tier: tier,
-            panelIsDark: panelIsDark
+            panelIsDark: panelIsDark,
+            queueTitle: queueTitle
         )
     }
 
@@ -1883,8 +2050,8 @@ struct HomeCoverRingView: View {
     /// 纵向下坠已经由 tiltDrop 表达，这里只补卡面后仰——旧代码的
     /// 容器 rotateX(-5°) 是双算，还把 perspective 0.5 强透视带进来，
     /// r30 已删；卡面本身一直没有后仰，侧卡才看着像平面排布）。
-    /// 压暗两层叠加：整卡盖壳版公式平色（shadeOpacity，40° 时 3.8%）+
-    /// 封面远缘渐变（shadeFarEdge，40° 时 0.42，r33 视觉补偿）。
+    /// 压暗一层：整卡盖壳版公式平色（shadeOpacity，40° 时 3.8%）。
+    /// r36-8：封面远缘渐变（0.42）已删，见 shadeOpacity 上方注释。
     /// 展开/收回中 depthScale/cameraScale/tiltDrop 都跟有效半径走，
     /// 环从平面里长出来、收回平面里（r31 同款）。
     private var ringLayerInStrip: some View {
@@ -1897,7 +2064,6 @@ struct HomeCoverRingView: View {
                         track: track,
                         width: model.ringCard,
                         world: slot.world,
-                        shadeFar: model.shadeFarEdge(facing: facing),
                         shadeFlat: model.shadeOpacity(facing: facing)
                     )
                     .scaleEffect(model.depthScale(forWorld: slot.world) * model.cameraScale())
@@ -2052,6 +2218,25 @@ private final class FlatDisplayLinkProxy: NSObject {
     }
 }
 
+/// r36-8：松手弹簧的 display link 回调代理（与 FlatDisplayLinkProxy
+/// 同款：link 强持 target，模型直接当 target 会循环引用；代理只弱持模型，
+/// 弹簧停稳时 link 随 stopRingSpring 一起释放；回调直接在主线程跑，
+/// 不经 Task 跳线程——r31-marquee 同款教训：每帧一个 Task 会让步长
+/// 在任务队列里扎堆，就是「一卡一卡」）。
+private final class RingSpringDisplayLinkProxy: NSObject {
+    weak var model: HomeCoverRingModel?
+
+    init(model: HomeCoverRingModel) {
+        self.model = model
+    }
+
+    @objc func fired(_ link: CADisplayLink) {
+        MainActor.assumeIsolated {
+            self.model?.ringSpringFired(link)
+        }
+    }
+}
+
 private struct StripCenterKey: PreferenceKey {
     static var defaultValue: CGRect = .zero
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
@@ -2079,18 +2264,19 @@ struct HomeRingOverlayView: View {
             ZStack {
                 // 全屏径向变暗（r31：中心跟环走，不再是固定 50% / 48%；
                 // 三档 0.36/0.58/0.78 与半径不动）。
+                // r36-8，第 1 条：压暗层在环卡带上开洞（见 scrimHoleMask）——
+                // 壳版 `.mring` 的压暗是背景、卡片是它的孩子、画在压暗上面，
+                // 卡片根本不被压；原生之前压暗层盖在环卡上面（卡在页里、
+                // 压暗层在覆盖层里），中心卡先被 ×0.64，侧卡再叠 0.42 远缘
+                // 渐变，同曲《回到你身边》壳版卡面 135、原生 45。开洞后卡片
+                // 亮度与壳版同款（只剩 3.8% flat shade），洞外页面照常压暗。
                 radialScrim(size: geo.size, centerX: ringCx, centerY: ringCy)
-                // 拖动时顶部再暗一档（视频：拖动时顶部大卡片变暗；常态开环
-                // 已有上面的径向变暗，这一层只在手指转环时出现）。
-                LinearGradient(
-                    gradient: Gradient(colors: [
-                        .black.opacity(0.14), .black.opacity(0.0),
-                    ]),
-                    startPoint: .top, endPoint: .bottom
-                )
-                .frame(height: geo.size.height * 0.55)
-                .frame(maxHeight: .infinity, alignment: .top)
-                .opacity(model.isRingDragging ? 1 : 0)
+                    .mask(scrimHoleMask(containerHeight: geo.size.height))
+                // r36-8，删：拖动时顶部再暗一档（0.14 黑、上 55% 高、
+                // isRingDragging 驱动）已删——壳版 ring.js 里没有拖动加暗
+                // 这一层（`.mring.is-drag` 只换光标）；壳版视频里拖动中
+                // Hero 亮度与开环静止时一样（约 42–44），没有再暗一档。
+                // 它还盖在环卡带的上半截，跟着一起拖累卡面亮度。
                 // r34：第 4 件——圆柱环已经搬进平带容器（flatStrip 里的
                 // ringLayerInStrip），覆盖层不再画卡；这里只剩变暗 +
                 // 底部提示 + 触摸层。
@@ -2129,8 +2315,48 @@ struct HomeRingOverlayView: View {
         .ignoresSafeArea()
         // r33 联动：弹簧吸附阶段 angle 还在动（ringDragMoved 不再调），
         // 每帧把带子偏移跟到环中心；拖动阶段 ringDragMoved 里已同步，
-        // 这里重复调是空操作（syncFlatOffsetToRingCenter 里有 0.01 阈值守卫）。
-        .onChange(of: model.angle) { _ in model.syncFlatOffsetToRingCenter() }
+        // 这里跳过（r36-8：第 4 条——每步触摸 angle 一变就再同步一次
+        // 带子是重复写 flatOffsetX，拖动里省掉这一份）。
+        .onChange(of: model.angle) { _ in
+            if !model.ringDragging { model.syncFlatOffsetToRingCenter() }
+        }
+    }
+
+    /// 压暗层的开洞 mask（r36-8，第 1 条）：环卡带那一条上下 16pt 羽化、
+    /// 中间全透明（压暗层在那里不盖卡片），洞外全黑（压暗照常）。
+    /// 洞的位置跟活的带子走（stripCenter/stripSize 是偏好上报的实时值，
+    /// 与命中测试、变暗中心同一份锚点）：纵向以环卡中心为准
+    /// （stripCenter.y − 3，见 ringCenterY 的推导：盖面中心 + 23pt
+    /// 文字段 − tiltDrop 抵消后 = stripCenter.y − 3），高取
+    /// ringCardHeight（卡片纵向全高）；横向整宽（侧卡溢出到屏边，
+    /// 洞必须盖到屏边）。带子还没量到（stripSize = 0）时不开洞——
+    /// 整层压暗（旧行为），量到后自动跟过去。
+    /// 洞里露出来的是没压暗的面板底色（卡缝处）：原生面板是专辑取色、
+    /// 偏深（实测约 40），与壳版压暗后的面板（约 50）接近；浅色专辑
+    /// 时卡缝会比壳版亮一档，见交回残留。
+    private func scrimHoleMask(containerHeight: CGFloat) -> LinearGradient {
+        let h = max(1, containerHeight)
+        let feather: CGFloat = 16
+        guard model.stripSize.height > 0 else {
+            return LinearGradient(colors: [.black, .black], startPoint: .top, endPoint: .bottom)
+        }
+        let cy = model.stripCenter.y - 3
+        let half = model.ringCardHeight / 2
+        let top0 = max(0, min(1, (cy - half - feather) / h))
+        let top1 = max(0, min(1, (cy - half) / h))
+        let bot0 = max(0, min(1, (cy + half) / h))
+        let bot1 = max(0, min(1, (cy + half + feather) / h))
+        return LinearGradient(
+            gradient: Gradient(stops: [
+                .init(color: .black, location: 0),
+                .init(color: .black, location: top0),
+                .init(color: .clear, location: top1),
+                .init(color: .clear, location: bot0),
+                .init(color: .black, location: bot1),
+                .init(color: .black, location: 1),
+            ]),
+            startPoint: .top, endPoint: .bottom
+        )
     }
 
     private func radialScrim(size: CGSize, centerX: CGFloat, centerY: CGFloat) -> some View {
@@ -2159,21 +2385,18 @@ struct HomeRingOverlayView: View {
 
 /// 环里的一张卡：封面 + 歌名 + 歌手（壳版 .mring__card：封面下只写歌名；
 /// 视频里歌名下还有歌手，加一行）。
-/// 压暗两层（r34，第 3 件）：封面远缘渐变（shadeFar，r33）+ 整卡壳版公式
-/// 平色（shadeFlat，0.55·((1-facing)/2)^1.25，40° 时 3.8%）——壳版
-/// `.mring__shade` 是 inset: 0 的整卡覆盖（含歌名行），原生之前只压
-/// 封面、文字一行不压，就是“压暗弱”的实锤之一；平色层盖在整卡上，
-/// 与封面渐变叠加。
+/// 压暗一层（r36-8，第 1 条）：只剩整卡壳版公式平色（shadeFlat，
+/// 0.55·((1-facing)/2)^1.25，40° 时 3.8%）——壳版 `.mring__shade`
+/// 是 inset: 0 的整卡覆盖（含歌名行），平色层盖在整卡上；r33 的封面
+/// 远缘渐变（shadeFar，40° 时 0.42）已删，见模型处注释。
 ///
 /// r22c：文字左对齐——8 张截图里每张环卡的歌名/歌手都从卡片左缘起
 /// （r21 的居中与截图不符；壳版 `.mring__name` 也是默认左对齐）。
 private struct RingCardView: View {
     let track: Track
     let width: CGFloat
-    /// 该槽的世界角（度）：正 = 右侧卡，负 = 左侧卡；决定渐变压暗的远缘方向。
+    /// 该槽的世界角（度）：正 = 右侧卡，负 = 左侧卡。
     let world: CGFloat
-    /// 远缘黑度（0…0.42，模型 `shadeFarEdge` 算出；中心卡为 0）。
-    let shadeFar: Double
     /// 整卡平色黑度（0…1，模型 `shadeOpacity` 壳版公式算出；中心卡为 0）。
     let shadeFlat: Double
 
@@ -2189,28 +2412,9 @@ private struct RingCardView: View {
         }
     }
 
-    /// 圆柱面明暗（r33，第 1 条）：沿卡面横向渐变，近缘 0 → 远缘 shadeFar。
-    /// 右侧卡（world > 0）远缘在右，渐变左清右黑；左侧卡反之；中心卡不压暗。
-    /// 旧的整面平色 3.8%（壳版公式原值）在正交旋转下肉眼不可见，见 shadeFarEdge 注释。
-    private var shadeGradient: LinearGradient {
-        if world > 0 {
-            return LinearGradient(
-                colors: [.black.opacity(0), .black.opacity(shadeFar)],
-                startPoint: .leading, endPoint: .trailing
-            )
-        } else if world < 0 {
-            return LinearGradient(
-                colors: [.black.opacity(shadeFar), .black.opacity(0)],
-                startPoint: .leading, endPoint: .trailing
-            )
-        } else {
-            return LinearGradient(
-                colors: [.black.opacity(0), .black.opacity(0)],
-                startPoint: .leading, endPoint: .trailing
-            )
-        }
-    }
-
+    /// r36-8，删：`shadeGradient`（r33，第 1 条：沿卡面横向渐变，
+    /// 近缘 0 → 远缘 shadeFar，40° 时 0.42）随 `shadeFarEdge` 一起删——
+    /// 壳版 shade 只有 flat 公式，侧卡不另加远缘渐变。
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             coverArt
@@ -2219,10 +2423,6 @@ private struct RingCardView: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
                         .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(shadeGradient)
                 )
                 .shadow(color: .black.opacity(0.8), radius: 26, x: 0, y: 12)
             Text(track.title)

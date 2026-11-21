@@ -3,38 +3,33 @@ import SwiftUI
 /// 专辑封面图（封面流 / dock / 背景共用）。
 ///
 /// 取图走 `ProxyImageView`（进程内 `/api/img` 代理 → 直链 → 占位三级兜底，
-/// 见 `CoverImageLoader.swift`）；无封面或加载失败时用白色占位
-/// （MEMORY：没有封面用白色，不用金色；绝不用 ♪ 冒充内容 —— 占位只是一个
-/// 静音的 music.note 图标，不是歌词也不是封面本身）。
-/// r33：环内（`RingCardView`）传 `darkPlaceholder: true`——加载中/失败时
-/// 画深色默认封面（`DefaultCoverArt`），不摆白底音符（环在变暗的覆盖层里，
-/// 白占位一转就满屏浅灰，见 HomeCoverRingView 第 2 条）；默认 false，
-/// 其余调用点一律不动。
+/// 见 `CoverImageLoader.swift`）；无封面或加载失败时用深色默认封面
+/// （`DefaultCoverArt`，r30 环内那款：深色渐变底 + music.note，
+/// 绝不用 ♪ 冒充内容 —— 占位只是一个静音的 music.note 图标，不是歌词也不是封面本身）。
+/// r36（第⑥件，用户 2026-11-21 21:20「歌曲封面为什么都是白的」）：
+/// 默认占位从白色改成深色，全站统一——旧「没封面用白色，不用金色」
+/// 作废；白底 + ♪ 让一次加载失败看着像整站没数据，根因见
+/// `CoverImageLoader.swift` 文件头 r36 节（单次尝试永不重试）。
+/// r36 之前只有环内传 `darkPlaceholder: true` 画深色，其余调用点一律白占位；
+/// 现在默认就是深色，本参数只剩兼容调用点，不再改变渲染。
 struct CoverImageView: View {
     let url: URL?
     /// 占位图标大小（调用方按容器尺寸传）。
     var placeholderIconSize: CGFloat = 28
-    /// 深色占位（只给环内用）：加载中/失败画深色默认封面，不摆白底音符。
+    /// 深色占位（r33 起环内用；r36 起默认就是深色，见 placeholder——
+    /// 本参数只剩兼容调用点，不再改变渲染）。
     var darkPlaceholder: Bool = false
 
     var body: some View {
         ProxyImageView(url: url) { placeholder }
     }
 
-    // r33 修：if/else 两支类型不同（DefaultCoverArt vs ZStack），普通 some View
-    // 算属性编不过（run 44857131300 构建失败）——加 @ViewBuilder 走 _ConditionalContent。
+    // r36 修：两支（DefaultCoverArt vs 白底 ZStack）类型不同曾逼出
+    // @ViewBuilder（r33 的编不过教训，run 44857131300）——现在两支
+    // 同款，只剩一支，@ViewBuilder 照留（以后再分叉也不用重排类型）。
     @ViewBuilder
     private var placeholder: some View {
-        if darkPlaceholder {
-            DefaultCoverArt(iconSize: placeholderIconSize)
-        } else {
-            ZStack {
-                Color.white
-                Image(systemName: "music.note")
-                    .font(.system(size: placeholderIconSize, weight: .regular))
-                    .foregroundStyle(PlayerTokens.ink3)
-            }
-        }
+        DefaultCoverArt(iconSize: placeholderIconSize)
     }
 }
 

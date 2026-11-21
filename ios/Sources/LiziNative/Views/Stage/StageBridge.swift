@@ -190,10 +190,16 @@ final class StageBridge: NSObject, ObservableObject {
     // MARK: - 形态切换
 
     /// 切形态（选择器 / 形态名点选都走这里；classic 由 StageView 直接回播放页，不进桥）。
+    /// r36-7：不再写 `lizi.native.playerMode`——舞台页里切形态只在本次
+    /// 播放器会话内有效（会话值由 StageView 经
+    /// AppNavigation.noteStageFormSelected 记，回首页即清）；写盘会让切
+    /// 的形态跨首页、跨启动一直活着，下次 `.stage()` 又把它读回来（用户
+    /// 2026-11-21 21:28 报的「再进还是舞台」）。持久化只剩画廊
+    /// （StageFormStore.select）；`savedFormId()` 本身不动，`.stage()`
+    /// 无会话值时仍回落到它（画廊上次选的 / 默认 001）。
     func load(form: StageForm) {
         guard StageCatalog.isAvailable(form) else { return }
         currentForm = form
-        StageCatalog.saveFormId(form.formId)
         isReady = false
         isCamera = form.isCamera
         panelSpec = nil

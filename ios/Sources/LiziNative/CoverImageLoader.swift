@@ -18,6 +18,15 @@ import UIKit
 /// 等待，不取消拉图本身；拉完进缓存，下次出现直接命中。旧代码里每次视图
 /// 消失都把在飞的代理请求一并取消（-999），封面永远拉不到、一直回默认图。
 ///
+/// r36（第⑥件，用户 2026-11-21 21:20「全站封面全白」）：根因两半——
+/// ① 搜索腿封面字段映射漏（QQ qqTrack 只读 album.mid，顶层 albumMid 行
+/// 封面恒为空；酷狗 mobilecdn 行本身无封面字段，但应用内搜索走网关/
+/// complexsearch 行带 trans_param.union_cover，见 FoliaKugou.coverOf）；
+/// ② 本链路单次尝试永不重试（见 ProxyImageView）：真机上几十张封面同时
+/// 起取图，6s 超时 / 代理 502 / 门排队超时撞上一次就永久占位。
+/// 修法：映射补齐（QQ.swift）+ ProxyImageView 最多 3 次重试；占位本身
+/// 改深色（CoverImageView.swift），加载失败不再看着像没数据。
+///
 /// 内存缓存：同一 URL 在一次启动里只拉一次（`NSCache`，约 50MB 上限，
 /// 封面图本身不大；跨启动不持久化，磁盘缓存不在本轮范围）。
 actor CoverImageLoader {
@@ -87,6 +96,13 @@ actor CoverImageLoader {
 /// scaledToFill` 铺满调用方给的 frame；加载中 / 失败 / 无 URL 时显示
 /// 调用方传的 `placeholder`（各调用点原来的占位原样保留，不改视觉）。
 /// URL 变化时旧图先留着（不闪白），新图到了再换；URL 变空时回占位。
+/// r36（第⑥件）：失败重试——旧写法一次拿不到就永远占位（单次 6s 超时 /
+/// 代理 502 / 门排队超时都直接判死刑，视图不重建就不重试；真机上几十张
+/// 封面同时起取图，尾部请求很容易撞上超时，就是「全站封面全白」的
+/// 另一半根因，另一半是搜索腿封面字段映射，见 QQ.swift qqTrack）。
+/// 最多 3 次（首试 + 2 次重试，间隔 0.5s / 1.5s）；URL 变了旧任务取消、
+/// 新任务重开；成功一次即停；每次都走 CoverImageLoader（进程内缓存 +
+/// 在飞去重），重试不重复发请求。
 struct ProxyImageView<Placeholder: View>: View {
     let url: URL?
     let placeholder: Placeholder
@@ -113,9 +129,16 @@ struct ProxyImageView<Placeholder: View>: View {
                 uiImage = nil
                 return
             }
-            if let loaded = await CoverImageLoader.shared.image(for: url),
-               url == self.url {
-                uiImage = loaded
+            var attempt = 0
+            while !Task.isCancelled, uiImage == nil, url == self.url {
+                if let loaded = await CoverImageLoader.shared.image(for: url),
+                   url == self.url {
+                    uiImage = loaded
+                    break
+                }
+                attempt += 1
+                guard attempt <= 2, !Task.isCancelled, url == self.url else { break }
+                try? await Task.sleep(nanoseconds: UInt64((attempt == 1 ? 0.5 : 1.5) * 1_000_000_000))
             }
         }
     }

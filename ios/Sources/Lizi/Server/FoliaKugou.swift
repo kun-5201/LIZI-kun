@@ -1362,12 +1362,19 @@ actor FoliaKugouService {
 
     /// song_url 一次尝试（`module/song_url.js`）：GET /v5/url，
     /// x-router trackercdn.kugou.com，encryptKey（key=signKey）。
-    /// 回 (url, authRequired, reason)：无 URL 时 reason 带上游状态，
+    /// 回 (url, authRequired, reason, servedQuality)：无 URL 时 reason 带上游状态，
     /// 401/403/errcode 152 时 authRequired 为真（Folia 立刻认登录失效）；
     /// register_dev 重试后仍是 20028 时同样 authRequired（文件头约定：
     /// 仍 20028 则回 `reason:"login"`，不再降档重试——换档位只会
     /// 再拿一次 20028，Folia 同款立刻抛 auth-required）。
-    private func fetchSongURL(hash: String, quality: String, albumId: Int, albumAudioId: Int) async throws -> (url: String?, authRequired: Bool, reason: String) {
+    /// r36-kugou-vip：servedQuality 是上游这支地址**实际**的档位
+    /// （payload 的 quality / audio_quality / quality_level，本机
+    /// KugouAPI.musicURL 同款读法；缺字段回 nil，调用方回落到请求档，
+    /// 绝不拿请求档冒充实际档——以前 songUrl 直接拿请求档 tier 当
+    /// served 回，VIP 请求被上游悄悄降档（要 flac 只给 320/128）时
+    /// App 照样挂无损徽章、升级链也以为档位已够，会员高音质失效还
+    /// 看不出来）。
+    private func fetchSongURL(hash: String, quality: String, albumId: Int, albumAudioId: Int) async throws -> (url: String?, authRequired: Bool, reason: String, servedQuality: String?) {
         let params: [String: String] = [
             "album_id": String(albumId), "area_code": "1", "hash": hash.lowercased(),
             "ssa_flag": "is_fromtrack", "version": "11430", "page_id": "967177915",
@@ -1381,28 +1388,33 @@ actor FoliaKugouService {
                               xRouter: "trackercdn.kugou.com", encryptKey: true)
         }
         if res.httpStatus == 401 || res.httpStatus == 403 || Self.upstreamErrorCode(res.json) == 152 {
-            return (nil, true, "login")
+            return (nil, true, "login", nil)
         }
         if Self.needsVerify(res.json) {
             // withRegisterRetry 里已经 register_dev + 重试过一次，仍是
             // 20028：设备验证过不去，再换档位/变体也是同一答案，直接认
             // 需要登录（匿名设备未注册 / 登录态的 dfid 已失效都走这里）。
-            return (nil, true, "login")
+            return (nil, true, "login", nil)
         }
         let rawData = res.json?["data"]
         var payload: [String: Any] = [:]
         if let arr = rawData as? [[String: Any]], let first = arr.first { payload = first }
         else if let d = rawData as? [String: Any] { payload = d }
         else if let d = res.json { payload = d }
+        // r36-kugou-vip：上游实际档位（本机 KugouAPI.musicURL 同款读法）；
+        // 空串当缺失，调用方回落请求档。
+        let served = Self.strField(payload, "quality", "audio_quality", "quality_level")
+        let servedQuality: String? = served.isEmpty ? nil : served
         if let url = Self.audioUrlOf(payload["play_url"] ?? payload["playUrl"] ?? payload["url"]) {
-            return (url, false, "")
+            return (url, false, "", servedQuality)
         }
         if let arr = rawData as? [[String: Any]], let first = arr.first,
            let url = Self.audioUrlOf(first["url"] ?? first["play_url"]) {
-            return (url, false, "")
+            let firstServed = Self.strField(first, "quality", "audio_quality", "quality_level")
+            return (url, false, "", firstServed.isEmpty ? servedQuality : firstServed)
         }
         let err = Self.strField(Self.dataDict(res.json), "error", "msg")
-        return (nil, false, err.isEmpty ? "unavailable" : err)
+        return (nil, false, err.isEmpty ? "unavailable" : err, nil)
     }
 
     /// 云盘取链（`module/user_cloud_url.js`）：GET
@@ -1470,7 +1482,11 @@ actor FoliaKugouService {
                                            "error": loggedIn ? "酷狗登录已失效，请重新扫码登录" : "酷狗取链需要登录，请扫码登录酷狗后再播"])
                     }
                     if let url = r.url {
-                        return .json(200, ["code": 0, "url": url, "quality": tier, "via": "kugou"])
+                        // r36-kugou-vip：回上游实际档位（fetchSongURL 从
+                        // payload 里读的 quality）；上游没给才回落请求档
+                        // tier——以前直接回 tier，会员请求被降档时 App
+                        // 照样显示高档，会员权益失效还看不出来。
+                        return .json(200, ["code": 0, "url": url, "quality": r.servedQuality ?? tier, "via": "kugou"])
                     }
                     if noUrlReason.isEmpty { noUrlReason = r.reason }
                 } catch {

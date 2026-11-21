@@ -118,6 +118,13 @@ struct StageView: View {
                     if form.isClassic {
                         navigation.show(.player)
                     } else {
+                        // r36-7：切形态只记本次播放器会话
+                        // （AppNavigation.sessionStageFormId，内存），不写
+                        // 持久化键——回首页后重置，下次进播放器是传统、
+                        // 再点舞台也不会把这个形态带回来；写盘只剩画廊
+                        // （StageFormStore.select）。`bridge.load` 本身也不
+                        // 再写键（见 StageBridge.load 的 r36-7 注释）。
+                        navigation.noteStageFormSelected(form.formId)
                         bridge.load(form: form)
                     }
                 }

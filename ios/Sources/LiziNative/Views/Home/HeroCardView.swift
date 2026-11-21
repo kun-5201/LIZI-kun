@@ -63,11 +63,18 @@ struct HeroCardView: View {
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            // 底图：封面宽图；无封面时用纸面渐变兜底（不用金色占位）。
-            if let url = track?.coverURL {
-                ProxyImageView(url: url) { LiziTokens.paper2 }
-                .frame(width: width, height: cardHeight)
-                .clipped()
+            // 底图：正在播那首的真封面（track = currentTrack ?? lastTrack，
+            // 本来就跟当前播放走，切歌即换——r22j 原设计，不动）。
+            // 取图走 CoverImageView（ProxyImageView 同款链路 + 3 次重试，
+            // r36 第⑥件）；加载失败 / 没封面画深色 DefaultCoverArt，
+            // 不许白——旧 `ProxyImageView { LiziTokens.paper2 }`（#FCFCFD
+            // 近白）已删，那是真机上大卡白块的最后一处。
+            // 从未播过歌（track == nil）才用纸面渐变空态 + 墨字标题
+            // （「从下面挑一个平台开始」，不是封面占位）。
+            if track != nil {
+                CoverImageView(url: track?.coverURL, placeholderIconSize: 64)
+                    .frame(width: width, height: cardHeight)
+                    .clipped()
             } else {
                 LinearGradient(
                     colors: [LiziTokens.paper2, LiziTokens.paper],

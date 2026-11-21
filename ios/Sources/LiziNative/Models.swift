@@ -654,8 +654,8 @@ struct DailyTrack: Identifiable, Codable, Hashable {
 }
 
 /// 排行榜目录里的一张榜（r35-10）：id 是榜单 id（网易 = 歌单 id、
-/// QQ = topId、酷狗 = rankid、酷我 = bangId），点卡进详情页
-/// （PlaylistDetailView，isRank: true，行首显示排名数字）。
+/// QQ = topId、酷狗 = rankid、酷我 = bangId），点卡选中榜单，
+/// 首页面板换成该榜单的全部歌（r36 v4，见 HomeView.rankDetailContent）。
 struct RankBoard: Identifiable, Codable, Hashable {
     var id: String
     var name: String

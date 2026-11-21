@@ -160,14 +160,7 @@ targets:
       - Sources/Lizi/Server/CommentsService.swift
       # 动画插图（Ken Burns 本地生成，路线 A，走 MPNowPlayingInfoCenter 供锁屏图）。
       - Sources/Lizi/AnimatedArtwork.swift
-      # r35-11：灵动岛重加（Apple Music 款，无歌词、无紧凑态缩略图）：
-      # 岛属性与岛上控制 Intent 同时编进 App target（perform() 在 App
-      # 进程内跑，系统要从 App 包里发现它；扩展 target 本来就编
-      # Sources/LiziNativeIsland，同一份文件，别复制两份——壳版同款做法）。
-      - Sources/LiziNativeIsland/LiziIslandAttributes.swift
-      - Sources/LiziNativeIsland/LiziIslandIntents.swift
-    dependencies:
-      - target: LiziNativeIsland
+      # r36：原生灵动岛全删（r35-11 重加作废），回 r28 状态——只剩系统 Now Playing。
     # P3-D 打磨：Fraunces 三档静态 TTF 随包（见 Sources/LiziNative/Fonts/
     # README.md）。显式列进 resources（进包根目录，UIAppFonts 按文件名找）；
     # Assets.xcassets（平台 logo）在 Sources/LiziNative 源码 glob 里，
@@ -224,12 +217,6 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lty5201.lizi-native
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        # r35-11：灵动岛重加（Apple Music 款）：主 App 的 Info.plist 必须有
-        # 这两个 key，系统才允许 Activity.request（r15 的教训：缺 key 时
-        # 13 次 request 全抛错）；按壳版双写惯例：构建设置 + 下面
-        # info.properties 各写一遍，值一致。r28 曾全删，r35-11 恢复。
-        INFOPLIST_KEY_NSSupportsLiveActivities: "YES"
-        INFOPLIST_KEY_NSSupportsLiveActivitiesFrequentUpdates: "YES"
         # r31：Apple Music 登录闪退根因——全仓缺 NSAppleMusicUsageDescription，
         # signIn 直调 MusicAuthorization.request() 时系统在弹框前直接杀进程
         #（SIGABRT，不回 .denied）；StoreKit 弹框同样要这个 key。按壳版
@@ -257,11 +244,6 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UIBackgroundModes:
           - audio
-        # r35-11：灵动岛重加（见上面 settings 注释）：主 App 的 Info.plist
-        # 必须有这两个 key，系统才允许 Activity.request；扩展的 plist
-        # 不需要（壳版实测：主 App 有、扩展没有）。r28 曾全删，r35-11 恢复。
-        NSSupportsLiveActivities: true
-        NSSupportsLiveActivitiesFrequentUpdates: true
         # r31：Apple Music 授权说明（见上面 settings 注释）：缺这个 key 时
         # 系统弹授权框前直接杀进程（SIGABRT），StoreKit 兜底路同样崩；
         # 构建设置里再写一遍（INFOPLIST_KEY_…），双保险，值一致。
@@ -296,27 +278,5 @@ targets:
             CFBundleURLSchemes:
               - lizinative
 
-  # r35-11：原生版灵动岛扩展（Apple Music 款，无歌词、无紧凑态缩略图）：
-  # 配置按壳版 LiziLiveActivity / kun 的成功做法——NSExtension 只写在
-  # project.yml 的 info.properties 里（XcodeGen 每次生成工程都会重写
-  # Info.plist 文件，手改 plist 活不到构建）；绝不写
-  # NSExtensionPrincipalClass（岛上歌词项目曾因此装不上）。
-  # r28 曾整个移除（target、原生岛扩展源码目录、LiziNative 对它的
-  # dependencies 引用全删）；r35-11 按用户要求重加（只加原生版，壳版不动）。
-  LiziNativeIsland:
-    type: app-extension
-    platform: iOS
-    sources:
-      - Sources/LiziNativeIsland
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.lty5201.lizi-native.LiziNativeIsland
-        PRODUCT_NAME: LiziNativeIsland
-    info:
-      path: Sources/LiziNativeIsland/Info.plist
-      properties:
-        CFBundleDisplayName: 灵动岛
-        CFBundleShortVersionString: $(MARKETING_VERSION)
-        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        NSExtension:
-          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+  # r36：原生灵动岛扩展 target 已整个移除（r35-11 重加作废），回 r28 状态——
+  # 只剩系统 Now Playing。壳版 LiziLiveActivity 扩展不受影响，仍在上面。

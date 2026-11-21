@@ -260,8 +260,7 @@ final class NowPlayingCoordinator: ObservableObject {
             // 静态图也上默认白图（别留上一首的），归属记成本歌；lastArtwork
             // 非空后本分支末尾的 writeNowPlaying 不会再触发重拉（见下）。
             let defaultImage = defaultCoverImage()
-            let defaultSized = Self.lockScreenSized(defaultImage)
-            lastArtwork = MPMediaItemArtwork(boundsSize: defaultSized.size) { _ in defaultSized }
+            lastArtwork = Self.lockScreenArtwork(from: defaultImage)
             lastArtworkTrackId = track.id
             lastCoverKey = AnimatedArtworkManager.defaultKey
             lastCoverImage = defaultImage
@@ -321,8 +320,7 @@ final class NowPlayingCoordinator: ObservableObject {
             // 已非空（默认白图），后续 5 秒进度复写不再触发重拉，不会无限循环。
             let shouldRetry = coverFailedTrackId != track.id
             coverFailedTrackId = track.id
-            let defaultSized = Self.lockScreenSized(defaultCoverImage())
-            lastArtwork = MPMediaItemArtwork(boundsSize: defaultSized.size) { _ in defaultSized }
+            lastArtwork = Self.lockScreenArtwork(from: defaultCoverImage())
             lastArtworkTrackId = track.id
             lastCoverKey = AnimatedArtworkManager.defaultKey
             lastCoverImage = nil
@@ -346,8 +344,7 @@ final class NowPlayingCoordinator: ObservableObject {
         }
         guard lastCoverURL == urlString else { return }
         coverFailedTrackId = nil
-        let sized = Self.lockScreenSized(image)
-        lastArtwork = MPMediaItemArtwork(boundsSize: sized.size) { _ in sized }
+        lastArtwork = Self.lockScreenArtwork(from: image)
         lastArtworkTrackId = track.id
         lastCoverImage = image
         lastCoverImageTrackId = track.id
@@ -439,6 +436,63 @@ final class NowPlayingCoordinator: ObservableObject {
         return renderer.image { _ in
             image.draw(in: CGRect(origin: .zero, size: target))
         }
+    }
+
+    /// 锁屏静态 artwork（r36：第 12 轮目标 + r33 未生效的真根因）：
+    /// r33 只把方形图的边长归一到 [1200, 1600]，三处创建点仍是
+    /// `{ _ in <同一张方形图> }`——闭包完全忽略系统要的尺寸。点专辑铺满
+    /// 全屏时系统要的是一张竖屏矩形图（用户截屏 1206x2622px，即
+    /// 402x874pt @3x）；方形图永远盖不住竖屏矩形，系统拿不到可铺满的
+    /// 图就不展开，只剩圆角卡片 + 上下棕色底（用户 22:11 截图正是这个
+    /// 状态；封面本身已挂真图、切歌也更新，源图分辨率不是卡点：酷狗
+    /// coverOf 本来就要 1024px，见 FoliaKugou coverSize）。
+    /// 所以 handler 按请求尺寸现裁：方形请求等比缩放、竖屏请求把方形封面
+    /// center-crop（aspect-fill）裁成竖版填满请求矩形；裁切走原图（非
+    /// lockScreenSized 压过的），细节不丢；boundsSize 仍用 r33 归一后的
+    /// 方形（1200–1600），只作系统参考的最大方形尺寸。
+    /// 开关关时只剩这张静态图（动态键整段跳过），开时动态路线 A/B 不动。
+    private static func lockScreenArtwork(from source: UIImage) -> MPMediaItemArtwork {
+        let base = lockScreenSized(source)
+        let scale = UIScreen.main.scale
+        // 每张 artwork 一份尺寸缓存（NSCache 线程安全；handler 可能在
+        // 非主线程被系统调，普通字典会数据竞争）。缓存跟 artwork 对象同寿，
+        // 切歌建新 artwork 时旧缓存一起丢，不会把上一首的图供到新歌。
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 8
+        return MPMediaItemArtwork(boundsSize: base.size) { requested in
+            Self.artworkImage(for: requested, from: source, fallback: base, scale: scale, cache: cache)
+        }
+    }
+
+    /// 按请求尺寸供图：aspect-fill 裁成请求尺寸（点数；像素 = 点数 x 建
+    /// artwork 时抓的屏幕 scale）。请求尺寸非法（<=0/NaN）回方形保底；
+    /// 像素最长边封顶 3000（本机锁屏全屏 1206x2622px 也在内，不截断）。
+    private static func artworkImage(for requested: CGSize, from source: UIImage,
+                                     fallback: UIImage, scale: CGFloat,
+                                     cache: NSCache<NSString, UIImage>) -> UIImage {
+        guard requested.width > 0, requested.height > 0,
+              requested.width.isFinite, requested.height.isFinite,
+              source.size.width > 0, source.size.height > 0 else { return fallback }
+        let key = "\(Int(requested.width.rounded()))x\(Int(requested.height.rounded()))" as NSString
+        if let hit = cache.object(forKey: key) { return hit }
+        var target = requested
+        let pixelLongest = max(target.width, target.height) * scale
+        if pixelLongest > 3000 {
+            let shrink = 3000 / pixelLongest
+            target = CGSize(width: target.width * shrink, height: target.height * shrink)
+        }
+        let drawScale = max(target.width / source.size.width, target.height / source.size.height)
+        let drawSize = CGSize(width: source.size.width * drawScale, height: source.size.height * drawScale)
+        let drawOrigin = CGPoint(x: (target.width - drawSize.width) / 2, y: (target.height - drawSize.height) / 2)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: target, format: format)
+        let rendered = renderer.image { _ in
+            source.draw(in: CGRect(origin: drawOrigin, size: drawSize))
+        }
+        cache.setObject(rendered, forKey: key)
+        return rendered
     }
 
     // MARK: - 远程命令（照抄壳版 ContentView.reassertRemoteCommands）

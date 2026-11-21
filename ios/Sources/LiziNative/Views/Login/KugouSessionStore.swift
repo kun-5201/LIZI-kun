@@ -194,6 +194,19 @@ final class KugouSessionStore: ObservableObject {
     /// 同步副本写服务端边车文件：登录态（token/userid/webCookie/dfid）
     /// + 设备身份（guid/mid——mid 就是 deviceMid，两边同一台设备）。
     /// 只供已落地的服务端取数链路用；登录链路本身不再走服务端。
+    /// r36-kugou-vip：同步时把会员身份也写进去（vip_type：SVIP "2" /
+    /// VIP "1" / 已知非会员 "0"；会员态未知时不写、不覆盖旧值）。
+    /// 以前这里只写 token/userid/webCookie/dfid，会员字段全程没进过
+    /// 服务端登录态——服务端 loginState() 读的 vip_type / vip_token
+    /// 全仓无写入方（vip_token 至今没有来源，见下注；vip_type 唯一
+    /// 写入方是服务端 status()，而原生 App 从不调 /api/kugou/status，
+    /// 且 saveSidecarAuth 是整文件覆盖、这一次同步就会把 status()
+    /// 写过的 vip_type 也抹掉）。取链端因此没有任何会员标记可用，
+    /// 会员身份只活在本机 KugouSessionStore 里、到不了取链那一环。
+    /// 注：vip_token 没有来源——扫码/粘贴/网页三种登录的上游回包里
+    /// 都没有 vip_token 字段（poll 只给 token+userid，get_my_info
+    /// 只给会员标志位），不编；取链认 token/userid/dfid/Cookie，
+    /// 不认 vip_token。
     private func syncToServer() {
         Task {
             let session = await KugouAPI.shared.currentSession()
@@ -203,6 +216,12 @@ final class KugouSessionStore: ObservableObject {
             if !session.userid.isEmpty { auth["userid"] = session.userid }
             if !session.webCookie.isEmpty { auth["webCookie"] = session.webCookie }
             if !session.dfid.isEmpty { auth["dfid"] = session.dfid }
+            // 会员身份（r36-kugou-vip）：isSuperVIP → "2"（svip_level=2
+            // 的惯例，服务端 status() 存 String(vipValue) 同款；r31
+            // 夹具 svip_level: 2 → SVIP），普通 VIP → "1"，已知非会员
+            // → "0"；isVIP 为 nil（未知）时不写，旧值留着、不拿未知覆盖。
+            if isSuperVIP { auth["vip_type"] = "2" }
+            else if let vip = isVIP { auth["vip_type"] = vip ? "1" : "0" }
             if !auth.isEmpty { SessionStore.shared.saveSidecarAuth("kugou", auth) }
             SessionStore.shared.saveSidecarAuth("kugou-device", ["guid": dev.guid, "mid": dev.mid])
         }

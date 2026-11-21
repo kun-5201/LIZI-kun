@@ -97,8 +97,10 @@ import UniformTypeIdentifiers
 /// 号 + 日期），让它进包。
 /// r36 免责声明（用户 2026-11-21 22:26 定）：文案全文只放这一处常量，
 /// 关于页入口行与全文页都读它——用户改措辞只改这一行，不许散在多处。
+/// r36 第 15 件首次弹窗：常量是 internal（不加 private），首次启动弹窗
+/// （RootView.swift）也读这一处，不另写一份文案。
 /// 标题「免责声明」是页标题，不在正文里；正文逐字如下。
-private let liziDisclaimerText = """
+let liziDisclaimerText = """
 一、用途
 本软件（LIZI kun）仅供个人学习、研究与交流使用，不得用于任何商业用途，不得用于任何形式的营利活动。
 

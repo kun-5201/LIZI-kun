@@ -17,6 +17,14 @@ struct RootView: View {
     @StateObject private var nav = AppNavigation()
     @StateObject private var stageForms = StageFormStore()
     @State private var showAirPlay = false
+    /// r36 第 15 件首次弹窗（用户 2026-11-21 22:41 定）：免责声明接受状态，
+    /// UserDefaults 持久化键 `lizi.disclaimerAccepted`（@AppStorage 直写
+    /// UserDefaults，默认 false = 未接受）。只首次打开弹一次，点了确定
+    /// 之后不再弹；键名与 HomeView 的 `lizi.local.show` 同款字面量风格。
+    @AppStorage("lizi.disclaimerAccepted") private var disclaimerAccepted = false
+    /// 首次启动弹窗的开关：onAppear 时未接受才置 true，全屏盖住主界面，
+    /// 点了确定才放行；禁手势关闭，不点按钮进不了主界面。
+    @State private var showFirstLaunchDisclaimer = false
 
     var body: some View {
         Group {
@@ -81,6 +89,27 @@ struct RootView: View {
         }
         .sheet(isPresented: $showAirPlay) {
             NativeAirPlayPickerSheet()
+        }
+        .onAppear {
+            // r36 第 15 件首次弹窗：启动时先判接受状态，未接受就弹全屏
+            // 免责声明挡住主界面；已接受（点了确定）直接进主界面，不再弹。
+            if !disclaimerAccepted {
+                showFirstLaunchDisclaimer = true
+            }
+        }
+        .fullScreenCover(isPresented: $showFirstLaunchDisclaimer) {
+            FirstLaunchDisclaimerView(
+                onAccept: {
+                    // 点「确定」才能进入软件：接受状态写盘，下次启动不再弹，
+                    // 再关弹窗放行进主界面。
+                    disclaimerAccepted = true
+                    showFirstLaunchDisclaimer = false
+                },
+                onDecline: {
+                    // 点「不确定」就退出软件，直接 terminate，不进主界面。
+                    exit(0)
+                }
+            )
         }
     }
 
@@ -209,4 +238,49 @@ struct NativeAirPlayPickerView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
+}
+
+// MARK: - r36 第 15 件首次弹窗
+
+/// 首次启动免责声明弹窗（用户 2026-11-21 22:41 定）：首次打开软件时全屏盖住
+/// 主界面，内容就是 `liziDisclaimerText` 七条全文（SettingsView.swift 文件顶
+/// 一处常量，这里只读它，不另写一份文案；标题「免责声明」是弹窗标题，不在正文里）。
+/// 两个按钮——「确定」写接受状态放行进主界面，「不确定」直接退出（exit(0)）。
+/// `.interactiveDismissDisabled()` 禁手势下滑关闭：不点按钮既进不了主界面，
+/// 也关不掉弹窗。样式照抄设置页 `DisclaimerView` 全文页（纸面底 + 墨字 + 同字号）。
+private struct FirstLaunchDisclaimerView: View {
+    var onAccept: () -> Void
+    var onDecline: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("免责声明")
+                .font(.liziBody(size: LiziTokens.size16, weight: .semibold))
+                .foregroundColor(LiziTokens.ink)
+                .padding(.top, 20)
+                .padding(.bottom, 12)
+            ScrollView {
+                Text(liziDisclaimerText)
+                    .font(.liziBody(size: LiziTokens.size14))
+                    .foregroundColor(LiziTokens.ink)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 16)
+            }
+            HStack(spacing: 12) {
+                Button("不确定", action: onDecline)
+                    .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityLabel("不确定，退出软件")
+                Button("确定", action: onAccept)
+                    .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityLabel("确定，同意免责声明并进入软件")
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 24)
+        }
+        .background(LiziTokens.paper)
+        .interactiveDismissDisabled()
+    }
 }

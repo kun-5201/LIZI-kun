@@ -68,6 +68,8 @@ final class AppleMusicAuth {
 
     /// 本机目录播放能力缓存（r34）：SKCloudServiceController.requestCapabilities
     /// → .musicCatalogPlayback。nil = 没查过 / 上次出错（错误不缓存，下次重查）。
+    private var catalogPlaybackCapable: Bool? = nil
+    private var catalogPlaybackCheckedAt: Date = .distantPast
 
     /// 内存里缓存的 user token（与 UserDefaults 同步；登出时两边一起清）。
     private var cachedUserToken: String?

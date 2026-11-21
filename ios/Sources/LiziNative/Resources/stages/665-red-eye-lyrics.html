@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>665 · 剑与红瞳</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;-webkit-font-smoothing:antialiased}
+html,body{margin:0;height:100%;overflow:hidden;background:#0b0b10}
+body{font-family:"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+     -webkit-user-select:none;user-select:none;cursor:default}
+
+/* ================= 字体：志莽行书（ZhiMangXing，woff2 子集，见文件头注释） ================= */
+@font-face{
+  font-family:"ZhiMangXing";
+  src:url("../assets/fonts/ZhiMangXing.woff2") format("woff2");
+  font-weight:400;font-style:normal;font-display:swap;
+}
+
+/* ================= 背景：国漫红眼女孩视频全屏铺满（播一遍定格末帧） ================= */
+.bg{position:fixed;inset:0;
+    background:
+      radial-gradient(120% 90% at 50% 0%,#262638 0%,#151522 46%,#0b0b10 78%,#07070a 100%)}
+#bgVideo{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;display:block;
+    background:#000}
+#bgVideo.failed{display:none}
+.scrim{position:fixed;inset:0;pointer-events:none;z-index:1;
+    background:
+      linear-gradient(180deg,rgba(0,0,0,.18) 0%,rgba(0,0,0,.05) 34%,rgba(0,0,0,.08) 66%,rgba(0,0,0,.30) 100%),
+      radial-gradient(118% 100% at 50% 46%,rgba(0,0,0,0) 55%,rgba(0,0,0,.22) 100%)}
+
+/* ================= 舞台 ================= */
+.stage{position:fixed;inset:0;z-index:2}
+
+/* 每句一个容器；旧句整体淡出，新句整行直接出现 */
+.line{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;
+      transition:opacity .6s ease}
+.line.old{opacity:0}
+.line.old .ch{transition:none}
+.ch{position:absolute;left:0;top:0;display:block;line-height:1;
+    font-weight:400;white-space:pre;
+    will-change:transform;
+    font-family:"ZhiMangXing","Xingkai SC","Kaiti SC","STKaiti","Kaiti TC",serif;
+    color:#ffffff;
+    /* 深色描边：亮底上可读（v2 脚本 stroke (20,24,60,200) 的 CSS 等价写法） */
+    text-shadow:0 0 3px rgba(20,24,60,.9),0 0 12px rgba(20,24,60,.55),
+      0 2px 18px rgba(0,0,0,.6)}
+.ch.painted{color:#8e9be0}
+
+/* 空歌词 */
+.empty{position:fixed;left:0;right:0;top:42%;text-align:center;z-index:4;pointer-events:none;
+       opacity:0;transition:opacity .7s ease}
+.empty.on{opacity:1}
+.empty__t{font-size:15px;color:rgba(255,255,255,.6);letter-spacing:.3em;
+       text-shadow:0 1px 10px rgba(0,0,0,.7)}
+.empty__s{font-size:12px;color:rgba(255,255,255,.32);letter-spacing:.2em;margin-top:10px;
+       text-shadow:0 1px 10px rgba(0,0,0,.7)}
+
+@media (prefers-reduced-motion: reduce){
+  .line{transition:opacity .3s ease}
+}
+</style>
+</head>
+<body>
+
+<div class="bg"></div>
+<video id="bgVideo" src="assets/665-guoman.mp4" muted playsinline autoplay preload="auto"></video>
+<div class="scrim"></div>
+<div class="stage" id="stage">
+  <div class="empty" id="empty">
+    <div class="empty__t" id="emptyT">剑与红瞳</div>
+    <div class="empty__s">暂 无 歌 词</div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ==========================================================
+   665 · 剑与红瞳（r41，用户 2026-11-22 05:19 提、05:40–05:46 定稿）
+   国漫动态壁纸第 2 张 guoman-02.mp4（白发少女闭眼持剑 → 冰翼 →
+   最后定格红瞳特写，4.017 秒）打底，当前行散落手写大字先白后逐字
+   涂成浅蓝紫。接线照 664 抄：init 拿歌 + 歌词 + 封面、tick 拿时间、
+   rAF 主循环 + 本地 dt 插值；不建 AudioContext、不碰 audio 元素。
+
+   背景视频：<video> 播 stages/assets/665-guoman.mp4（相对路径
+   assets/665-guoman.mp4），muted + playsinline + autoplay，
+   object-fit: cover 全屏铺满，不 loop——播一遍 4 秒后 ended，
+   最后一帧自然留住、不黑屏。切歌时 onInit 里 currentTime=0 +
+   play() 从头播。视频加载失败时藏起 video，退回深色渐变底。
+   不要用 30 秒成品视频当背景：那段里的歌词是写死的。
+
+   歌词：走 StageBridge 实时歌词（init 的 lines[].chars，YRC 逐字
+   时间驱动，LRC 行时间兜底——lineTimes() 照 664 抄）。不写死任何
+   歌词，歌词来自当前播的歌，切歌就换新歌的歌词；整首歌的全部歌词
+   按顺序一句接一句走完（S.lines 不截断、不设上限），行切换照 664
+   的 idxAt(t) 时间轴走，末行播完后保持显示到歌结束、不提前消失。
+   只显示当前行，不显示整段歌词。
+
+   涂色规则：整行先全部出现（白字、实心可见），再按唱到的位置逐字
+   涂成浅蓝紫 #8e9be0（rgb(142,155,224)，v2 预览的 BLUE_PURPLE）；
+   涂色是颜色切换、不是淡入——字从一开始就是实心可见的。没唱到的
+   字是白色，唱到的字变浅蓝紫；唱完一行时整行都已涂成浅蓝紫（v2
+   预览 render_line(text, k) 的终态就是整行涂满；行内进行中约一半
+   白、一半浅蓝紫，即任务里说的约 45% 混色外观）。
+
+   散字：照 664 的抖动网格做法（按行种子伪随机，同一行位置固定；
+   字号/倾斜由种子出），不照搬 v2 脚本的固定 12 点 LAYOUT（那是给
+   固定 13 句预览用的，任意歌词行长不一样）。
+
+   字体：ZhiMangXing（志莽行书），@font-face 引
+   ../assets/fonts/ZhiMangXing.woff2——pyftsubset 子集（GB2312
+   一二级 + 拉丁/数字/常用标点/假名/全角，2,287,488 B，7003 字形；
+   相对原 ttf 只丢 14 个生僻字符 €/™/ˆ 等，歌词常用字全在）。
+   放 Resources/assets/fonts/，与 304 的站酷快乐体同款接法（包里
+   $APP/assets/fonts/，post-build 脚本按结构拷）。
+
+   满屏（硬要求）：html,body 100% 高、overflow hidden；视频和歌词层
+   都 position:fixed inset:0，视频 object-fit: cover（不要 contain，
+   不要 letterbox）；横屏竖屏都满屏、不留黑边不留白边。iPhone 17
+   尺寸（19.5:9）下字号按 min(W,H) 比例算（照 664 的 fit() 口径），
+   横竖屏切换 resize 重算布局。
+
+   字号调节（只调本舞台）：window.__stagePanel 只声明 scale 一项
+   （照 664 的 scale 项），宿主歌曲内浮层就地调；宿主按形态 id 分键
+   持久化（StageBridge.settingsKey：lizi.native.stageSettings.665），
+   调 665 的字号不影响 664 或任何其他舞台，反之亦然；调完自动记住，
+   切歌不变、下次打开还是上次的大小。
+   ========================================================== */
+
+/* ---------- 1) 自检口 ---------- */
+var S = { lines: [], idx: -1, t: 0, playing: true, frames: 0, js: 0, err: "" };
+var RM = false;
+try { RM = !!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches); } catch (e) {}
+
+var videoEl = document.getElementById('bgVideo');
+
+window.__stage = function(){
+  var i = S.idx;
+  var painted = 0, total = 0, scattered = false;
+  if (curLine){
+    total = curLine.chars.length;
+    for (var k = 0; k < total; k++) if (curLine.chars[k].painted) painted++;
+    scattered = curLine.scattered;
+  }
+  var v = null;
+  try {
+    v = videoEl ? { t: videoEl.currentTime, dur: videoEl.duration,
+      ended: videoEl.ended, paused: videoEl.paused,
+      readyState: videoEl.readyState } : null;
+  } catch (e){ v = null; }
+  return {
+    lines:   S.lines.length,
+    idx:     i,
+    t:       S.t,
+    playing: S.playing,
+    frames:  S.frames,
+    js:      Math.round(S.js * 100) / 100,
+    err:     S.err,
+    text:    (i >= 0 && S.lines[i] && S.lines[i].text) ? String(S.lines[i].text) : "",
+    painted: painted,
+    total:   total,
+    video:   v,
+    scattered: scattered,
+    gl:      false,
+    rm:      RM
+  };
+};
+
+var lastErrAt = 0;
+function fail(e){
+  try { S.err = String((e && e.message) || e); } catch (_){ S.err = 'error'; }
+  var n = performance.now();
+  if (n - lastErrAt > 1000){ lastErrAt = n; try { console.error(e); } catch (_){} }
+}
+
+/* ---------- 2) ready —— 第一个 rAF 无条件发，全局只发一次 ---------- */
+var readySent = false;
+function sendReady(){
+  if (readySent) return;
+  readySent = true;
+  try { parent.postMessage({ __c100:1, type:"ready" }, "*"); } catch (e){ console.error(e); }
+}
+requestAnimationFrame(sendReady);
+setTimeout(sendReady, 800);
+
+/* ---------- 2.5) 设置面板（宿主画 UI，这里只声明；只含字号一项，只调本舞台） ---------- */
+window.__stagePanel = {
+  title: '剑与红瞳',
+  hint: '当前行散落手写大字，先白后逐字涂成浅蓝紫；字号只调本舞台，调完自动记住。',
+  items: [
+    { key:'scale', label:'字号', type:'range', min:0.8, max:1.4, step:0.05, def:1 }
+  ]
+};
+var P = { scale: 1 };
+
+/* ---------- 3) 工具 ---------- */
+function $(id){ return document.getElementById(id); }
+function clamp(v,a,b){ return v < a ? a : (v > b ? b : v); }
+/* FNV-1a 行哈希 + mulberry32：同一行永远同一颗种子，位置不乱跳 */
+function hashStr(s){
+  var h = 2166136261 >>> 0;
+  for (var i = 0; i < s.length; i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function mulberry32(seed){
+  var a = seed >>> 0;
+  return function(){
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* ---------- 4) 时间轴（照 664 的 lineTimes 抄，再把词内多字按词跨度均分） ---------- */
+function lineTimes(line){
+  var chars = Array.from(line.text || '').filter(function(c){ return c.trim() !== ''; });
+  var n = chars.length, out = [], i;
+  var cs = line.chars;
+  if (cs && cs.length){
+    var c0 = cs[0];
+    var rel = !!(c0 && isFinite(Number(c0.t)) && Number(c0.t) < line.t - 0.08);
+    /* 逐字时间表：词内多字按该词跨度（本词起点 → 下一词起点/行尾）均分 */
+    var per = [];
+    for (i = 0; i < cs.length; i++){
+      var rec = cs[i];
+      if (!rec || typeof rec !== 'object') continue;
+      var wt = Number(rec.t);
+      if (!isFinite(wt)) continue;
+      if (rel) wt += line.t;
+      var wchars = Array.from((rec.c == null) ? '' : String(rec.c)).filter(function(c){ return c.trim() !== ''; });
+      if (!wchars.length) wchars = ['?'];
+      var next = (i + 1 < cs.length && cs[i + 1] && isFinite(Number(cs[i + 1].t)))
+        ? Number(cs[i + 1].t) + (rel ? line.t : 0) : (line.t + (line.dur > 0 ? line.dur : 3.4));
+      var span = Math.max(0.12, next - wt);
+      for (var j = 0; j < wchars.length; j++) per.push(wt + span * j / wchars.length);
+    }
+    if (per.length === n){
+      return per;
+    }
+    if (per.length > 0){
+      /* 词字数与行字数对不上（空格/标点口径差）：按比例映射 */
+      for (i = 0; i < n; i++){
+        var k = Math.min(per.length - 1, Math.floor(i * per.length / n));
+        out.push(per[k]);
+      }
+      return out;
+    }
+  }
+  var d = line.dur > 0 ? line.dur : 3.4;
+  for (i = 0; i < n; i++) out.push(line.t + d * 0.9 * i / Math.max(1, n));
+  return out;
+}
+function idxAt(t){
+  var a = S.lines, lo = 0, hi = a.length - 1, best = -1;
+  while (lo <= hi){
+    var m = (lo + hi) >> 1;
+    if (a[m].t <= t + 0.02){ best = m; lo = m + 1; } else hi = m - 1;
+  }
+  return best;
+}
+
+/* ---------- 5) 背景视频：播一遍定格末帧；加载失败退回深色渐变 ---------- */
+if (videoEl){
+  videoEl.addEventListener('error', function(){
+    try { videoEl.classList.add('failed'); } catch (e){}
+  });
+  /* ended 后不循环、不黑屏：最后一帧自然留住，这里什么都不用做 */
+}
+function restartVideo(){
+  if (!videoEl) return;
+  try {
+    videoEl.classList.remove('failed');
+    videoEl.currentTime = 0;
+    var pr = videoEl.play();
+    if (pr && pr.catch) pr.catch(function(){});
+  } catch (e){ fail(e); }
+}
+
+/* ---------- 6) 散字布局：抖动网格，位置/字号/倾斜全由行种子出 ---------- */
+var stageEl = $('stage'), emptyEl = $('empty');
+var curLine = null;   /* { el, chars:[{el,ch,t,x,y,rot,size,painted}], idx, scattered } */
+var oldLines = [];
+var fontPx = 56;
+
+function fit(){
+  var W = innerWidth || 1440, H = innerHeight || 900;
+  if (!isFinite(W) || W <= 0) W = 1440;
+  if (!isFinite(H) || H <= 0) H = 900;
+  fontPx = clamp(Math.min(W, H) * 0.115, 30, 96) * P.scale;
+  if (curLine) layoutLine(curLine);
+}
+
+/* 按行种子算每字的落点（x,y 像素）、字号、倾斜角；同一行重算结果相同 */
+function layoutLine(l){
+  var W = innerWidth || 1440, H = innerHeight || 900;
+  var n = l.chars.length;
+  if (!n){ l.scattered = false; return; }
+  var rng = mulberry32(l.seed);
+  /* 抖动网格：按字数与宽高比算格子，字多格小、字少格大，整行铺满屏 */
+  var aspect = W / H;
+  var cols = Math.max(1, Math.ceil(Math.sqrt(n * aspect)));
+  var rows = Math.ceil(n / cols);
+  var areaX0 = W * 0.06, areaX1 = W * 0.94, areaY0 = H * 0.10, areaY1 = H * 0.84;
+  var cellW = (areaX1 - areaX0) / cols, cellH = (areaY1 - areaY0) / rows;
+  /* 字号：基准字号再受格子约束（长句自动缩小，字不挤出格子） */
+  var fp = Math.min(fontPx, cellW * 0.92, cellH * 1.02);
+  var jit = 0.32, rotMax = 30;
+  var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (var i = 0; i < n; i++){
+    var o = l.chars[i];
+    var col = i % cols, row = Math.floor(i / cols);
+    var cx = areaX0 + (col + 0.5) * cellW, cy = areaY0 + (row + 0.5) * cellH;
+    o.x = cx + (rng() * 2 - 1) * cellW * jit - fp / 2;
+    o.y = cy + (rng() * 2 - 1) * cellH * jit - fp / 2;
+    o.size = fp * (0.78 + rng() * 0.55);
+    o.rot = (rng() * 2 - 1) * rotMax;
+    o.el.style.fontSize = o.size.toFixed(1) + 'px';
+    o.el.style.transform =
+      'translate(' + o.x.toFixed(1) + 'px,' + o.y.toFixed(1) + 'px)' +
+      ' rotate(' + o.rot.toFixed(1) + 'deg)';
+    minX = Math.min(minX, o.x); maxX = Math.max(maxX, o.x + o.size);
+    minY = Math.min(minY, o.y); maxY = Math.max(maxY, o.y + o.size);
+  }
+  /* 散开判定（自检口用）：横向与纵向跨度都够大才算散开，不是排成一行 */
+  l.scattered = (maxX - minX) > W * 0.4 && (maxY - minY) > H * 0.25;
+  l.fontPx = fp;
+}
+
+function buildLine(idx){
+  var line = S.lines[idx];
+  if (!line) return null;
+  var el = document.createElement('div');
+  el.className = 'line';
+  var chars = Array.from(line.text || '').filter(function(c){ return c.trim() !== ''; });
+  var times = lineTimes(line);
+  var objs = [];
+  for (var i = 0; i < chars.length; i++){
+    var sp = document.createElement('span');
+    sp.className = 'ch';
+    sp.textContent = chars[i];
+    el.appendChild(sp);
+    objs.push({ el: sp, ch: chars[i], t: (times[i] != null ? times[i] : line.t),
+                x: 0, y: 0, rot: 0, size: fontPx, painted: false });
+  }
+  stageEl.appendChild(el);
+  var out = { el: el, chars: objs, idx: idx, seed: hashStr(idx + '|' + line.text), scattered: false, fontPx: fontPx };
+  layoutLine(out);
+  return out;
+}
+
+function retireLine(l){
+  if (!l) return;
+  l.el.classList.add('old');
+  oldLines.push(l);
+  setTimeout(function(){
+    if (l.el.parentNode) l.el.parentNode.removeChild(l.el);
+    var k = oldLines.indexOf(l);
+    if (k >= 0) oldLines.splice(k, 1);
+  }, 700);
+}
+
+function setIdx(i){
+  if (i === S.idx && curLine) return;
+  S.idx = i;
+  if (curLine) retireLine(curLine);
+  curLine = null;
+  if (i >= 0 && S.lines[i] && S.lines[i].text){
+    curLine = buildLine(i);
+  }
+  emptyEl.classList.toggle('on', S.lines.length === 0);
+}
+
+/* ---------- 7) 逐字涂色：整行先全白实心出现，唱到的字才切换成浅蓝紫 ---------- */
+function paintChars(){
+  if (!curLine) return;
+  var chars = curLine.chars, i, o, should;
+  for (i = 0; i < chars.length; i++){
+    o = chars[i];
+    should = S.t >= o.t;
+    if (should !== o.painted){
+      o.painted = should;
+      /* 颜色切换，不是淡入：字从一开始就是实心可见的 */
+      o.el.classList.toggle('painted', should);
+    }
+  }
+}
+
+/* ---------- 8) 宿主消息 ---------- */
+function onInit(p){
+  p = (p && typeof p === 'object') ? p : {};
+  var song = (p.song && typeof p.song === 'object') ? p.song : {};
+  var name = (song.name == null) ? '' : String(song.name).trim();
+  if (!name) name = '未知歌曲';
+  $('emptyT').textContent = name;
+  /* 全首歌词原样收下：不截断、不设上限，按顺序走完（见 §1 注释） */
+  S.lines = (Array.isArray(p.lines) ? p.lines : [])
+    .filter(function(l){ return l && typeof l === 'object'; })
+    .map(function(l){
+      var t = Number(l.t), du = Number(l.dur);
+      return {
+        t: isFinite(t) ? t : 0,
+        dur: isFinite(du) ? du : 0,
+        text: (l.text == null) ? '' : String(l.text),
+        chars: (Array.isArray(l.chars) && l.chars.length) ? l.chars : null
+      };
+    })
+    .sort(function(a, b){ return a.t - b.t; });
+  S.playing = (typeof p.playing === 'boolean') ? p.playing : true;
+  if (curLine){ retireLine(curLine); curLine = null; }
+  S.idx = -1;
+  setIdx(idxAt(S.t));
+  restartVideo();
+  S.err = '';
+}
+function onSetting(p){
+  if (!p || typeof p.key !== 'string') return;
+  var k = p.key, v = p.value;
+  if (k === 'scale'){ var sv = Number(v); P.scale = isFinite(sv) ? clamp(sv, 0.5, 2) : 1; fit(); }
+}
+
+addEventListener("message", function(ev){
+  var d = ev.data;
+  if (!d || d.__c100 !== 1) return;
+  var p = d.payload || {};
+  try {
+    if (d.type === "init"){
+      onInit(p);
+    } else if (d.type === "tick"){
+      var t = Number(p.time);
+      if (isFinite(t)) S.t = t;                        /* 无条件采纳，只挡 NaN/Infinity */
+      if (typeof p.playing === 'boolean') S.playing = p.playing;
+    } else if (d.type === "setting"){
+      onSetting(p);
+    }
+  } catch (e){ fail(e); }
+});
+
+addEventListener("mousemove", function(){
+  try { parent.postMessage({ __c100:1, type:'activity' }, '*'); } catch (e){}
+}, { passive:true });
+addEventListener("keydown", function(e){
+  if (e.code === 'Space' || e.key === ' '){
+    e.preventDefault();
+    try { parent.postMessage({ __c100:1, type:'key', payload:{ key:'Space' } }, '*'); } catch (_){}
+  }
+});
+
+/* ---------- 9) 主循环：行切换 + 逐字涂色 ---------- */
+var lastNow = performance.now();
+
+function frame(now){
+  var js0 = performance.now();
+  try {
+    var dt = (now - lastNow) / 1000;
+    lastNow = now;
+    if (!isFinite(dt) || dt < 0) dt = 0;
+    if (dt > 0.05) dt = 0.05;
+    if (S.playing) S.t += dt;
+
+    var i = idxAt(S.t);
+    if (i !== S.idx) setIdx(i);
+    if (curLine) paintChars();
+
+    S.frames++;
+  } catch (e){ fail(e); }
+  S.js = performance.now() - js0;
+  requestAnimationFrame(frame);
+}
+
+/* ---------- 10) 启动 ---------- */
+fit();
+addEventListener("resize", fit);
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>

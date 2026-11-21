@@ -6,7 +6,7 @@ import SwiftUI
 /// - 球面排布、拖动旋转、惯性、点中开预览、预览里「进入这个形态」进舞台——
 ///   全部原生做，不套网页。
 /// - 每格在壳版里是一个 live iframe（正面最多 5 个手机 / 10 个桌面并发，
-///   9 秒超时变编号空壳）；原生侧 86 个 WebView 跑不动，改成每格一张
+///   9 秒超时变编号空壳）；原生侧 87 个 WebView 跑不动，改成每格一张
 ///   forms-labs/previews/<id>.jpg 静态预览图（长廊页同款图），读不到时退回
 ///   文字格（壳版失败空壳同款：只剩编号）。
 /// - tab：全部 / 精选 / 分类；搜索按「编号 / 名字 / 描述」过滤；打开时把当前
@@ -16,7 +16,7 @@ import SwiftUI
 /// - 点「进入这个形态」：StageCatalog.saveFormId(id) + nav.show(.stage)，
 ///   进的是 P3-A 的 StageView（HUD 舞台），不是本目录的占位宿主。
 /// - 没有舞台文件的形态不给进入按钮（StageCatalog.isAvailable 为假时预览里
-///   明示；发行版 86 个全有文件。r26 起目录里已无无文件形态，该分支不再触发、
+///   明示；发行版 87 个全有文件。r26 起目录里已无无文件形态，该分支不再触发、
 ///   仅作防线保留，见 StageCatalog.isAvailable）。
 ///
 /// 目录一律复用 P3-A 的 StageCatalog（menuList / matches / isAvailable），

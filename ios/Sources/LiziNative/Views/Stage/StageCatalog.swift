@@ -6,14 +6,15 @@ import Foundation
 /// - r25 时 `STAGES` 是 676 项 = `classic`（传统播放器，无文件）+ 675 个形态
 ///   （编号 001–664，中间有空号 281/282/298/299/301）；其中只有 86 个的 HTML
 ///   文件真实存在于 `public/stages/`，其余 590 个只有目录条目、没有文件。
-/// - r26 删掉了这 590 条（只删目录条目，不删 HTML 文件），本文件现剩 87 项 =
-///   `classic` + 86 个有文件形态；`releaseIds` / `bundledFileNames` 本来就只含
-///   这 86 项，内容未动。选择器、搜索、球面画廊 dev 版随目录自动同步（均 87/86）。
+/// - r26 删掉了这 590 条（只删目录条目，不删 HTML 文件），本文件现剩 88 项 =
+///   `classic` + 87 个有文件形态；`releaseIds` / `bundledFileNames` 也随之含
+///   这 87 项。选择器、搜索、球面画廊 dev 版随目录自动同步（均 88/87）。
+///   （r41：+665 剑与红瞳）
 /// - r22 Folia：`F01`–`F16` 是第 22 轮新加的 Folia 舞台（见文件尾的 Folia 段），
 ///   16 个文件全在磁盘上，全部保留；生成器重跑时必须保留该段。
 /// - 生成器口径已改，禁止按旧口径重跑：源头 `public/app.js` 的 `STAGES` 仍含
 ///   676 项（含已删的 590 条），照旧重跑会把删掉的 590 条复活。重跑前必须先同步
-///   源头（把 STAGES 缩到与本文件一致的 86 项，或让生成器只输出有文件形态 +
+///   源头（把 STAGES 缩到与本文件一致的 87 项，或让生成器只输出有文件形态 +
 ///   classic），否则不要重跑；未同步前只允许手改本文件。
 
 /// 一个形态（或传统播放器）。
@@ -110,6 +111,7 @@ enum StageCatalog {
         StageForm(formId: "631", name: "星轨跟拍", desc: "镜头追着歌词，星空真实视差", fileName: "631-stellar-tracking.html", isCamera: false),
         StageForm(formId: "663", name: "弹簧诗行", desc: "每字一条独立弹簧，逐字错帧破土回弹，五组空间构图随句轮换，字缘微光与液态高光条贴在壁纸引擎背景上运行", fileName: "663-spring-verse.html", isCamera: false),
         StageForm(formId: "664", name: "歌词散字", desc: "当前行逐字淡入、按行种子散开满屏：大号行楷白字与淡紫蓝字，背景是当前歌封面压暗铺底", fileName: "664-lyric-scatter.html", isCamera: false),
+        StageForm(formId: "665", name: "剑与红瞳", desc: "国漫红眼女孩视频打底，当前行散落手写大字先白后逐字涂成浅蓝紫", fileName: "665-red-eye-lyrics.html", isCamera: false),
         // ---- r22 Folia 舞台（F01–F16）：Folia 18 个模式去重后剩 16 个；
         // cappella（撞 504 iMessage）与 still（撞 classic 静态歌词）未加。
         // 只学形态与流程、按 Lizi 协议独立重写，见各 HTML 文件头的 AGPL 来源注释。
@@ -132,10 +134,10 @@ enum StageCatalog {
     ]
 
     /// 壳版发行版白名单 `STAGE_RELEASE_ORDER`（顺序即白名单顺序）。
-    static let releaseIds: [String] = ["504", "519", "001", "002", "008", "010", "012", "020", "027", "031", "048", "066", "067", "083", "099", "304", "305", "306", "339", "353", "359", "361", "366", "368", "370", "383", "396", "398", "406", "408", "413", "428", "429", "443", "505", "506", "508", "509", "510", "517", "518", "520", "521", "522", "524", "525", "540", "542", "552", "557", "559", "561", "563", "571", "572", "580", "582", "588", "590", "603", "604", "614", "617", "621", "627", "628", "629", "631", "663", "664", "F01", "F02", "F03", "F04", "F05", "F06", "F07", "F08", "F09", "F10", "F11", "F12", "F13", "F14", "F15", "F16"]
+    static let releaseIds: [String] = ["504", "519", "001", "002", "008", "010", "012", "020", "027", "031", "048", "066", "067", "083", "099", "304", "305", "306", "339", "353", "359", "361", "366", "368", "370", "383", "396", "398", "406", "408", "413", "428", "429", "443", "505", "506", "508", "509", "510", "517", "518", "520", "521", "522", "524", "525", "540", "542", "552", "557", "559", "561", "563", "571", "572", "580", "582", "588", "590", "603", "604", "614", "617", "621", "627", "628", "629", "631", "663", "664", "F01", "F02", "F03", "F04", "F05", "F06", "F07", "F08", "F09", "F10", "F11", "F12", "F13", "F14", "F15", "F16", "665"]
 
-    /// 已打进原生 bundle 的形态文件名（= 磁盘上真实存在的 86 个文件）。
-    static let bundledFileNames: Set<String> = ["001-particle-lyrics.html", "002-starfield-lyrics.html", "008-snow-lyrics.html", "010-embers-lyrics.html", "012-cave-lyrics.html", "020-grid-horizon-lyrics.html", "027-code-rain-lyrics.html", "031-css-cube-lyrics.html", "048-sierpinski-lyrics.html", "066-thrown-splat.html", "067-arc-etch.html", "083-frost.html", "099-bioluma.html", "304-kidcore.html", "305-cobalt-grid.html", "306-bauhaus-target.html", "339-superflat-candy.html", "353-acid-lime.html", "359-midnight-visitor.html", "361-dead-air-carrier.html", "366-neon-cartridge.html", "368-stock-meltdown.html", "370-scissor-riot.html", "383-flesh-matrix.html", "396-crate-label.html", "398-mirrorball-glitz.html", "406-glacial-fissure.html", "408-audio-crystal-bloom.html", "413-thorn-glass-heart.html", "428-thermal-cctv.html", "429-sunlit-diary.html", "443-silk-cavern.html", "504-imessage-lyric.html", "505-metalheart-prism.html", "506-chroma-pass.html", "508-future-is-here.html", "509-kinetic-montage.html", "510-block-wall.html", "517-chromatic-pulse.html", "518-kinetic-whip.html", "519-prism-euphoria.html", "520-amber-shutter.html", "521-glitch-requiem.html", "522-abyssal-echo.html", "524-monolith-void.html", "525-neon-raindrop.html", "540-aurora-ice-cavern.html", "542-thunderhead-cumulonimbus.html", "552-ink-wash-rain-pavilion.html", "557-y2k-chrome-inflatable.html", "559-synthwave-outrun-highway.html", "561-halftone-comic-popart.html", "563-pixel-arcade-voxel.html", "571-acid-techno-liquid-metal.html", "572-barbed-wire-lightning.html", "580-red-velvet-theater-curtain.html", "582-concrete-tunnel-headlight.html", "588-trigger-impact-frames.html", "590-chainsaw-manga-collage.html", "603-folded-metal-ribbon-red.html", "604-monochrome-noir-rain-blind.html", "614-non-euclidean-portal-rooms.html", "617-underwater-classroom-sunbeam.html", "621-apocalyptic-sunset-overpass.html", "627-ink-line-rush.html", "628-paper-flash.html", "629-motion-path.html", "631-stellar-tracking.html", "663-spring-verse.html", "664-lyric-scatter.html", "F01-folia-sonnet.html", "F02-folia-tempera.html", "F03-folia-lumiere.html", "F04-folia-hanabi.html", "F05-folia-machi.html", "F06-folia-metaphor.html", "F07-folia-liuguang.html", "F08-folia-cadenza.html", "F09-folia-partita.html", "F10-folia-fume.html", "F11-folia-tilt.html", "F12-folia-claddagh.html", "F13-folia-monet.html", "F14-folia-pendolo.html", "F15-folia-diorama.html", "F16-folia-nebbia.html"]
+    /// 已打进原生 bundle 的形态文件名（= 磁盘上真实存在的 87 个文件）。
+    static let bundledFileNames: Set<String> = ["001-particle-lyrics.html", "002-starfield-lyrics.html", "008-snow-lyrics.html", "010-embers-lyrics.html", "012-cave-lyrics.html", "020-grid-horizon-lyrics.html", "027-code-rain-lyrics.html", "031-css-cube-lyrics.html", "048-sierpinski-lyrics.html", "066-thrown-splat.html", "067-arc-etch.html", "083-frost.html", "099-bioluma.html", "304-kidcore.html", "305-cobalt-grid.html", "306-bauhaus-target.html", "339-superflat-candy.html", "353-acid-lime.html", "359-midnight-visitor.html", "361-dead-air-carrier.html", "366-neon-cartridge.html", "368-stock-meltdown.html", "370-scissor-riot.html", "383-flesh-matrix.html", "396-crate-label.html", "398-mirrorball-glitz.html", "406-glacial-fissure.html", "408-audio-crystal-bloom.html", "413-thorn-glass-heart.html", "428-thermal-cctv.html", "429-sunlit-diary.html", "443-silk-cavern.html", "504-imessage-lyric.html", "505-metalheart-prism.html", "506-chroma-pass.html", "508-future-is-here.html", "509-kinetic-montage.html", "510-block-wall.html", "517-chromatic-pulse.html", "518-kinetic-whip.html", "519-prism-euphoria.html", "520-amber-shutter.html", "521-glitch-requiem.html", "522-abyssal-echo.html", "524-monolith-void.html", "525-neon-raindrop.html", "540-aurora-ice-cavern.html", "542-thunderhead-cumulonimbus.html", "552-ink-wash-rain-pavilion.html", "557-y2k-chrome-inflatable.html", "559-synthwave-outrun-highway.html", "561-halftone-comic-popart.html", "563-pixel-arcade-voxel.html", "571-acid-techno-liquid-metal.html", "572-barbed-wire-lightning.html", "580-red-velvet-theater-curtain.html", "582-concrete-tunnel-headlight.html", "588-trigger-impact-frames.html", "590-chainsaw-manga-collage.html", "603-folded-metal-ribbon-red.html", "604-monochrome-noir-rain-blind.html", "614-non-euclidean-portal-rooms.html", "617-underwater-classroom-sunbeam.html", "621-apocalyptic-sunset-overpass.html", "627-ink-line-rush.html", "628-paper-flash.html", "629-motion-path.html", "631-stellar-tracking.html", "663-spring-verse.html", "664-lyric-scatter.html", "F01-folia-sonnet.html", "F02-folia-tempera.html", "F03-folia-lumiere.html", "F04-folia-hanabi.html", "F05-folia-machi.html", "F06-folia-metaphor.html", "F07-folia-liuguang.html", "F08-folia-cadenza.html", "F09-folia-partita.html", "F10-folia-fume.html", "F11-folia-tilt.html", "F12-folia-claddagh.html", "F13-folia-monet.html", "F14-folia-pendolo.html", "F15-folia-diorama.html", "F16-folia-nebbia.html", "665-red-eye-lyrics.html"]
 
     /// 该形态能不能在原生版里播（文件在 bundle 里）。
     static func isAvailable(_ form: StageForm) -> Bool {
@@ -165,7 +167,7 @@ enum StageCatalog {
         return head + Array(rest)
     }
 
-    /// 壳版 `stageMenuList(includeClassic:)`：发行版只含白名单 86 个；
+    /// 壳版 `stageMenuList(includeClassic:)`：发行版只含白名单 87 个；
     /// 全部目录 = 开发版全集。返回的都是展示顺序（`displayOrder` 之后）。
     static func menuList(includeClassic: Bool, releaseOnly: Bool) -> [StageForm] {
         let list = all.filter { form in
@@ -200,4 +202,4 @@ enum StageCatalog {
 // 生成器（r26 已冻结）：不要按旧口径重跑本文件。
 // 源头 public/app.js 的 STAGES 仍是 676 项（含 r26 已删的 590 条无文件条目），
 // 照旧重跑会把删掉的条目全部复活。重跑前必须先同步源头（STAGES 缩到与本文件
-// 一致的 86 项，或生成器只输出有文件形态 + classic）；未同步前只允许手改本文件。
+// 一致的 87 项，或生成器只输出有文件形态 + classic）；未同步前只允许手改本文件。

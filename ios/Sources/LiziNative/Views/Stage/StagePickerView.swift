@@ -7,7 +7,7 @@ import SwiftUI
 /// 搜索）已撤：r26 删无文件条目后两个分段内容完全一致（都只剩 86 项），
 /// 设计图里也没有搜索框/分段，全部拿掉，只剩两列名字。
 /// - 内容 = `StageCatalog.menuList(includeClassic: true, releaseOnly: true)`：
-///   classic（传统播放器）+ 86 个有文件形态，全部可播放；顺序沿用壳版
+///   classic（传统播放器）+ 87 个有文件形态，全部可播放；顺序沿用壳版
 ///   displayOrder（classic、504、519 置顶，其余倒序），与旧选择器一致。
 /// - 样式对照壳版 `.smenu`：深色面板（外壳见 StageFloatPanel）、两列网格、
 ///   行高 44、只显示名字、当前行白底 14% 高亮。点一行即切（classic 回

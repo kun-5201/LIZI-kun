@@ -65,7 +65,8 @@ import UniformTypeIdentifiers
 ///    动画插图原在这里，r31-settings-sections 挪进上面的「显示与性能」分区。
 /// 7. 关于：版本（Bundle）、构建（LiziNativeBuildInfo，CI 生成）、诊断日志
 ///    （查看/复制/清空，读/清 DiagLog）、QQ 群、赞助（支付宝收款码链接，均照抄壳版）、
-///    免责声明（r36：点行进全文页，文案只在下面的 `liziDisclaimerText` 一处）。
+///    项目地址（r36 第 15 件：点行用 openURL 跳 GitHub 仓库）、
+///    免责声明（r36 第 15 件：点行进全文页，文案只在下面的 `liziDisclaimerText` 一处）。
 ///
 /// r31-settings-organization 去重清单（删了哪个 → 留了哪个）：
 /// - 设置页 9 档选档 → 留（改）：音质替换工在「音乐与音质」分区重加了
@@ -97,7 +98,28 @@ import UniformTypeIdentifiers
 /// r36 免责声明（用户 2026-11-21 22:26 定）：文案全文只放这一处常量，
 /// 关于页入口行与全文页都读它——用户改措辞只改这一行，不许散在多处。
 /// 标题「免责声明」是页标题，不在正文里；正文逐字如下。
-private let liziDisclaimerText = "本软件仅供个人学习交流使用。软件内的音乐、歌词、封面等内容版权归原平台及版权方所有。本软件不提供、不存储任何音乐内容，所有播放均来自用户已授权的平台账号或用户自行添加的音源。使用本软件即表示您已阅读并同意本声明。"
+private let liziDisclaimerText = """
+一、用途
+本软件（LIZI kun）仅供个人学习、研究与交流使用，不得用于任何商业用途，不得用于任何形式的营利活动。
+
+二、内容版权
+软件内展示或播放的音乐、歌词、封面、视频等内容，其版权归原平台及版权方所有。本软件不提供、不存储、不上传任何音乐内容；所有播放均来自用户已授权登录的平台账号，或用户自行添加的第三方音源（如落雪自定义源）。
+
+三、第三方平台
+本软件通过各音乐平台（网易云音乐、QQ音乐、酷狗音乐、汽水音乐、波点音乐、酷我音乐、Apple Music）的公开接口或用户授权方式获取内容；各平台的服务、接口与内容随时可能变更、限制或下线，由此导致的无法播放、内容缺失、账号异常等问题，本软件不承担责任。本软件与上述平台无任何隶属、合作或授权关系。
+
+四、用户责任
+用户应自行确保所登录的账号、添加的音源及播放行为符合相关法律法规与各平台的使用条款；因用户自身行为产生的任何纠纷、损失或账号处罚，由用户自行承担。
+
+五、数据与隐私
+登录凭证、播放记录等数据仅保存在用户本机，不会上传至本软件的服务器；用户可随时在设置中退出登录或清除数据。
+
+六、不保证
+本软件按“现状”提供，不对播放质量、内容完整性、服务的持续可用性作任何明示或暗示的保证。
+
+七、同意
+使用本软件即表示您已阅读、理解并同意本声明。如不同意，请停止使用并卸载本软件。
+"""
 struct SettingsView: View {
     @StateObject private var settings = SettingsStore.shared
     /// r31-mquality 残留补（构建工 r31 修）：musicQualitySection 的默认音质
@@ -152,6 +174,8 @@ struct SettingsView: View {
     @State private var showDownloads = false
     /// r36 免责声明：关于页「免责声明」行点开全文页的开关。
     @State private var showDisclaimer = false
+    /// r36 第 15 件：关于页「项目地址」行点开后用系统浏览器打开仓库链接。
+    @Environment(\.openURL) private var openURL
     /// v3 稿图（r36 第⑨⑩⑪件，2026-11-21 22:07 定稿）：设置页标签分组
     ///（平台账号 / 自定义源管理 / 本地音乐 / 音效），点标签切分组并回顶部。
     @State private var selectedSettingsTab: SettingsTab = .accounts
@@ -1233,6 +1257,24 @@ private struct PickedVideoFile: Transferable {
                 }
             }
             .buttonStyle(.plain)
+            // r36 第 15 件（用户 2026-11-21 22:34–22:35 定稿）：关于页
+            // 「项目地址」行（QQ 群/赞助同款 Button + chevron 行），点行用
+            // openURL 在系统浏览器打开 GitHub 仓库。
+            Button(action: {
+                if let url = URL(string: "https://github.com/kun-5201/LIZI-kun") {
+                    openURL(url)
+                }
+            }) {
+                HStack {
+                    rowLabel("项目地址", hint: "kun-5201/LIZI-kun")
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(LiziTokens.ink3)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("项目地址，在浏览器打开 GitHub 仓库")
             // r36 免责声明：关于页入口行（QQ 群/赞助同款 Button + chevron 行），
             // 点开 sheet 全文页；文案只在文件顶 `liziDisclaimerText` 一处。
             Button(action: { showDisclaimer = true }) {

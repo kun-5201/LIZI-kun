@@ -15,7 +15,7 @@ enum Lrclib {
     private static let userAgent = "Lizi/1.1.0"
     private static let totalBudget: TimeInterval = 10
 
-    /// 第 13 轮第 20 件：LRCLIB 兜底开关（设置 → 播放页排版 → LRCLIB 歌词兜底）。
+    /// 第 13 轮第 20 件：LRCLIB 兜底开关（设置 → 歌词显示 → LRCLIB 歌词兜底）。
     /// 默认开（第 11 轮接进来时的行为）；关了 = 只用官方歌词。
     /// 存在 UserDefaults，重启 App 还在；读不到（从没设置过）按开算。
     static let enabledKey = "lizi.lrclib.enabled"

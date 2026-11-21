@@ -16,7 +16,7 @@ import QuartzCore
 /// 只写键、原生大厅从不读，拨了无效；壳版 public/app.js 仍自带这三项，
 /// 原生包不走那条路。大厅消费对应键后再加回。）
 /// | 本地音乐首页显示 | `lizi.local.show` | 开 | 壳版键；HomeView 已消费（r25） |
-/// | 播放页版式 | `lizi.now.layout` | `""`（默认） | 壳版 `player-layouts.js` 的键；PlayerView 已消费（r25） |
+/// （r35-6 已删：播放页版式只留默认，`lizi.now.layout` 键已清、PlayerView 的 02/04/06 三套版式全删；旧值残留再也不会被读到。）
 /// | 形态歌词 | `lizi.stage.lyricMode` | `orig`（原文） | 壳版键（安卓快照 `app.js:1901-1905`，`#set-stage-lyric`）；三档非开关：`orig` 原文 / `both` 双文 / `trans` 译文；StageBridge 已消费（r25） |
 /// | 平台管理（显示哪些平台） | `lizi.platforms.v1` | 全选（无键） | 壳版语义：没存 = 全部；全选 = 删键 |
 /// | 我的专辑展示 | `lizi.native.myAlbums.form` | spine | 原生键：MyAlbumsView 读这把键，壳版键不跟 |
@@ -38,6 +38,12 @@ import QuartzCore
 /// 读同一份 @Published，拨动当场刷新，不各建各的。
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
+
+    /// r35-6：播放页排版只留默认——旧键 `lizi.now.layout` 在这里启动时删掉，
+    /// 旧设备上残留的 "02"/"04"/"06" 旧值再也不会被任何代码读到，不留死值。
+    init() {
+        UserDefaults.standard.removeObject(forKey: "lizi.now.layout")
+    }
 
     // MARK: - 音乐与音质（r31 音质系统替换：Moumusic 的结构、Lizi 的语义）
 
@@ -167,39 +173,6 @@ final class SettingsStore: ObservableObject {
     /// 只管显示/隐藏，不管导入。默认开。
     @Published var localMusicShown: Bool = SettingsStore.boolDefaultOn(key: "lizi.local.show") {
         didSet { UserDefaults.standard.set(localMusicShown, forKey: "lizi.local.show") }
-    }
-
-    // MARK: - 播放页版式（壳版 player-layouts.js，4 套）
-
-    /// 播放页版式 id：`""` = 默认（现在的两栏）、`"02"` = 左右对半、
-    /// `"04"` = 上下分屏、`"06"` = 极小封面。非法值回落默认。
-    @Published var nowLayout: String = SettingsStore.readNowLayout() {
-        didSet {
-            let v = Self.normalizeLayout(nowLayout)
-            if v != nowLayout { nowLayout = v; return }
-            UserDefaults.standard.set(v, forKey: "lizi.now.layout")
-        }
-    }
-
-    static let nowLayouts: [(id: String, name: String, desc: String)] = [
-        ("", "默认", "现在的两栏"),
-        ("02", "左右对半", "50/50 两列通高"),
-        ("04", "上下分屏", "上半封面 · 下半歌词"),
-        ("06", "极小封面", "96px 封面 · 大留白"),
-    ]
-
-    private static func normalizeLayout(_ id: String) -> String {
-        nowLayouts.contains { $0.id == id } ? id : ""
-    }
-
-    private static func readNowLayout() -> String {
-        normalizeLayout(UserDefaults.standard.string(forKey: "lizi.now.layout") ?? "")
-    }
-
-    /// 播放页重读版式（PlayerView 进页时调：设置页改完版式后播放页是新创建的，
-    /// 初始化时已读到新值；多一道重读更稳。只读 UserDefaults，不动其它设置）。
-    func refreshNowLayout() {
-        nowLayout = Self.readNowLayout()
     }
 
     // MARK: - 形态歌词（壳版 `#set-stage-lyric`，三档，不是开关）

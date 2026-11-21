@@ -37,10 +37,10 @@ import UniformTypeIdentifiers
 ///    （9 档，单曲覆盖，切歌清掉）各管各的，都留着（r31 第三推：
 ///    音质替换工按批准设计重加默认档 Picker，旧「设置页 9 档选档已删」口径过期）。
 ///    壳版第 9 档 DTS:X 无上游流，原生不提供，不编。
-/// 5. 播放页排版：4 套版式（默认/左右对半/上下分屏/极小封面）真持久化
-///    `lizi.now.layout`；PlayerView r25 已按版式重排（对照见 PlayerView
-///    文件头）。LRCLIB 兜底开关原在这里，r31-settings-sections 挪进
-///    下面的「歌词显示」分区（键与默认值不动）。
+/// 5. 播放页排版（r35-6 已删：只留默认，02/04/06 三套版式、设置页这一节、
+///    `lizi.now.layout` 键全清；播放页永远只走默认两栏）。
+///    LRCLIB 兜底开关原在这里，r31-settings-sections 挪进下面的「歌词显示」
+///    分区（键与默认值不动）。
 /// 5c. 歌词显示（r31-settings-sections，只归类现有设置，不新增歌词功能）：
 ///    LRCLIB 歌词兜底（原在播放页排版区，键 `lizi.lrclib.enabled`，默认开）
 ///    + 形态歌词三档（原 5b 独立分区，壳版 `#set-stage-lyric`，键
@@ -78,7 +78,7 @@ import UniformTypeIdentifiers
 ///   已真实现，见外观区「背景」；字体选择/快捷键仍没有。）
 /// 查过不是重复、留下的：本地音乐导入（首页与设置页各一个入口，同调
 /// LocalMusic.importFiles，同一实现、不同页面的入口，不算重复项）；
-/// 形态歌词三档、LRCLIB、动画插图、120Hz、每日签到/自动签到、播放页排版，
+/// 形态歌词三档、LRCLIB、动画插图、120Hz、每日签到/自动签到，
 /// 全仓各只有一个设置入口。播放页音质芯片只剩底部一处（r29 已删歌名下角标）。
 ///
 /// 没有（做不了/没接口，老实写清）：均衡器细调；
@@ -150,7 +150,6 @@ struct SettingsView: View {
                 lxSection
                 localMusicSection
                 musicQualitySection
-                nowLayoutSection
                 storageDownloadSection
                 lyricsSection
                 displayPerformanceSection
@@ -716,7 +715,7 @@ private struct PickedVideoFile: Transferable {
     /// 「下载管理」行进 DownloadsView（正在下载进度 / 已下载点播 / 左滑删除）；
     /// 摘要实读下载清单（已下载 N 首 · X MB），下载不设会员/登录门，
     /// 返回什么音质就下什么、显示实际下载音质。
-    /// 位置在播放页排版之前、本地音乐之后；不占「音乐与音质」的位置
+    /// 位置在本地音乐之后；不占「音乐与音质」的位置
     ///（那个分区是音质替换工的 musicQualitySection，不抢）。
     private var storageDownloadSection: some View {
         sectionCard(title: "存储与下载",
@@ -735,40 +734,15 @@ private struct PickedVideoFile: Transferable {
         }
     }
 
-    // MARK: - 5. 播放页排版
-
-    private var nowLayoutSection: some View {
-        sectionCard(title: "播放页排版", note: "选一种立刻生效，只改播放页；不喜欢就点「默认」。") {
-            ForEach(SettingsStore.nowLayouts, id: \.id) { layout in
-                Button(action: { settings.nowLayout = layout.id }) {
-                    HStack {
-                        rowLabel(layout.name, hint: layout.desc)
-                        Spacer()
-                        if settings.nowLayout == layout.id {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(LiziTokens.ink2)
-                        }
-                    }
-                }
-                .buttonStyle(.plain)
-            }
-            Text("选择已保存（lizi.now.layout），进播放页即按版式重排（02/04/06 各改什么见播放页文件头对照表）。")
-                .font(.liziBody(size: LiziTokens.size13))
-                .foregroundColor(LiziTokens.ink3)
-            // r31-settings-sections：LRCLIB 歌词兜底开关挪进下面的
-            // 「歌词显示」分区（键与默认值不动，这里只留版式）。
-        }
-    }
 
     // MARK: - 5c. 歌词显示（r31-settings-sections）
     //
     // 只归类现有歌词显示设置，不新增歌词功能：
-    // - LRCLIB 歌词兜底：原在播放页排版区，逐字挪过来（键
+    // - LRCLIB 歌词兜底：原在播放页排版区（该区 r35-6 已删），逐字挪过来（键
     //   `lizi.lrclib.enabled`、默认开、hint 文案都不动）；
     // - 形态歌词三档：原 5b 独立分区（r25 #31），整节并进来
     //   （Picker 与说明文案都不动，只改形态里显示的字）。
-    // 位置 = 原 5b 形态歌词的位置（播放页排版区之后、外观区之前），
+    // 位置 = 原 5b 形态歌词的位置（外观区之前），
     // 其他分区顺序不动。
     private var lyricsSection: some View {
         sectionCard(title: "歌词显示", note: "只改歌词显示方式；官方歌词优先，没有歌词时不编歌词。") {
@@ -794,7 +768,7 @@ private struct PickedVideoFile: Transferable {
     //
     // 120Hz 高刷新率开关 + 动画插图（原在外观区，逐字挪过来，键
     // `lizi.animatedArtwork`、默认开、hint 文案都不动）。
-    // 位置 = 外观区之前（播放页排版/歌词显示之后），其他分区顺序不动。
+    // 位置 = 外观区之前（歌词显示之后），其他分区顺序不动。
     // 120Hz 开关控运行时帧率：开 = 两处 CADisplayLink 上限 120，
     // 关 = 上限 60（SettingsStore.frameRateRange()）；plist 的
     // CADisableMinimumFrameDurationOnPhone 是编译期解锁，运行时关不掉，

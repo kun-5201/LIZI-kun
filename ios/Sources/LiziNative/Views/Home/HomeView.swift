@@ -212,6 +212,23 @@ import UIKit
 /// homeBottomPad 公式 +8pt 越过量改 −2pt，最大滚动量把面板顶送到
 /// 顶栏下沿之下 2pt 即停，不再多滑出空白；横屏仍 50、不变。
 /// （r35-5 起这条作废，见下。）
+/// r35-3（用户 2026-11-21 18:36「新增搜索之后播放的歌单列表」；18:37 补
+/// 「卡片形式一直从左到右滑动」，18:40 更正为「向左滚，跟首页跑马带同方向」；
+/// 18:49 用户又说「正在播放也是放到今日推荐里面，而不是单独做一个出来」，
+/// 18:51 更正：18:49 那句说的不是首页 Hero，是搜索这件——搜完点歌播起来后，
+/// 正在播放的歌单列表放在今日推荐面板里面，而不是单独另做一个独立的歌单
+/// 页面/独立卡片；首页 Hero 大卡、两卡拖动一律不动，18:49 的首页改动作废）：
+/// 模型：PlaybackStore.queueTitle（@Published，只在内存里，不写 UserDefaults、
+/// 不进「我的歌单」）+ setQueue 可选标题参数（默认 nil，其他调用点不动）；
+/// 搜索点歌传「搜索：\(query)」。呈现：队列面板恢复原样（List），歌单带放在
+/// 今日推荐面板顶上一块（dailyPanel 的 searchQueueBlock）：标题行（歌单名 +
+/// 共 N 首）+ 横排卡片跑马带，直接复用首页 RailMarqueeView / RailMarqueeDriver
+/// （另起一个驱动实例，卡宽 96 紧凑档，速度跟首页跑马带走），当前播的高亮
+/// （RailMarqueeCard.isCurrent，rail 各栏默认 false、渲染不动），点卡切歌
+/// （store.play(queueItem:)，按 queueId 定位）。面板封顶有这块时抬高 184，
+/// 不然每日内容的底边会被裁掉。搜新词点新歌时 setQueue 整队替换，标题与
+/// 带子一起换成新的；切到别的歌单点歌、清空队列时标题消失、块跟着消失。
+/// 驱动见 verification/r35.cjs §J。
 /// r35-4（用户 2026-11-21 18:42「修复这个下面卡片无法滑到顶部的问题」，
 /// 澄清是下面每日推荐那张卡片；18:43 补「要能把上面正在播放的卡片拖消失」）：
 /// 分界手柄往上拖，Hero 高一路收到 0（整张消失），面板顶到内容顶
@@ -252,6 +269,14 @@ struct HomeView: View {
     /// `.id(viewModel.selectedSource)` 只重建 sourceContent，驱动不重建，
     /// 切来源后带子接着滚（offset 不归零、不重停 2.5s，见 `noteContentChanged`）。
     @StateObject private var railMarqueeDriver = RailMarqueeDriver()
+    /// r35-3：搜索歌单卡片带的驱动（`RailMarqueeDriver` 的第二个实例）：
+    /// 搜完点歌后，正在播放的搜索歌单以卡片带占今日推荐面板顶上一块
+    /// （见 dailyPanel 的 searchQueueBlock）。不用 railMarqueeDriver
+    /// 共用——驱动只存一份 offsetX/setWidth，两条带子内容宽度不同会
+    /// 抢 setWidth；各用各的实例，互不干扰。没搜过歌时这条带子不出现，
+    /// 驱动空转（setWidth 恒为 0，linkFired 每帧直接返回，与 rail 驱动
+    /// 平时待机同款开销）。
+    @StateObject private var searchQueueMarqueeDriver = RailMarqueeDriver()
     /// 本地音乐区块显示开关（#48：键与 `SettingsStore.localMusicShown`
     /// 同键 `lizi.local.show`，默认开；@AppStorage 直接监听 UserDefaults
     /// 变化，设置页拨开关后回首页即生效，不依赖 SettingsStore 实例）。
@@ -403,7 +428,11 @@ struct HomeView: View {
             // 横屏面板 140 本来就小于内容高，封顶不触发。拖大 Hero 后面板按
             // split 收缩（低于封顶），不受封顶影响；拖小 Hero 后面板停在封顶，
             // 余下是本地音乐，不留空。
-            let panelContentH: CGFloat = flatCard + 217
+            // r35-3：有搜索歌单块时封顶跟着抬高 184（标题行约 20 + 间距 8 +
+            // 带 96+52 = 176，再加块与条之间的间距 8），不然每日内容的底边
+            // （提示行）会被裁掉。没搜过歌时封顶不动。
+            let searchBeltExtraH: CGFloat = (playback.queueTitle != nil && !playback.queue.isEmpty) ? 184 : 0
+            let panelContentH: CGFloat = flatCard + 217 + searchBeltExtraH
             let panelH = min(contentH - heroH, panelContentH)
             let blockW = outer.size.width - 32
             VStack(spacing: 0) {
@@ -648,6 +677,13 @@ struct HomeView: View {
     ) -> some View {
         // r23h：条钉在面板顶，见本函数头注释。
         VStack(spacing: 8) {
+            // r35-3：搜完点歌后，正在播放的搜索歌单占面板顶上一块（卡片带，
+            // 见 searchQueueBlock）。不是独立页面、不是独立卡片——就是
+            // 面板里的一块；没搜过歌时（queueTitle 为 nil）不出现，面板
+            // 与原来一字不差。条仍在块下面，钉住不动。
+            if playback.queueTitle != nil, !playback.queue.isEmpty {
+                searchQueueBlock(isDark: panelTone.isDark)
+            }
             // r28 tone-aware：平台条标题/搜索/选中圈跟专辑取色深场走白字、浅场走墨色。
             // r30：点标题弹来源小菜单（壳版 #hall-src-menu 思路）。
             PlatformStripView(
@@ -687,6 +723,57 @@ struct HomeView: View {
             if sourceMenuShown {
                 sourceMenuOverlay
             }
+        }
+    }
+
+    /// r35-3：正在播放的搜索歌单块（今日推荐面板顶上一块）：标题行
+    /// （歌单名 + 共 N 首）+ 横排卡片跑马带。
+    /// 带子直接复用首页 `RailMarqueeView` / `RailMarqueeDriver`（另起一个
+    /// 驱动实例 `searchQueueMarqueeDriver`，见上），卡宽 96 紧凑档，
+    /// 速度跟首页跑马带走（`viewModel.marqSpeedPxPerSecond`，默认 24px/s，
+    /// 向左自动滑、滑到头循环、拖动暂停松手 1.2s 恢复——全是首页那套，
+    /// 一行不用改）；当前播的高亮（`RailMarqueeCard.isCurrent`），
+    /// 点卡切歌（`store.play(queueItem:)`，按 queueId 定位）。
+    /// 面板是定高窗：块高 = 标题行约 20 + 间距 8 + 带 96+52 = 176，
+    /// 封顶跟着抬 184（见 body 里 panelContentH），底边不裁；
+    /// Hero 拖大、面板缩小时，块在顶上不动，下面的每日内容先被裁
+    /// （面板定高窗的老规矩）。
+    private func searchQueueBlock(isDark: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(playback.queueTitle ?? "")
+                    .font(.liziBody(size: LiziTokens.size16, weight: .semibold))
+                    .foregroundColor(isDark ? .white : LiziTokens.ink)
+                    .lineLimit(1)
+                Spacer()
+                Text("共 \(playback.queue.count) 首")
+                    .font(.liziBody(size: LiziTokens.size13))
+                    .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
+            }
+            RailMarqueeView(
+                cards: searchQueueCards,
+                cardWidth: 96,
+                isDark: isDark,
+                driver: searchQueueMarqueeDriver,
+                speed: viewModel.marqSpeedPxPerSecond
+            )
+            .frame(height: 96 + 52)
+        }
+    }
+
+    /// 搜索歌单带的卡片：队列原样映射（SearchView 传什么 list，
+    /// setQueue 就立什么 list，这里不另拼）；当前播的下标打 isCurrent；
+    /// 点卡按 queueId 切歌（重复曲目点第几张播第几张）。
+    private var searchQueueCards: [RailMarqueeCard] {
+        playback.queue.enumerated().map { index, item in
+            RailMarqueeCard(
+                id: item.queueId,
+                coverURL: item.track.coverURL,
+                title: item.track.title.isEmpty ? "未知标题" : item.track.title,
+                subtitle: item.track.artist.isEmpty ? item.track.platform : item.track.artist,
+                isCurrent: index == playback.currentIndex,
+                onTap: { playback.play(queueItem: item) }
+            )
         }
     }
 
@@ -1162,6 +1249,9 @@ struct HomeView: View {
         var coverURL: URL?
         var title: String
         var subtitle: String
+        /// r35-3：是不是当前在播的那首（搜索歌单带用，见 searchQueueCards；
+        /// rail 各栏不传，默认 false，渲染与原来一字不差）。
+        var isCurrent: Bool = false
         var onTap: () -> Void
     }
 
@@ -1482,9 +1572,16 @@ struct HomeView: View {
                     coverArt
                         .frame(width: width, height: width)
                         .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
+                        // r35-3：当前在播的卡高亮（封面 accent 描边 + 歌名 accent
+                        // 加粗）；isCurrent 为 false 时描边透明、歌名原色，
+                        // rail 各栏的渲染与原来一字不差。
+                        .overlay(
+                            RoundedRectangle(cornerRadius: LiziTokens.radius10)
+                                .stroke(card.isCurrent ? LiziTokens.accent : Color.clear, lineWidth: 2)
+                        )
                     Text(card.title)
-                        .font(.liziBody(size: LiziTokens.size16, weight: .medium))
-                        .foregroundColor(isDark ? .white : LiziTokens.ink)
+                        .font(.liziBody(size: LiziTokens.size16, weight: card.isCurrent ? .semibold : .medium))
+                        .foregroundColor(card.isCurrent ? LiziTokens.accent : (isDark ? .white : LiziTokens.ink))
                         .lineLimit(1)
                     Text(card.subtitle)
                         .font(.liziBody(size: LiziTokens.size14))
@@ -1494,6 +1591,7 @@ struct HomeView: View {
                 .frame(width: width, alignment: .leading)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(card.isCurrent ? "正在播放 \(card.title)" : card.title)
         }
 
         @ViewBuilder

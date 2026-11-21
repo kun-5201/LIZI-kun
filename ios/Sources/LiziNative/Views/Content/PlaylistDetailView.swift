@@ -102,9 +102,9 @@ struct PlaylistDetailView: View {
                             dailyTracks: playlist.tracks,
                             marqueeSpeed: 24,
                             tier: PlayerTokens.sizeTier(for: UIScreen.main.bounds.size, topInset: 0),
+                            screenWidth: geo.size.width, // r38-fix ⑧/⑨-3：实测宽，不回落旧分档
                             panelIsDark: false,
-                            hideEntryHint: true,
-                            screenWidth: geo.size.width // r38-fix ⑧/⑨-3：实测宽，不回落旧分档
+                            hideEntryHint: true
                         )
                         .padding(.horizontal, 16)
                         .padding(.top, 12)

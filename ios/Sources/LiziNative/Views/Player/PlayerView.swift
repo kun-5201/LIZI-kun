@@ -294,7 +294,7 @@ struct PlayerView: View {
                 // 最底部细进度条；底部留 Home Indicator 安全区（有 34，无 0）。
                 // r27 压缩：compact 档 dock 上间距 8 → 4（省 4pt，见文件底
                 // r27 段落）；其余档 8 不动。dock 只在默认版式用，变体不动。
-                PlayerBottomDock(tier: tier, width: contentWidth, albumTone: playerTone, shortSide: shortSide, onOpenQueue: { showQueue.toggle() }) // r38-4：竖屏底部三排接专辑 tone；r38-5：图标大小按短边换算
+                PlayerBottomDock(tier: tier, width: contentWidth, onOpenQueue: { showQueue.toggle() }, albumTone: playerTone, shortSide: shortSide) // r38-4：竖屏底部三排接专辑 tone；r38-5：图标大小按短边换算
                     .frame(width: contentWidth)
                     .padding(.top, tier == .compact ? 4 : 8)
             }
@@ -1079,7 +1079,7 @@ struct PlayerView: View {
             // r38-4：专辑 tone 直传，竖屏歌词当前行/翻译行按专辑换色。
             LyricsZoneView(tier: tier, albumTone: albumTone)
             if showQueue {
-                QueuePanelView(albumTone: playerTone, onClose: { showQueue = false }) // r38-fix ④-1：队列面板接专辑 tone
+                QueuePanelView(onClose: { showQueue = false }, albumTone: playerTone) // r38-fix ④-1：队列面板接专辑 tone
             }
         }
         // SwiftUI 没有 frame(width:minHeight:maxHeight:) 这一重载，

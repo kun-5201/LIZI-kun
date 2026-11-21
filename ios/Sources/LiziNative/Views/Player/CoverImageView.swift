@@ -21,6 +21,9 @@ struct CoverImageView: View {
         ProxyImageView(url: url) { placeholder }
     }
 
+    // r33 修：if/else 两支类型不同（DefaultCoverArt vs ZStack），普通 some View
+    // 算属性编不过（run 44857131300 构建失败）——加 @ViewBuilder 走 _ConditionalContent。
+    @ViewBuilder
     private var placeholder: some View {
         if darkPlaceholder {
             DefaultCoverArt(iconSize: placeholderIconSize)

@@ -254,7 +254,9 @@ final class AppleMusicService {
     /// catalogSearch 同款要求）；已贴的正式开发者 token 多一个 Origin 头
     /// 不受影响。
     private func verifyDevToken(_ candidate: String? = nil) async -> Bool? {
-        let token = candidate ?? await catalogToken()
+        // r33 修：右操作数里放 await 编不过（run 44857131300 构建失败）——先 if/else 取 token。
+        let token: String
+        if let candidate { token = candidate } else { token = await catalogToken() }
         guard !token.isEmpty,
               let url = URL(string: "https://api.music.apple.com/v1/catalog/tw/songs/\(Self.catalogSongId)") else { return nil }
         do {

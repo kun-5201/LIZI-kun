@@ -850,10 +850,10 @@ final class PlaybackStore: ObservableObject {
             self.currentLyricIndex = LyricsParser.currentLineIndex(lines: parsed.lines, atMs: 0)
         }
 
-        // r29 task 1：Apple Music 全曲播放（条件：applemusic + Apple ID
-        // 已登录 + 订阅有效 + store id 非空；readyForFullPlayback 里
-        // 订阅缓存过期时先现验一次，重启后也能直接播整首）。起播成功
-        // 直接 return，不走 30 秒试听链；失败（起播失败等）回落到现有
+        // r29 task 1：Apple Music 全曲播放（条件：applemusic + 订阅有效 +
+        // store id 非空；readyForFullPlayback 里订阅先查本机能力
+        // .musicCatalogPlayback，查不到才走服务端 vip——r34 起登录态不再是
+        // 硬门槛）。起播成功直接 return，不走 30 秒试听链；失败（起播失败等）回落到现有
         // resolveURL → AVPlayer 试听流程，绝不崩、绝不卡在 isLoading。
         // r30（D2 限流）：AM 分支只在 Apple Music 平台才进——非 AM 的歌
         // 连 readyForFullPlayback 都不调；停 AM 引擎也只在上一首真走

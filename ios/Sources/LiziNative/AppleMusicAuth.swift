@@ -41,6 +41,10 @@ import StoreKit
 /// 订阅校验走后端现成的 verifyUserToken（GET /v1/me/library/songs 200 =
 /// 订阅有效），本文件只调 `NativeBridge.call("/api/applemusic/status")`
 /// 读 `vip`，不自己发 catalog 请求。
+/// r34：订阅校验改成本机能力优先——SKCloudServiceController.requestCapabilities
+/// → .musicCatalogPlayback 是本机能不能播整首的权威答案（本机判断，不走
+/// 服务器、不耗 token）；查不到（出错）时才走后端 status 的 vip 兜底。
+/// 起播准入不再硬要 user token（本机能力确认有订阅时，token 丢了也能播整首）。
 ///
 /// VM 上没有 Apple ID、没有订阅、没有真机：登录与整首播放的真机验证只能
 /// 由用户在手机上做（见 verification/r29-task1.cjs 末尾的真机清单）。
@@ -61,6 +65,9 @@ final class AppleMusicAuth {
     private(set) var subscriptionValid = false
     private var subscriptionVerifiedAt: Date = .distantPast
     private static let subscriptionCacheTTL: TimeInterval = 300
+
+    /// 本机目录播放能力缓存（r34）：SKCloudServiceController.requestCapabilities
+    /// → .musicCatalogPlayback。nil = 没查过 / 上次出错（错误不缓存，下次重查）。
 
     /// 内存里缓存的 user token（与 UserDefaults 同步；登出时两边一起清）。
     private var cachedUserToken: String?
@@ -252,9 +259,48 @@ final class AppleMusicAuth {
 
     // MARK: - 订阅校验
 
-    /// 验订阅（调后端 /api/applemusic/status 读 vip；300 秒内复用缓存）。
-    /// 没 user token 直接回 false，不发请求。
+    /// 本机能不能播 Apple Music 整首目录（r34）：StoreKit 能力查询，本机判断。
+    /// requestCapabilities → capabilities 含 .musicCatalogPlayback = 该设备
+    /// 的 Apple ID 有订阅、可播目录。这是 applicationMusicPlayer 能不能出声
+    /// 的权威答案——不依赖服务端 /v1/me/library/songs（网页 token 在 library
+    /// 端点上从没验过；r33 只验过 catalog 端点 200）。本地 IPC 调用，无网络、
+    /// 不耗 token、不弹框；出错回 nil（不定论），调用方走服务端兜底。
+    /// 300 秒内复用缓存（与订阅缓存同 TTL；错误结果不缓存，下次重查）。
+    func hasCatalogPlayback() async -> Bool? {
+        if let cached = catalogPlaybackCapable,
+           Date().timeIntervalSince(catalogPlaybackCheckedAt) < Self.subscriptionCacheTTL {
+            return cached
+        }
+        let result: Bool? = await withCheckedContinuation { cont in
+            SKCloudServiceController().requestCapabilities { caps, error in
+                if let error {
+                    DiagLog.shared.recordPlaybackStep("am capabilities error=\(error.localizedDescription)")
+                    cont.resume(returning: nil)
+                    return
+                }
+                let capable = caps.contains(.musicCatalogPlayback)
+                DiagLog.shared.recordPlaybackStep("am capabilities musicCatalogPlayback=\(capable)")
+                cont.resume(returning: capable)
+            }
+        }
+        if let result {
+            catalogPlaybackCapable = result
+            catalogPlaybackCheckedAt = Date()
+        }
+        return result
+    }
+
+    /// 验订阅（r34：本机能力优先，服务端兜底；300 秒内复用缓存）。
+    /// 先查本机能力：能播目录就直接算订阅有效（系统播放器认的是设备订阅，
+    /// 不是我们存的 user token；token 丢了——比如重装——也不该把有订阅的
+    /// 用户挡在试听外）。本机能力查不到（出错）时才走老路：调后端
+    /// /api/applemusic/status 读 vip（没 user token 直接回 false，不发请求）。
     func verifySubscription() async -> Bool {
+        if let capable = await hasCatalogPlayback() {
+            subscriptionValid = capable
+            subscriptionVerifiedAt = Date()
+            return capable
+        }
         guard !userToken.isEmpty else { return false }
         if Date().timeIntervalSince(subscriptionVerifiedAt) < Self.subscriptionCacheTTL {
             return subscriptionValid
@@ -268,12 +314,12 @@ final class AppleMusicAuth {
     }
 
     /// 整首播放准入（PlaybackStore.playCurrent 起播前调）：applemusic +
-    /// 已登录 + 订阅有效 + store id 非空；订阅缓存过期时先现验一次
-    /// （重启后内存缓存是空的，不现验就永远播不了整首）。
+    /// store id 非空 + 订阅有效（verifySubscription：本机能力优先，服务端兜底）。
+    /// r34：登录态不再是硬门槛——本机能力确认有订阅时，没有 user token
+    /// 也能播整首（系统播放器认设备订阅；token 丢了也不该挡在试听外）。
     /// 任一条件不满足回 false，调用方走现有 30 秒试听链，行为与现在一致。
     func readyForFullPlayback(track: Track) async -> Bool {
         guard track.platform == "applemusic" else { return false }
-        guard isLoggedIn else { return false }
         guard !Self.storeID(for: track).isEmpty else { return false }
         return await verifySubscription()
     }
@@ -289,6 +335,8 @@ final class AppleMusicAuth {
         UserDefaults.standard.removeObject(forKey: Self.userTokenKey)
         subscriptionValid = false
         subscriptionVerifiedAt = .distantPast
+        catalogPlaybackCapable = nil
+        catalogPlaybackCheckedAt = .distantPast
         DiagLog.shared.recordPlaybackStep("am signout user token cleared (memory + UserDefaults)")
     }
 }

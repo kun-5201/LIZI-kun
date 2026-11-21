@@ -759,13 +759,14 @@ struct HomeView: View {
     /// 在面板里竖滑，ScrollView 的偏移会把条顶出窗外、再也滑
     /// 不回来（07:09 真机：条 + chips 全没了、环还在）；钉在外面后偏移
     /// 再怎么变也顶不走它。
-    /// 真机风险：面板内竖滑与环的上滑展开手势竞争——环的展开用 UIKit
+    /// 真机风险：面板内竖滑与环的横向拖动展开手势竞争（r40：上滑开环已删，
+    /// 改回 r24 横向拖动开环）——环的展开用 UIKit
     /// pan recognizer（见 HomeCoverRingView，r21 教训后不再用 SwiftUI
     /// DragGesture），它与外层 ScrollView 竖滑共存；现在多了一层面板内
     /// ScrollView，展开手势是否仍优先，要真机验（见清单 D19）。
-    /// r39-5：第 5 件——环的触发改回壳版（上滑开环、下滑交还 ScrollView、
-    /// 横向手滚跑马带；r24 的横向拖动开环作废）。r30：面板内容区竖滑不再切栏
-    /// （分页器已撤），竖滑归外层 ScrollView 滚整页、上滑开环、
+    /// r40：环的触发改回 r24（横向拖动开环，竖向拖动交还 ScrollView；
+    /// r39-5 的上滑开环 + 横向手滚跑马带作废）。r30：面板内容区竖滑不再切栏
+    /// （分页器已撤），竖滑归外层 ScrollView 滚整页、横向拖动开环、
     /// 点按播歌/进详情；横屏面板只有约 140 高，条占掉大半后 rail 栏
     /// 只剩约一行的位置，「查看全部」进整页看全量，
     /// 见 `RailSourceListView`（原 `HomeRailPageView`）的文件头注释。
@@ -830,7 +831,7 @@ struct HomeView: View {
             // r31：列表行改成与每日带同款的横向卡片跑马带，见 RailSourceListView
             // 文件头注释）。
             // 来源切换不走翻页手势：菜单点选即切；面板内竖滑归外层
-            // ScrollView 滚整页，上滑开环、横滑手滚跑马带（r39-5：第 5 件，改回壳版）。
+            // ScrollView 滚整页，横向拖动开环（r40，改回 r24）。
             sourceContent(tier: tier, screenWidth: screenWidth)
                 .id(viewModel.selectedSource)
                 .transition(.opacity)

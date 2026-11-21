@@ -29,7 +29,9 @@ import UIKit
 /// 壳版依据：public/m/ring.js（MobileRing）+ public/m/ring.css。运动模型
 /// 原样照搬，只改视频里能量出来的两个尺寸（环卡、平面卡见下表）：
 /// 平面带：MARQUEE_SPEED=24、松手 1200ms 后恢复、初画停 2.5s；
-/// 开环：上滑（|dy|>|dx|×1.25 且 dy<0，超 10px），横向拖动只滚带；
+/// 开环（r40：改回 r24）：平面带上横向拖动就开环（10px 内不判方向；
+/// 竖向占优 |dy|>|dx|×1.25 才交还 ScrollView，上/下都一样）；
+/// r39-5 的上滑开环 + 横向手滚跑马带已删。
 /// 圆柱：pitch=卡宽×1.14（壳版；r35 前 r31 的「视频实测 pitch≈卡宽」
 /// 已作废，见下 r35），R 取弦长公式；透视 P=3.2R；相机 translateZ(-R) rotateX(-5°)；
 /// 拖动：每像素 180/(πR)×1.45 度；角速度取最近 110ms 采样，限幅
@@ -617,9 +619,10 @@ import UIKit
 /// 0 = 调用方没传，回落旧 tier 分档（环卡 141/149/164、step 40°、R 弦长公式）。
 /// 平面卡宽不动（r38-8 的 ⌊(带宽−2×16)/3⌋ 与横屏封顶 100pt 不搬，
 /// flatCard 仍是 tier 分档 180/190/209）。
-/// 触发改回壳版（r38-fix ⑨-1）：平面带上滑开环（|dy|>|dx|×1.25 且 dy<0，
-/// 超 10px）、下滑交还 ScrollView、横向手滚跑马带（flatOffsetX 1:1 跟手，
-/// 不弹环）；r24 的横向拖动开环作废。平时跑马带 24px/s 自动向左走；
+/// 触发（r40：改回 r24）：平面带横向拖动开环（10px 内不判方向；
+/// 竖向占优 |dy|>|dx|×1.25 才交还 ScrollView，上/下都一样）；
+/// r39-5 的上滑开环 + 横向手滚跑马带（flatOffsetX 1:1 跟手）作废。
+/// 平时跑马带 24px/s 自动向左走；
 /// 拖动转环、松手惯性 + 弹簧吸附、点卡播歌、点空白/松手 1s 后收回、
 /// facing ≤0.06 藏 / 0.06–0.30 smoothstep 淡出一律不动。
 /// 点中的环卡整体上抬 6pt（0.18s 动画，`selectedRingIndex`，与平带卡
@@ -632,14 +635,15 @@ import UIKit
 /// 只有一张卡时不转（angle 钉 0、直接排 1s 收回，壳版 releaseRing n≤1 分支）；
 /// 收回时覆盖层透明度与 closeT 同曲线（timingCurve(0.32, 0, 0.67, 0)，
 /// 壳版 1 − easeInCubic(closeT)；旧 .easeOut 先快后慢、与壳版反向）。
-/// 入口提示改回上滑（「上滑展开 3D 环 · 拖动旋转」，arrow.up 图标）。
+/// 入口提示（r40：改回横向拖动口径，「左右拖动展开 3D 环 · 拖动旋转」，
+/// arrow.left.and.right 图标；旧的上滑口径已删）。
 
 // MARK: - 状态机
 
 /// 首页环的状态机：平面跑马带 + 全屏圆环共用一份。
 ///
-/// 手势入口有两处（同一根手指可以不断开）：平面带上的上滑（展开后继续拖
-/// 就是转环，壳版 enterRing 同款）与覆盖层上的直接拖动；两处都调
+/// 手势入口有两处（同一根手指可以不断开）：平面带上的横向拖动（展开后继续拖
+/// 就是转环，r24 同款）与覆盖层上的直接拖动；两处都调
 /// `ringDragStart` / `ringDragMoved` / `ringDragEnded`。
 @MainActor
 final class HomeCoverRingModel: ObservableObject {
@@ -1260,10 +1264,9 @@ final class HomeCoverRingModel: ObservableObject {
     // MARK: 平面带触摸状态机（壳版 ring.js onPressMove strip 分支，
     // 由 StripTouchView 的 UIPanGestureRecognizer 驱动；x/y 均为平面带本地坐标）
 
-    /// 平面带触摸的移动结果：`.failGesture` = 竖向占优且下滑，
-    /// 识别器自毁、把手势交还 ScrollView（ring.js「下滑 = 交还页面」同款；
-    /// r39-5：第 5 件——改回壳版 onPressMove，上滑开环、下滑交还、横向手滚跑马带，
-    /// r24 那版（横向拖动开环）作废，见 stripTouchMoved）。
+    /// 平面带触摸的移动结果：`.failGesture` = 竖向占优（上滑/下滑都交还），
+    /// 识别器自毁、把手势交还 ScrollView（r24「竖向 = 交还页面」同款；
+    /// r40：上滑开环已删，改回 r24 横向拖动开环，见 stripTouchMoved）。
     enum StripMoveOutcome {
         case handled
         case failGesture
@@ -1283,19 +1286,17 @@ final class HomeCoverRingModel: ObservableObject {
         )
     }
 
-    /// 手指移动（pan .changed；r39-5：第 5 件——改回壳版 ring.js onPressMove
-    /// strip 分支，r24 那版「横向开环、上/下都交还」作废）：
+    /// 手指移动（pan .changed；r40：删掉上滑开环，改回 r24「横向开环、
+    /// 上/下都交还」；r39-5 的壳版 onPressMove strip 分支作废）：
     /// - 环已开（同一根手指）：环拖动还没走出 5px 之前，下滑 >90px 且
     ///   竖向占优 → 收回（ring.js onPressMove ring 分支「明显向下滑 =
     ///   退出环」；5px 死区是 RING_THRESHOLD）；否则继续转环。
     /// - 环没开：10px 内不判方向（ring.js DRAG_THRESHOLD=10）；
-    ///   竖向占优（|dy|>|dx|×1.25）：向上滑（dy<0）→ 开环（锚点 = 手指下
-    ///   最近的卡，ring.js nearestFlatIdx；手指不抬起继续拖就是转环，
-    ///   ring.js enterRing 同款语义）；向下滑 → `.failGesture`
-    ///   （识别器自毁，ScrollView 接管滚页面；ring.js「下滑 = 交还页面」）。
-    /// - 横向拖动 → 手滚跑马带（flatOffsetX 1:1 跟手，ring.js
-    ///   `flat.scroll -= stepDx` 同款，符号已按原生 offset 换算），不弹环；
-    ///   判向时阈值内的位移也算进去（壳版 prevX = x0 同款）。
+    ///   竖向占优（|dy|>|dx|×1.25）：上滑/下滑都 → `.failGesture`
+    ///   （识别器自毁，ScrollView 接管滚页面；r24「竖向 = 交还页面」）。
+    /// - 其余（非竖向占优）一律横向拖动 → 开环（锚点 = 手指下最近的卡，
+    ///   ring.js nearestFlatIdx；手指不抬起继续拖就是转环，
+    ///   ring.js enterRing 同款语义）。
     func stripTouchMoved(x: CGFloat, y: CGFloat) -> StripMoveOutcome {
         flatLastStripActivity = Date() // r34：活拖动每步都刷新，看门狗不误清
         if ringPhase == .open {
@@ -1323,31 +1324,16 @@ final class HomeCoverRingModel: ObservableObject {
         if press.decided == .undecided {
             if hypot(dx, dy) < Self.dragThreshold { return .handled }
             if abs(dy) > abs(dx) * 1.25 {
-                // r39-5：第 5 件——竖向占优——上滑开环，下滑交还页面（壳版同款）。
-                if dy < 0 {
-                    let anchor = anchorNearestFlatCard(x: x)
-                    openRing(anchor: anchor, atX: x, atY: y)
-                    press.decided = .openedRing
-                    stripPress = press
-                    return .handled
-                }
+                // r40：竖向占优——上滑/下滑都交还 ScrollView，上滑开环已删（改回 r24）。
                 press.decided = .handedToScroll
                 stripPress = press
                 return .failGesture
             }
-            // r39-5：第 5 件——横向拖动只是手滚跑马带，不弹环（壳版同款）；
-            // 第一下把阈值内的位移也算进去，之后 1:1 跟手。
-            press.decided = .scrollingFlat
-            press.prevX = press.startX
-            stripPress = press
-        }
-        if press.decided == .scrollingFlat {
-            // r39-5：第 5 件——壳版 `flat.scroll -= stepDx` 的原生换算——
-            // 卡片 x = j·pitch − scroll，手指右移卡片跟右移；原生带子
-            // 偏移就是 flatOffsetX，故 flatOffsetX += stepDx，再归一化。
-            let stepDx = x - press.prevX
-            press.prevX = x
-            flatOffsetX = normalizedFlat(flatOffsetX + stepDx)
+            // r40：其余（非竖向占优）一律横向拖动——开环（锚点 = 手指下最近的卡；
+            // 手指不抬起继续拖就是转环，r24 同款；r39-5 的横向手滚跑马带已删）。
+            let anchor = anchorNearestFlatCard(x: x)
+            openRing(anchor: anchor, atX: x, atY: y)
+            press.decided = .openedRing
             stripPress = press
             return .handled
         }
@@ -1372,9 +1358,8 @@ final class HomeCoverRingModel: ObservableObject {
 
     // MARK: 开环 / 收回
 
-    /// 开环（r39-5：第 5 件——入口只剩一处——平面带上滑 stripTouchMoved，
-    /// 改回壳版 onPressMove；入口按钮点按已删；横向拖动不再开环，
-    /// 改手滚跑马带）。
+    /// 开环（r40：入口只剩一处——平面带横向拖动 stripTouchMoved，改回 r24；
+    /// 入口按钮点按已删；上滑开环已删，竖向拖动交还 ScrollView）。
     /// - `beginDrag: true`（平面带横向拖动）：展开这根手指不用抬起，直接记为
     ///   拖动起点，继续拖就是转环（ring.js enterRing 同款；同一根手指的后续移动
     ///   由平面带的 `StripTouchView` 接着转发，不走覆盖层新挂的手势）。
@@ -2019,22 +2004,18 @@ final class HomeCoverRingModel: ObservableObject {
     }
 }
 
-/// 平面带按压判定（r39-5：第 5 件——改回壳版：四种——没判向、已开环、
-/// 已交还 ScrollView、横向手滚跑马带；r24 删掉的 `.scrollingFlat`
-/// （横向手滚）与上滑开环一并恢复）。
+/// 平面带按压判定（r40：三种——没判向、已开环、已交还 ScrollView；
+/// r39-5 的 `.scrollingFlat`（横向手滚跑马带）随横向拖动开环恢复而删掉，
+/// 上滑开环一并删掉，改回 r24）。
 struct StripPress {
     var startX: CGFloat
     var startY: CGFloat
     var decided: StripDecision
-    /// 手滚跑马带时的上一帧手指 x（壳版 onPressMove 的 p.prevX；
-    /// 判向那一下置为 startX，阈值内的位移也算进去，之后 1:1 跟手）。
-    var prevX: CGFloat
 
     init(startX: CGFloat, startY: CGFloat, decided: StripDecision) {
         self.startX = startX
         self.startY = startY
         self.decided = decided
-        self.prevX = startX
     }
 }
 
@@ -2042,7 +2023,6 @@ enum StripDecision {
     case undecided
     case openedRing
     case handedToScroll
-    case scrollingFlat // r39-5：第 5 件——横向手滚跑马带（壳版 flat.scroll 同款）
 }
 
 // MARK: - 平面带（常态）
@@ -2084,8 +2064,8 @@ struct HomeCoverRingView: View {
     /// 不显示歌名；占位只在封面未显示时出现，不变常驻标题。
     /// 无封面 URL 的曲目永远无图可显，占位标题会一直显示（唯一能认出歌的办法）。
     var coverOnly = false
-    /// r36（用户 21:44）：榜单详情那路不显示入口提示行（「上滑展开 3D 环 ·
-    /// 拖动旋转」）——详情页下面不加任何提示文字。每日推荐 / 搜索带
+    /// r36（用户 21:44）：榜单详情那路不显示入口提示行（「左右拖动展开 3D 环 ·
+    /// 拖动旋转」，r40 改口径）——详情页下面不加任何提示文字。每日推荐 / 搜索带
     /// 那路默认 false，提示行照旧。
     var hideEntryHint = false
     /// r39-5：第 5 件——实测屏宽（调用方传外层 GeometryReader 的 outer.size.width；
@@ -2109,7 +2089,7 @@ struct HomeCoverRingView: View {
             } else {
                 // 平面带 + 入口提示行（r22c）：提示行是环的可见入口
                 // （r28：「展开 3D 环」按钮已删，点按开环不在触发里；
-                // 只留提示文字 + 平面带上滑开环，r39-5：第 5 件改回壳版）。
+                // 只留提示文字 + 平面带横向拖动开环，r40 改回 r24）。
                 // r28：外面一块更深的圆角底（黑 0.18）——39.6s 视频 f_001
                 // 里卡行就在一块比面板再暗一档的圆角底上。
                 VStack(alignment: .leading, spacing: 6) {
@@ -2353,18 +2333,18 @@ struct HomeCoverRingView: View {
         .frame(height: model.flatHeight)
     }
 
-    /// 入口提示行：只剩手势提示文字（「上滑展开 3D 环 · 拖动旋转」），
+    /// 入口提示行：只剩手势提示文字（「左右拖动展开 3D 环 · 拖动旋转」），
     /// 不再有按钮。
-    /// r39-5：第 5 件——触发改回壳版（上滑开环、横向手滚跑马带），提示文字与
-    /// 图标同步改成上滑；r24 那版（横向拖动开环）作废。
+    /// r40：触发改回 r24（横向拖动开环），提示文字与图标同步改回横向；
+    /// r39-5 的上滑开环 + 横向手滚跑马带作废。
     /// r28：「展开 3D 环」按钮已删（点按开环不在触发里）；
-    /// 开环只剩平面带上滑（`stripTouchMoved` → `openRing`），
+    /// 开环只剩平面带横向拖动（`stripTouchMoved` → `openRing`），
     /// 不加替代的提示按钮；颜色跟面板深场走（深场白字，浅场墨字）。
     private var entryHintRow: some View {
         HStack(spacing: 6) {
-            Image(systemName: "arrow.up")
+            Image(systemName: "arrow.left.and.right")
                 .font(.system(size: 10, weight: .semibold))
-            Text("上滑展开 3D 环 · 拖动旋转")
+            Text("左右拖动展开 3D 环 · 拖动旋转")
                 .font(.liziBody(size: LiziTokens.size12))
         }
         .foregroundColor(model.panelIsDark ? .white.opacity(0.75) : LiziTokens.ink3)
@@ -2791,19 +2771,19 @@ private struct RingCardView: View {
 // MARK: - 平面带触摸层（r22c，UIKit）
 
 /// 平面带的触摸层：一个透明 UIView，盖在跑马带卡片上方，接管带子上的
-/// 全部触摸（点按 + 横向滚带 + 上滑开环 + 开环后继续转环）。
+/// 全部触摸（点按 + 横向拖动开环 + 开环后继续转环）。
 ///
 /// 为什么不用 SwiftUI DragGesture（r21 的教训）：带子在竖向 ScrollView 里，
 /// `.simultaneousGesture(DragGesture)` 在真机上拦不住 ScrollView 的竖滑——
-/// 上滑开环的手势会被页面滚动抢走，`openRing` 根本到不了，环打不开。
+/// 竖向拖动的手势会被页面滚动抢走，`openRing` 根本到不了，环打不开。
 /// 壳版的等价物是 `.mstrip { touch-action: none; }`（见 public/m/m.css），
 /// 即带子拥有全部触摸；这里用 UIKit 识别器复刻同一条语义：
 /// - `shouldBeRequiredToFailBy`：ScrollView 的 pan 必须等我们的 pan 先失败
-///   才开始滚页面——横向手滚跑马带与上滑开环由我们接管（r39-5：第 5 件，
-///   改回壳版；r24 那版横向 = 开环作废），页面滚不动；
-/// - 方向判定后是竖向下滑：我们的 pan 自毁（`isEnabled` 开关一次），
-///   ScrollView 接管，页面接着滚（ring.js「下滑 = 交还页面」同款；
-///   上滑开环见模型 `stripTouchMoved`）；
+///   才开始滚页面——横向拖动开环由我们接管（r40：改回 r24；r39-5 的
+///   上滑开环 + 横向手滚跑马带作废），页面滚不动；
+/// - 方向判定后是竖向（上/下都一样）：我们的 pan 自毁（`isEnabled` 开关一次），
+///   ScrollView 接管，页面接着滚（r24「竖向 = 交还页面」同款；
+///   横向拖动开环见模型 `stripTouchMoved`）；
 /// - 同一根手指从按下一路管到开环、转环、松手（壳版 window pointer 监听
 ///   同款），不依赖「覆盖层半路出现后新 DragGesture 能接到旧触摸」。
 ///
@@ -2864,8 +2844,9 @@ final class StripTouchUIView: UIView, UIGestureRecognizerDelegate {
 
     // MARK: 识别器委托
 
-    /// ScrollView 的 pan 必须等我们的 pan 先失败：上滑/横向由我们接管，
-    /// 页面滚不动；只有我们判定为竖向下滑而自毁后，页面才接着滚。
+    /// ScrollView 的 pan 必须等我们的 pan 先失败：横向由我们接管
+    /// （横向拖动开环，r40 改回 r24），页面滚不动；只有我们判定为
+    /// 竖向（上/下）而自毁后，页面才接着滚。
     /// （壳版 `.mstrip { touch-action: none; }` 的 UIKit 等价物。）
     func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,

@@ -17,9 +17,9 @@ import SwiftUI
 /// 见 `HomeRailPage`）：每日推荐 → 精选 → 用户收藏 → 喜欢的歌曲 →
 /// 用户创建的歌单 → 电台。分页器状态（当前栏下标、6 栏顺序、各栏缓存）
 /// 全放本文件；每日推荐那一栏仍走修好的 `loadDaily` 链路（两步守卫、
-/// dailyTask、25s 超时壳一字不动），其余 5 栏首次访问时拉取、之后缓存
-/// （喜欢栏除外：本地星标一点就变，壳版 renderRailNode 同款不缓存，
-/// 每次切回都重拉）。
+/// dailyTask、25s 超时壳一字不动），其余 5 栏首次访问时拉取、之后缓存。
+/// r35：缓存升级成进程内单例 `HomeDataCache.shared`（见
+/// HomeDataCache.swift）——切台/模型重建都不再清缓存，只拉一次。
 /// 数据来源只认 NativeBridge 的已定接口，不编假数据：
 /// - 每日推荐：`NativeBridge.dailyRecommend(platform:)`——netease 登录后
 ///   真每日推荐、未登录退到推荐新歌（personalized）；qq 登录后每日推荐、
@@ -132,6 +132,9 @@ final class HomeViewModel: ObservableObject {
         guard !didInitialLoad else { return }
         didInitialLoad = true
         loadPersistedSelection()
+        // r35：模型重建不丢缓存——从进程内单例恢复该平台的栏缓存
+        // （没拉过的平台是空字典）；daily 走 loadDaily 自己的缓存检查，不另写。
+        railResults = HomeDataCache.shared.rails(platform: selectedPlatform)
         loadLastTrack()
         // r28：首加载也进 dailyTask——之前是直接 await，dailyTask 是 nil，
         // 首加载中点平台时 selectPlatform 第 2 步取消不到它，旧单与新单
@@ -190,9 +193,12 @@ final class HomeViewModel: ObservableObject {
     /// 3. 再改平台并持久化（Moumusic selectHomePlatform：先写 mode 再写
     ///    platform，成对写完才触发加载；Lizi 只有一个 platform 值，
     ///    同样先写完再起加载，不存在半更新的一对）。
-    /// 4. 立即重建首页模型（Moumusic resetContent）：旧平台的 daily
-    ///    当场下掉，不等新数据回来才清。
-    /// 5. 起新加载（带代际守卫；旧任务回来对不上代际直接丢）。
+    /// 4. 恢复新平台的首页模型（Moumusic resetContent 同款位置，语义 r35
+    ///    已改：不再清掉重拉——旧平台的内容当场换成新平台的缓存，
+    ///    每日推荐是当日缓存、各栏是整份恢复；没拉过的才留空等新加载）。
+    /// 5. 起新加载（只在缓存没命中时；命中时 resetHomeContent 已把数据
+    ///    恢复进 daily，isLoadingDaily 是 false，不起任务、不闪 spinner；
+    ///    带代际守卫；旧任务回来对不上代际直接丢）。
     /// 登录态：Moumusic 的 selectHomePlatform 不碰 AccountStore，登录态
     /// 只在 load 时当参数传进去（loadCurrentHome 传 account.isLoggedIn）；
     /// Lizi 同理——切台不查登录，各平台的登录分支在
@@ -211,22 +217,35 @@ final class HomeViewModel: ObservableObject {
         selectedPlatform = id
         UserDefaults.standard.set(id, forKey: Self.platformKey)
         resetHomeContent()
-        dailyTask = Task { await loadDaily(generation: generation) }
+        // r35：缓存命中时 resetHomeContent 已把 daily 恢复好
+        // （非空），不起 loadDaily 任务；没命中（daily 空且无空原因）
+        // 才起新加载。
+        if daily.isEmpty && dailyEmptyReason == nil {
+            dailyTask = Task { await loadDaily(generation: generation) }
+        }
     }
 
-    /// 立即清空首页模型（Moumusic resetContent 同款）：切台瞬间旧平台的
-    /// 内容全部下掉；isLoadingDaily 置 true，等新 loadDaily 回来再落
-    /// false / 空原因。
-    /// r30：切台回到每日推荐（第 1 个来源），各栏缓存是分平台的、清掉重拉。
+    /// 切台时恢复新平台的首页模型（Moumusic resetContent 同款位置）：
+    /// r35 起不再清缓存——每日推荐从当日缓存恢复（命中直接显示，
+    /// 不起加载、不闪 spinner），各栏整份从缓存恢复（没拉过的平台
+    /// 就是空字典）；都没命中时 daily 留空、isLoadingDaily 置 true，
+    /// 等 selectPlatform 起的新 loadDaily 回来再落 false / 空原因。
+    /// r30：切台回到每日推荐（第 1 个来源）。
     /// r33：切台回 .daily 时也写来源持久化键（与 selectSource 同款写点）。
     private func resetHomeContent() {
-        daily = []
-        dailyEmptyReason = nil
-        isLoadingDaily = true
+        if let cached = HomeDataCache.shared.dailyIfFresh(platform: selectedPlatform) {
+            daily = cached.tracks
+            dailyEmptyReason = cached.emptyReason
+            isLoadingDaily = false
+        } else {
+            daily = []
+            dailyEmptyReason = nil
+            isLoadingDaily = true
+        }
         selectedSource = .daily
         UserDefaults.standard.set(HomeRailPage.daily.rawValue, forKey: Self.sourceKey)
         closeOpened()
-        railResults = [:]
+        railResults = HomeDataCache.shared.rails(platform: selectedPlatform)
         railLoadingPages = []
     }
 
@@ -257,6 +276,15 @@ final class HomeViewModel: ObservableObject {
     func loadDaily(generation: Int? = nil) async {
         let platform = selectedPlatform
         let generation = generation ?? homeLoadGeneration
+        // r35：先查缓存（在 isLoadingDaily = true 之前，命中不闪 spinner）；
+        // 代际/平台守卫照旧：对不上就不写。
+        if let cached = HomeDataCache.shared.dailyIfFresh(platform: platform) {
+            guard generation == homeLoadGeneration, platform == selectedPlatform else { return }
+            daily = cached.tracks
+            dailyEmptyReason = cached.emptyReason
+            isLoadingDaily = false
+            return
+        }
         isLoadingDaily = true
         dailyEmptyReason = nil
         defer {
@@ -284,6 +312,10 @@ final class HomeViewModel: ObservableObject {
         daily = result.tracks
         if result.tracks.isEmpty {
             dailyEmptyReason = result.emptyReason ?? emptyReason(for: platform)
+        } else {
+            // r35：成功且 tracks 非空才写缓存（空结果不缓存，登录态变了
+            // 回首页能拉到新数据）。
+            HomeDataCache.shared.storeDaily(platform: platform, tracks: result.tracks, emptyReason: result.emptyReason)
         }
     }
 
@@ -311,19 +343,37 @@ final class HomeViewModel: ObservableObject {
     /// `RailKind.likedTitle(for:)`）。
     var sourceTitle: String { selectedSource.title(platform: selectedPlatform) }
 
-    /// 切来源（菜单点选唯一入口；点当前来源也触发一次该栏拉取，
-    /// 喜欢栏不缓存、每次切回都重拉，见 `loadRailPage`）。
+    /// 切来源（菜单点选唯一入口；点当前来源且数据已在就直接 return，
+    /// 什么都不做，见函数体 r35 分支；喜欢栏星标旗置起时重拉，
+    /// 见 `loadRailPage`）。
     /// 切来源时关掉面板内打开的歌单/专辑（r31），回到该来源列表。
     /// r33：切来源写来源持久化键（lizi.native.hall.source）。
     func selectSource(_ page: HomeRailPage) {
         closeOpened()
+        // r35：点当前来源且数据已在就直接 return（持久化键本来就已是
+        // 该值，不用重写）；.daily 还没拉到（空且没原因）且不在加载中
+        // 时补一次 loadDaily；其余栏没缓存时走下面现有 loadRailPage。
+        if page == selectedSource {
+            if page == .daily {
+                if !daily.isEmpty || dailyEmptyReason != nil { return }
+                if !isLoadingDaily {
+                    Task { await loadDaily() }
+                }
+                return
+            }
+            if railResults[page] != nil,
+               page != .liked || !UserDefaults.standard.bool(forKey: PlaybackStore.likedNeedsRefreshKey) {
+                return
+            }
+        }
         selectedSource = page
         UserDefaults.standard.set(page.rawValue, forKey: Self.sourceKey)
         loadRailPage(page)
     }
 
-    /// 各栏取到的结果（首次访问该栏时拉取、之后缓存；切台时随
-    /// resetHomeContent 清掉，各栏缓存是分平台的）。
+    /// 各栏取到的结果（首次访问该栏时拉取、之后缓存；r35 起缓存在
+    /// 进程内单例 `HomeDataCache.shared` 里分平台存，切台/模型重建
+    /// 不再清掉，切回来直接用）。
     @Published private(set) var railResults: [HomeRailPage: RailResult] = [:]
 
     /// 正在拉取的栏（防重复请求；RailResult 自带 error / emptyReason，
@@ -363,8 +413,10 @@ final class HomeViewModel: ObservableObject {
         return nil
     }
 
-    /// 首次访问该栏时拉取，之后用缓存（喜欢栏除外：本地星标一点就变，
-    /// 壳版 renderRailNode 同款不缓存——每次切回喜欢栏都重拉）。
+    /// 首次访问该栏时拉取，之后用缓存（含 .liked：r35 起喜欢栏也缓存，
+    /// 只有星标旗 `PlaybackStore.likedNeedsRefreshKey` 置起时才绕开
+    /// 缓存重拉一次——本地星标一点就变，r33 的旗子机制保留，不用每次
+    /// 切回都重拉）。
     /// 每栏加载/失败/空态走 RailDetailView 同款三态（RailResult.error /
     /// emptyReason，文案由 RailsBridge 原样给）。
     /// r34：整栏包一层 25s 硬超时（`NativeBridge.dailyTimeout`，
@@ -374,8 +426,16 @@ final class HomeViewModel: ObservableObject {
     /// 超时按失败处理（`error` 带文案，面板显示红字原因，不留 spinner）。
     func loadRailPage(_ page: HomeRailPage, force: Bool = false) {
         guard page != .daily else { return }
-        if page != .liked, !force, railResults[page] != nil { return }
+        // r35：缓存守卫对所有栏生效（含 .liked）。喜欢栏例外：星标旗
+        // 置起（播放页点了星标）时不走缓存、要重拉看新星标；旗子等到
+        // 真的开始拉取时才清——在飞的请求挡住时不清旗，下次出现再拉。
+        let likedNeedsRefresh = page == .liked &&
+            UserDefaults.standard.bool(forKey: PlaybackStore.likedNeedsRefreshKey)
+        if !force, !likedNeedsRefresh, railResults[page] != nil { return }
         if railLoadingPages.contains(page) { return }
+        if likedNeedsRefresh {
+            UserDefaults.standard.set(false, forKey: PlaybackStore.likedNeedsRefreshKey)
+        }
         railLoadingPages.insert(page)
         Task {
             let platform = selectedPlatform
@@ -400,13 +460,18 @@ final class HomeViewModel: ObservableObject {
                 fetched = RailResult(kind: page.railKind ?? .featured, platform: platform,
                                      error: "该栏拉取超时（25 秒无响应），请检查网络后重试。")
             }
-            // 切台后旧结果回来直接丢（selectPlatform 已清缓存；
+            // 切台后旧结果回来直接丢（selectPlatform 已换平台；
             // fetched.platform 是取数时的平台，对不上当前平台就是旧单）。
             guard selectedPlatform == fetched.platform else {
                 railLoadingPages.remove(page)
                 return
             }
             railResults[page] = fetched
+            // r35：成功（error == nil）才写缓存；失败的不缓存，
+            // 下次访问重拉（重试按钮照常 force）。
+            if fetched.error == nil {
+                HomeDataCache.shared.storeRail(platform: platform, page: page, result: fetched)
+            }
             railLoadingPages.remove(page)
         }
     }

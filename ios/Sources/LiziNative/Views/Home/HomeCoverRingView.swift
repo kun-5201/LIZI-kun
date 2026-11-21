@@ -30,8 +30,8 @@ import UIKit
 /// 原样照搬，只改视频里能量出来的两个尺寸（环卡、平面卡见下表）：
 /// 平面带：MARQUEE_SPEED=24、松手 1200ms 后恢复、初画停 2.5s；
 /// 开环：上滑（|dy|>|dx|×1.25 且 dy<0，超 10px），横向拖动只滚带；
-/// 圆柱：pitch=卡宽×1.14（壳版）→ 视频实测 pitch≈卡宽（见下），R 取
-/// 弦长公式；透视 P=3.2R；相机 translateZ(-R) rotateX(-5°)；
+/// 圆柱：pitch=卡宽×1.14（壳版；r35 前 r31 的「视频实测 pitch≈卡宽」
+/// 已作废，见下 r35），R 取弦长公式；透视 P=3.2R；相机 translateZ(-R) rotateX(-5°)；
 /// 拖动：每像素 180/(πR)×1.45 度；角速度取最近 110ms 采样，限幅
 /// ±1400°/s；惯性 τ=1.08s，目标 = 离 (angle+v·τ·0.55) 最近的槽位；
 /// 弹簧 118、阻尼 2√118（临界阻尼）；只露正面 facing≤0.06 藏，
@@ -335,16 +335,22 @@ import UIKit
 ///   侧卡 apparent 宽约 106pt，真投影约 90pt，远缘多出约 11pt，见驱动）；
 ///   容器整体 rotateX(-5°) 删掉——相机 -5° 已由每卡 `tiltDrop` 表达
 ///   （r26-3D 视频实测公式），容器旋转是双算，还把 0.5 强透视带进来。
-/// - R（实拍量取，见驱动 §11）：f_050 中心卡 227–505px ≈ 149pt，左卡亮区
-///   0–222px、右缘 222px 与中心卡左缘 227px 几乎相贴（间隙约 3px），故
-///   pitch 取卡宽（×1.0），R = 149/(2·sin20°) ≈ 218pt（标准档；旧
-///   ×1.14 → 248pt 是配 94pt 小卡的套壳 pitch 搬到 149pt 卡上的旧值，
-///   比实拍大 14%）；176pt 是套壳 ring.js 配 94pt 小卡的 R
-///   （cardW = clamp(vw×0.24, 84, 112) → Rview ≈ 176），配 149pt 卡时
-///   弦长 2R·sin(step/2) 只有约 120pt < pitch 170pt，相邻卡重叠约 50pt，
-///   且 step 公式会给出约 58°（与实测侧卡倾角 ±40° 不符），不能用。
-///   step 的壳版公式 min(360/n, 2·asin(pitch/(2R))) 代入新 R/pitch 仍得
-///   40°（n≤9 时 360/n ≥ 40°），step 保持 40° 不动。
+/// - R（r35 改回壳版，见驱动 §R2–§R5）：r31 的「视频实测 pitch≈卡宽」
+///   已被用户 2026-11-21 真机报告推翻——环开着拖动旋转时相邻卡几乎相贴。
+///   f_050 量到的约 3px 间隙是静止展开态的一帧，不是拖动中的常态：
+///   旧 pitch（=卡宽 149pt、R≈218pt）下静止间隙只有 2.9pt，拖到两槽
+///   中途（world ±20°/60°）相邻卡重叠约 11pt——卡就是贴着转的。
+///   改回壳版 openRing 原式：pitch = 卡宽×1.14（标准档 169.86pt），
+///   R 取弦长公式 pitch/(2·sin20°) ≈ 248pt，cap = round(2πR/pitch)
+///   = 9，step = min(360/9, 2·asin(pitch/(2R))) = 40°，P = 3.2R。
+///   新 pitch 下静止间隙约 21pt、拖动中途中心对约 29pt、远端对也不
+///   相贴（约 1.7pt，见驱动 §R4–§R5 镜像）。Rview 那条路不用：套壳
+///   Rview = (vw/2−14−cardW/2)/0.762 是按 94pt 小卡算的，配 149pt 卡
+///   只给 R≈144pt，弦长 125pt < 卡宽，相邻卡反而重叠——原生卡是
+///   0.382vw 不是套壳的 0.24vw，弦长 R（248pt）才是决定可见间隙的
+///   那一个；侧卡溢出屏边本来就不裁（r31 已定），Rview 的屏内约束
+///   不适用。只动 pitch/R/step/cap/P 这一组几何量，压暗、后仰、位置、
+///   绑定、跟手、惯性一律不动。
 /// - 面板裁切作废（r30 v5 图口径）：f_050/f_060/f_070 里侧卡都溢出面板
 ///   到屏边（左卡亮区从 x=0 起、右卡切到 720px 屏边），环层改全屏宽、
 ///   不 clip，命中测试同步删面板外拦截、改用 projectedX + panel.centerX
@@ -759,27 +765,40 @@ final class HomeCoverRingModel: ObservableObject {
         }
     }
 
-    /// 相邻槽位夹角 40°（视频实测侧卡倾角；壳版公式
-    /// step = min(360/n, 2·asin(pitch/(2R))) 代入本轮 pitch=卡宽、R≈218pt
-    /// 也得 40°：n = min(曲数, cap)，cap = round(2πR/pitch) = 9，
-    /// n≤9 时 360/n ≥ 40°，第二项 2·asin(149/436) = 40.0°，见驱动 §11）。
+    /// 相邻槽位夹角 40°（壳版公式 step = min(360/n, 2·asin(pitch/(2R)))，
+    /// n = min(曲数, cap)，cap = round(2πR/pitch) = 9：曲数 ≥ 9 时
+    /// 360/9 = 40°，第二项 2·asin(pitch/(2R)) = 40.0°（弦长公式反推，
+    /// pitch/(2R) = sin20°），min 取 40°；曲数 < 9 时 360/n > 40°，
+    /// 第二项仍约 40.0°——三档、任意曲数下公式值都在 40° 上，
+    /// 写死 40 与公式值一致，见驱动 §R3 镜像。r35 前旧值也是 40°，
+    /// 但旧 pitch=卡宽、R≈218pt 时它是「视频实测」的数；现在
+    /// pitch/R 换回壳版，40° 是公式算出来的）。
     var ringStep: CGFloat { 40 }
 
-    /// 槽距 = 卡宽（r31 真圆柱，实拍量取：f_050 左卡右缘 222px 与中心卡
-    /// 左缘 227px 几乎相贴，间隙约 3px，相邻卡没有 1.14 倍的空隙；
-    /// 旧 ×1.14 是套壳 ring.js 配 94pt 小卡的值，搬到 149pt 卡上
-    /// R 会算到 248pt，比实拍大 14%。pitch=卡宽时 step 的壳版公式
-    /// min(360/n, 2·asin(pitch/(2R))) 仍得 40°，见 ringStep 注释）。
-    var ringPitch: CGFloat { ringCard }
+    /// 槽距 = 卡宽×1.14（r35：换回壳版 ring.js openRing 原式
+    /// pitch = cardW * 1.14；r31 的「视频实测 pitch≈卡宽」已被用户
+    /// 2026-11-21 真机报告推翻——环开着拖动旋转时相邻卡几乎相贴，
+    /// 旧 pitch 下静止间隙只有约 2.9pt、拖动中途重叠约 11pt；
+    /// 新 pitch 下静止间隙约 21pt、拖动中途也不相贴，见驱动 §R4–§R5
+    /// 镜像。只改 pitch 这一处，R / P / perPixel 由它派生）。
+    var ringPitch: CGFloat { ringCard * 1.14 }
 
-    /// 圆柱半径（弦长公式 pitch = 2R·sin(step/2)；标准档 149/(2·sin20°)
-    /// ≈ 218pt，compact ≈ 206pt，large ≈ 240pt）。
+    /// 环容量 cap = clamp(round(2πR/pitch), 7, 64)（壳版 openRing 原式；
+    /// 三档都是 round(9.18) = 9）。n = min(曲数, cap)，见 ringStep。
+    var ringCap: CGFloat {
+        min(max((2 * .pi * ringRadius / ringPitch).rounded(), 7), 64)
+    }
+
+    /// 圆柱半径（弦长公式 pitch = 2R·sin(step/2)；r35：pitch 换回
+    /// 卡宽×1.14 后标准档 169.86/(2·sin20°) ≈ 248pt，
+    /// compact ≈ 235pt，large ≈ 273pt；r31 的 218/206/240pt 是
+    /// pitch=卡宽时的旧值，已作废）。
     var ringRadius: CGFloat {
         ringPitch / (2 * sin(ringStep * .pi / 360))
     }
 
     /// 透视距离 P = max(3.2R, 520)（壳版 ring.js openRing 原式：
-    /// `P = Math.max(R * 3.2, 520)`；标准档 3.2×218 ≈ 697pt > 520，
+    /// `P = Math.max(R * 3.2, 520)`；标准档 3.2×248 ≈ 795pt > 520，
     /// 三档都取 3.2R）。卡片旋转不再用 SwiftUI perspective 0.5，
     /// 透视全程只走这个显式 P（见 cylinderZ / perspectiveFactor）。
     var ringPerspective: CGFloat {

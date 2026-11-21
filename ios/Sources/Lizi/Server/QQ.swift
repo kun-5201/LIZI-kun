@@ -3017,6 +3017,12 @@ extension QQService {
                                 "playlists": [], "error": (error as? QQUpstreamError)?.message ?? "取我的歌单失败"])
         }
     }
+
+    // r31 第三推构建修：run 44843491082 编译失败——本函数的签名行被某轮改动
+    // 误删，函数体悬在 extension 顶层（3022 expected declaration），连锁导致
+    // 3279 static methods / 3361 extraneous '}'。签名与 r30 一字相同，函数体
+    // 本轮未动（只是把它重新包回函数里）；handle() 的 "user/albums" 路由调它。
+    private func userAlbums(req: HttpRequest) async -> HttpResponse {
         let limit = min(100, max(1, req.int("limit", 100)))
         let offset = max(0, req.int("offset", 0))
         guard let cred = await ensureCredential() else {

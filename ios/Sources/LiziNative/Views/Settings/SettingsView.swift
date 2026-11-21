@@ -620,32 +620,40 @@ struct SettingsView: View {
         }
     }
 
-    /// 相册选视频（PhotosPicker，matching: .videos）：`NSItemProvider.loadFileRepresentation`
-    /// 拿到的临时文件原样交 BackgroundStore.saveVideoFile 拷进沙盒
-    /// （不转码）；拷失败写明原因，不静默、不弹 Notice。
-    /// r31 第三推构建修：run 44844080035 编译失败——`PhotosPickerItem` 没有
-    /// `loadFileRepresentation`（那是 NSItemProvider 的方法），改走
-    /// `item.itemProvider` + continuation 包回调，行为不变（仍拿临时文件 URL）。
+    /// 相册选视频（PhotosPicker，matching: .videos）：`PickedVideoFile`
+    /// （FileRepresentation）拿到的临时文件原样交 BackgroundStore.saveVideoFile
+    /// 拷进沙盒（不转码，不整段读进内存）；拷失败写明原因，不静默、不弹 Notice。
+    /// r31 第三推构建修：run 44844080035 报 `PhotosPickerItem` 没有
+    /// `loadFileRepresentation`，run 44846007485 报也没有 `itemProvider`——
+    /// 该类型只暴露 `loadTransferable(type:)`，所以用 FileRepresentation
+    /// 的 Transferable 包装只取临时文件 URL。
     private func handleVideoPick(_ item: PhotosPickerItem?) async {
         guard let item else { return }
         do {
-            let url: URL? = try await withCheckedThrowingContinuation { cont in
-                _ = item.itemProvider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier) { url, error in
-                    if let error { cont.resume(throwing: error) }
-                    else { cont.resume(returning: url) }
-                }
-            }
-            guard let url else {
+            guard let picked = try await item.loadTransferable(type: PickedVideoFile.self) else {
                 backgroundStatus = "选视频失败：读不到这个视频。"
                 return
             }
-            backgroundStatus = background.saveVideoFile(from: url)
+            backgroundStatus = background.saveVideoFile(from: picked.url)
                 ? "动态壁纸已设置（视频已存到本机，静音循环播放，重启还在）。"
                 : "选视频失败：存不下这个视频，换一个小一点的试试。"
         } catch {
             backgroundStatus = "选视频失败：\(error.localizedDescription)"
         }
     }
+
+/// PhotosPicker 选视频的 Transferable 包装：只取临时文件 URL，不整段读进内存。
+/// exporting 闭包是 FileRepresentation 的必填项（本处只走 importing 方向）。
+private struct PickedVideoFile: Transferable {
+    let url: URL
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(contentType: .movie) { picked in
+            SentTransferredFile(picked.url)
+        } importing: { received in
+            PickedVideoFile(url: received.file)
+        }
+    }
+}
 
     // MARK: - 4. 音乐与音质（r31 音质系统替换，已落地）
 

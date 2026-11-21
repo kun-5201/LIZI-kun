@@ -110,6 +110,25 @@ enum StaticFiles {
 
 /// 上游请求小工具（URLSession，带超时；对标 server.mjs 的 fetch 行为）。
 enum Upstream {
+    /// r31-cookie：上游请求一律走这只私有 session，不走 `URLSession.shared`。
+    /// 根因（7 平台 Cookie 登录后都拉不到数据的共因之一）：`URLSession.shared`
+    /// 自带共享 cookie 罐——匿名请求（搜索 / 推荐）回的 Set-Cookie 会被收进罐，
+    /// 之后带登录 Cookie 的请求发出去时，罐里的旧 cookie 会跟显式 `Cookie`
+    /// 头一起发（Moumusic `QQMusicAPI.swift` init 注释同款教训：罐里新旧两份
+    /// 签名会让上游把一次有效登录判成过期/未登录）。Moumusic 的修法是专用
+    /// session + `httpShouldSetCookies = false` + `httpCookieAcceptPolicy = .never`，
+    /// 这里同款：从此只有各服务显式设置的 `Cookie` 头会被发出去，罐不再掺和。
+    /// 不影响网易：`NetEase.fetchUpstream` 自带 `URLSession.shared`（扫码 803
+    /// 的 MUSIC_U 收割要读共享罐，见该函数注释），不在这里改。
+    /// 也不影响各服务的 Set-Cookie 读取：响应头照常从 `HTTPURLResponse`
+    /// 取（酷我 `refreshToken`、酷狗 `KGResponse.setCookies` 同款），
+    /// 只是不再写进共享罐。
+    private static let session: URLSession = {
+        let c = URLSessionConfiguration.default
+        c.httpShouldSetCookies = false
+        c.httpCookieAcceptPolicy = .never
+        return URLSession(configuration: c)
+    }()
     /// 音频直链 https 升级（第 12 轮 ATS 修法，与 public/api.js 的
     /// AUDIO_HTTPS_SUFFIXES 是同一张表，改一边要同步另一边）。
     /// 根因见 project.yml 注释：plist 里 NSAllowsArbitraryLoads 已被系统
@@ -153,7 +172,9 @@ enum Upstream {
         // 2026-11-18 真机波点登录就是这么死的）。这里统一丢掉 GET 的 body：
         // 各边车不要依赖 GET+body（波点 users/login 改走 POST，checkRight/audioUrl 的参数 query 里本来就有）。
         req.httpBody = (method.uppercased() == "GET") ? nil : body
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        // r31-cookie：走私有 session（见本文件 `session` 注释），不用
+        // URLSession.shared——共享罐的旧 cookie 会跟显式 Cookie 头一起发出。
+        let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw NSError(domain: "LiziUpstream", code: -1, userInfo: [NSLocalizedDescriptionKey: "no http response"])
         }

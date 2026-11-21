@@ -46,6 +46,10 @@ struct RootView: View {
                 DetailWithBack {
                     MyAlbumsView()
                 }
+            case .listeningRank(let platform):
+                DetailWithBack {
+                    ListeningRankView(platform: platform)
+                }
             case .settings:
                 DetailWithBack {
                     SettingsView()

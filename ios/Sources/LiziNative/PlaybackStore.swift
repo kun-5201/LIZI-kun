@@ -4,12 +4,25 @@ import Foundation
 
 /// 播放状态机（P1 填实）：AVPlayer 封装 + 队列 + 取链编排器。
 ///
-/// 取链编排（照抄壳版 public/player.js fetchTrackUrl 的顺序）：
-/// - 有会员（已登录 AND 有 VIP 信号）→ 平台官方 → 已登录个人云盘 → LX
-/// - 没会员（没登录 / 登录了但没会员 / 状态取不到）→ LX 先 → 平台 → 云盘
-///   （r31：提示音兜底已删，全失败直接报错，保持静默，不出声）
-///   （LX 先是为了拿整首：没会员时官方常只给 30 秒试听；LX 拿不到再回官方，
-///   但 VIP 歌的试听地址直接拒掉，不放试听片段）
+/// 取链编排（r31 音质系统替换：Moumusic 的选档流程结构，按 Lizi
+/// 结构原生实现；限制 R1/R2/R3/R4/R5/R6/R7 全去掉）：
+/// - 腿的顺序只由设置「播放来源」三段定，不问会员/登录：
+///   自动 = LX 优先取请求档、账号只兜底；账号优先 = 账号腿先；
+///   第三方优先 = LX 腿先。任何一段拿不到时另一段都可兜底
+///   （R7 模式限源已删，三段是优先顺序，不是硬隔离）。
+/// - 档位低于请求档时不降档重试、不拒收：先记下已拿到的结果，
+///   再向另一腿要请求档，留档高者（自动模式；见 resolveURL）。
+///   请求档直发音源，返回什么播什么、显示什么。
+/// - 试听照播（R5 已删）：官方只给试听地址时不再拒掉，播试听、
+///   角标写明「试听」；时长/35 秒校验本来就没在原生链里，不补。
+/// - 云盘腿（网易/酷狗个人云盘）仍要登录才能读自己的云盘文件——那是
+///   取数据的必要条件，不是档位限制（R2 删的是「登录态限档」）。网易认
+///   MUSIC_U，酷狗认服务端 401。
+/// - r31-videoreward（免费播放资格校验，只校验不领取）：取链本身不问会员，
+///   也不设资格门——服务端给了地址就正常播（放行 = 不拦截）；`noteVideoReward`
+///   只在取链结果上记校验证据：平台腿放行 VIP 歌 → 记一次已验证有资格，
+///   平台腿以 reason vip 拒绝 → 本地资格立即失效（服务端为准）。
+///   资格状态的存取全在 `VideoRewardStore`，本文件只调它的两个记证据入口。
 /// - 波点：r26 起走 LX（bd 映射已开；但今天没有任何已注册源声明
 ///   bd，所以波点 LX 目前仍无可用源——有声明 bd 的自定义源加入后才真通，
 ///   见 LX.swift）。Apple Music：LX 生态里没有它的源，永远走老顺序
@@ -36,6 +49,10 @@ final class PlaybackStore: ObservableObject {
     @Published private(set) var currentTrack: Track?
     /// 播放队列（当前曲目在其中；QueueItem 带 queueId，同一首歌可重复入队）。
     @Published private(set) var queue: [QueueItem] = []
+    /// 「下一首播放」待播队列（r31）：按点的顺序存待插队项的 queueId。
+    /// 只记 queueId 不记下标——删行/切歌后下标会变，queueId 全程稳定；
+    /// 队列面板按它给插进去的歌打「下一首」徽章。
+    @Published private(set) var playNextQueueIds: [String] = []
     /// 当前曲目在队列里的下标；没有时为 -1。
     @Published private(set) var currentIndex: Int = -1
     /// 是否正在播放。
@@ -57,8 +74,30 @@ final class PlaybackStore: ObservableObject {
     /// 关弹窗/登录成功后由调用方调 `dismissLoginPrompt()` 清掉；新点播
     /// 与停播时这里自动清。登录成功不自动重播——用户回播放页再点一次。
     @Published private(set) var loginPromptPlatform: String?
-    /// 当前曲目的实际音质档位（显示音质 = 这个，绝不显示请求的档位）。
+    /// 当前曲目的实际音质档位（显示音质 = 这个，绝不显示请求的档位；
+    /// 取不到时为 nil，芯片显示 servedQualityText 的「未知」）。
     @Published private(set) var actualQuality: AudioQuality?
+    /// 音源回的档位原文（canon 翻译不出时才有值，如 "192k"；
+    /// 翻译得出时为 nil，显示档位名就够了；见 servedQualityText）。
+    @Published private(set) var servedQualityLabel: String?
+    /// 实际档位低于请求档时的提示文案（降级提示开关开时才置；
+    /// 开关关时只记 DiagLog，不置这里；切歌时清掉）。
+    @Published private(set) var downgradeNotice: String?
+    /// 当前这条地址从哪来（platform / cloud / lx / local；云盘时播放页与首页
+    /// 卡片显示「网盘」角标，见 PlayerView.statusCapsules / HeroCardView.subtitle）。
+    /// 取链成功时置，换歌/停播时清（与 lastFetchVia 同步改，见 playCurrent /
+    /// handlePlaybackFailure / stop）。
+    @Published private(set) var currentVia: String = ""
+    /// 芯片 / 首页卡片显示的音质文案：实际档位名 → 音源原文 → 「未知」。
+    /// 未知显示「未知」，绝不拿请求档位顶、绝不默认「标准」。
+    var servedQualityText: String {
+        actualQuality?.displayName ?? servedQualityLabel ?? "未知"
+    }
+    /// 首页卡片用的音质文案（有档位/原文时才有值，未知时为 nil，
+    /// 卡片副标题就不拼音质，不挂「未知」两个字）。
+    var servedQualityLabelText: String? {
+        actualQuality?.displayName ?? servedQualityLabel
+    }
     /// 当前歌词行（官方 → LRCLIB；无词时为空，UI 显示歌名）。
     @Published private(set) var lyrics: [LyricLine] = []
     /// 当前歌词行下标；无词 / 还没开始时为 -1。
@@ -73,8 +112,20 @@ final class PlaybackStore: ObservableObject {
     @Published private(set) var volume: Double = 1.0
     /// 是否静音（单独的 UserDefaults 键持久化，不走 SettingsStore）。
     @Published private(set) var isMuted: Bool = false
-    /// 用户选的请求档位（默认无损；EQ 页 P4 负责改这里）。
-    @Published private(set) var preferredQuality: AudioQuality = .lossless
+    /// 播放页选档的单曲覆盖（r31 音质系统替换，Moumusic
+    /// trackQualityOverride 同款）：只对当前这首歌有效，存在内存里，
+    /// 不写盘；切歌/切平台时清掉（见 playCurrent），回默认档。
+    /// 为 nil 时取链用全局默认档（SettingsStore.audioQuality）。
+    @Published private(set) var trackQualityOverride: AudioQuality?
+    /// 当前这首歌实际用的请求档位：单曲覆盖 → 全局默认档。
+    /// 读它取链、打勾；写它请走 setPreferredQuality（全局默认）
+    /// 或 setTrackQualityOverride（单曲覆盖），别直接赋值。
+    var preferredQuality: AudioQuality {
+        trackQualityOverride ?? SettingsStore.storedAudioQuality()
+    }
+    /// 全局默认档（设置「音乐与音质」→ 默认音质，默认 exhigh，
+    /// 存 settings.audioQuality；与单曲覆盖无关）。
+    var defaultQuality: AudioQuality { SettingsStore.storedAudioQuality() }
 
     enum RepeatMode: String, Codable, CaseIterable {
         case off    // 顺序播完停
@@ -155,7 +206,6 @@ final class PlaybackStore: ObservableObject {
     /// 保证兼容——P2 之前点的星标只有 id、没有曲目详情，恢复不出来，
     /// 不编假曲目；重新点一次星标（取消再点）后才有完整记录。
     private static let likedTracksKey = "lizi.native.likedTracks"
-    private static let qualityKey = "lizi.native.quality"
     /// r22：随机与循环重启后保留（与队列面板头部同一套状态，控制行两端按钮共用）。
     private static let repeatModeKey = "lizi.native.repeatMode"
     private static let shuffleKey = "lizi.native.isShuffled"
@@ -213,10 +263,9 @@ final class PlaybackStore: ObservableObject {
     }
 
     init() {
-        if let raw = UserDefaults.standard.string(forKey: Self.qualityKey),
-           let q = AudioQuality(rawValue: raw) {
-            preferredQuality = q
-        }
+        // r31：默认档改由 SettingsStore 持有（settings.audioQuality，
+        // 默认 exhigh；旧键 lizi.native.quality 一次性迁过去，见
+        // SettingsStore.storedAudioQuality()）；这里不再读档位键。
         // r25-B2：旧单键喜欢数据迁移（只认 likedTracks 里能对上 id 的，
         // 认不出就丢弃并记日志，见 migrateLegacyLikedKeys）。
         migrateLegacyLikedKeys()
@@ -296,7 +345,9 @@ final class PlaybackStore: ObservableObject {
     // MARK: - 队列
 
     /// 整队替换并从指定下标开始播（搜索结果 / 歌单点歌用）。
+    /// 整队换掉：旧的「下一首」待播全部作废（那些 queueId 已不在新队列里）。
     func setQueue(_ tracks: [Track], startAt index: Int) {
+        playNextQueueIds = []
         queue = tracks.map { QueueItem(track: $0) }
         currentIndex = queue.indices.contains(index) ? index : (queue.isEmpty ? -1 : 0)
         if queue.indices.contains(currentIndex) {
@@ -309,10 +360,60 @@ final class PlaybackStore: ObservableObject {
         queue.append(QueueItem(track: track))
     }
 
+    /// 下一首播放（r31）：把曲目插到“下一首”位置——当前曲目之后、
+    /// 已排队的下一首曲目块之后。连续点多首时按点的顺序排：先点的仍排
+    /// 在前面，后点的排在已排块的后面（不是每次都顶到当前曲目正后方，
+    /// 那样会把先点的顶到后面去，顺序就反了）。
+    /// 插队只动队列本身，不分平台：取链/播放在起播时才按该曲目的
+    /// platform 走原有 resolveURL 编排，7 个平台（netease / qq /
+    /// kugou / qishui / bodian / kuwo / applemusic）与本地曲目全都走
+    /// 同一条插队路，不设平台守卫。
+    /// 队列为空 / 未在播时：插到队首并直接起播（它就是下一首，也是当前首）。
+    func playNext(_ track: Track) {
+        let item = QueueItem(track: track)
+        guard !queue.isEmpty, currentIndex >= 0, queue.indices.contains(currentIndex) else {
+            playNextQueueIds = []
+            queue.insert(item, at: 0)
+            currentIndex = 0
+            DiagLog.shared.recordPlaybackStep("playnext insert empty-queue play-now source=\(track.platform) id=\(track.id)")
+            play(queueItem: item)
+            return
+        }
+        var insertAt = currentIndex + 1
+        while insertAt < queue.count, playNextQueueIds.contains(queue[insertAt].queueId) {
+            insertAt += 1
+        }
+        queue.insert(item, at: insertAt)
+        playNextQueueIds.append(item.queueId)
+        DiagLog.shared.recordPlaybackStep("playnext insert source=\(track.platform) id=\(track.id) at=\(insertAt) pending=\(playNextQueueIds.count)")
+    }
+
+    /// 是否还有没播完的「下一首」待播项（队列里还找得到的才算；已被删的
+    /// 残留 id 不算——nextPendingIndex 跳过它们）。
+    var hasPendingPlayNext: Bool { nextPendingIndex() != nil }
+
+    /// 该队列项是不是「下一首播放」插进来的（队列面板打「下一首」徽章用）。
+    func isPlayNext(queueId: String) -> Bool { playNextQueueIds.contains(queueId) }
+
+    /// 第一个待播的下一首项在队列里的下标（按点的顺序找；已被删的 id 跳过）。
+    /// 找到的是“下一首该播谁”，与它当前在第几行无关——随机开着也一样，
+    /// next() 先认它，不随机跳过。
+    private func nextPendingIndex() -> Int? {
+        for id in playNextQueueIds {
+            if let idx = queue.firstIndex(where: { $0.queueId == id }) { return idx }
+        }
+        return nil
+    }
+
     /// 从队列里删一项（删的是当前在播的就切到下一首）。
+    /// 删的是待播的下一首项时，它的 queueId 一并从待播里摘掉，
+    /// 不留残留 id（残留 id 虽然不影响播——nextPendingIndex 会跳过——
+    /// 但面板的待播计数会虚高）。
     func removeFromQueue(at index: Int) {
         guard queue.indices.contains(index) else { return }
         let wasCurrent = index == currentIndex
+        let removedId = queue[index].queueId
+        playNextQueueIds.removeAll { $0 == removedId }
         queue.remove(at: index)
         if queue.isEmpty {
             stop()
@@ -327,11 +428,12 @@ final class PlaybackStore: ObservableObject {
         }
     }
 
-    /// 清空队列并停止。
+    /// 清空队列并停止（待播的下一首一并清掉）。
     func clearQueue() {
         stop()
         queue = []
         currentIndex = -1
+        playNextQueueIds = []
     }
 
     private var currentQueueTrack: Track? {
@@ -369,7 +471,11 @@ final class PlaybackStore: ObservableObject {
     func play(_ track: Track) {
         if let idx = queue.firstIndex(where: { $0.track.id == track.id && $0.track.platform == track.platform }) {
             currentIndex = idx
+            // 这首若是待播的下一首项，起播即摘掉待播标记（它已经是当前首了）。
+            playNextQueueIds.removeAll { $0 == queue[idx].queueId }
         } else {
+            // 队列被单首替换：旧的待播全部作废。
+            playNextQueueIds = []
             queue = [QueueItem(track: track)]
             currentIndex = 0
         }
@@ -381,12 +487,15 @@ final class PlaybackStore: ObservableObject {
     /// setQueue / appendToQueue 都不改它；removeFromQueue / clearQueue
     /// 只删项，不重排剩余项的 queueId）。该项已不在队列里（刚被删）时
     /// 退回按曲目播，不静默失败。
+    /// 起播的项若是待播的下一首，起播即摘掉待播标记（它已经是当前首了，
+    /// 面板上不再打「下一首」徽章）。
     func play(queueItem: QueueItem) {
         guard let idx = queue.firstIndex(where: { $0.queueId == queueItem.queueId }) else {
             play(queueItem.track)
             return
         }
         currentIndex = idx
+        playNextQueueIds.removeAll { $0 == queueItem.queueId }
         startCurrentTrackPlay()
     }
 
@@ -462,9 +571,16 @@ final class PlaybackStore: ObservableObject {
         if isPlaying { pause() } else { resume() }
     }
 
-    /// 下一首（随机开时随机挑一首不一样的；循环关且到队尾时停）。
+    /// 下一首（r31：有待播的「下一首」时先播它——随机开着也不随机跳过，
+    /// 单曲循环播完也先播它；没有待播时走原来的随机 / 顺序 / 全部循环）。
+    /// 随机开时随机挑一首不一样的；循环关且到队尾时停。
     func next() {
         guard !queue.isEmpty else { return }
+        if let idx = nextPendingIndex() {
+            currentIndex = idx
+            if queue.indices.contains(currentIndex) { play(queueItem: queue[currentIndex]) }
+            return
+        }
         if isShuffled, queue.count > 1 {
             var idx = currentIndex
             while idx == currentIndex { idx = Int.random(in: 0..<queue.count) }
@@ -479,6 +595,23 @@ final class PlaybackStore: ObservableObject {
             return
         }
         if queue.indices.contains(currentIndex) { play(queueItem: queue[currentIndex]) }
+    }
+
+    /// 一首播完后的统一收尾（r31）：AVPlayer 播完与 AM 引擎播完都走这里，
+    /// 两处行为一致——有待播的「下一首」时先播它（单曲循环也不拦它，
+    /// 用户点了下一首就是要先听它）；没有待播时单曲循环重播当前首，
+    /// 否则按 next() 的顺序 / 随机 / 全部循环走。
+    func handleTrackEnded() {
+        if hasPendingPlayNext {
+            next()
+            return
+        }
+        if repeatMode == .one {
+            seek(to: 0)
+            resume()
+            return
+        }
+        next()
     }
 
     /// 上一首（进度超过 3 秒时先回到开头，照常见播放器做法；否则切上一首）。
@@ -572,10 +705,29 @@ final class PlaybackStore: ObservableObject {
         UserDefaults.standard.set(on, forKey: Self.shuffleKey)
     }
 
-    /// 请求档位（EQ 页 P4 改这里；显示的永远是实际返回档位，不是这个）。
+    /// 全局默认档（设置「音乐与音质」→ 默认音质；写 settings.audioQuality，
+    /// 默认 exhigh）。只改以后点播的默认档，不改当前这首歌的单曲覆盖——
+    /// 播放页选档请走 setTrackQualityOverride。
+    /// r31：旧默认 lossless 已改 exhigh；旧键 lizi.native.quality 的值
+    /// 由 SettingsStore.storedAudioQuality() 一次性迁移（"spatial" 迁
+    /// 成 .surround，其余原样）。
     func setPreferredQuality(_ q: AudioQuality) {
-        preferredQuality = q
-        UserDefaults.standard.set(q.rawValue, forKey: Self.qualityKey)
+        UserDefaults.standard.set(q.rawValue, forKey: SettingsStore.audioQualityKey)
+        // 设置页的 Picker 读的是 SettingsStore.shared 的 @Published，
+        // 这里是 PlaybackStore 的写口：同实例写一份，设置页当场刷新。
+        SettingsStore.shared.audioQuality = q
+    }
+
+    /// 播放页选档：单曲覆盖（只对当前这首歌有效，不写盘；切歌/切平台
+    /// 时清掉，见 playCurrent）。调完请立即重解析播（调用方 switchQuality
+    /// 里 store.play(track) 那一步），不要只改状态不重播。
+    func setTrackQualityOverride(_ q: AudioQuality) {
+        trackQualityOverride = q
+    }
+
+    /// 清掉单曲覆盖（切歌/切平台时调；不碰全局默认档）。
+    func clearTrackQualityOverride() {
+        trackQualityOverride = nil
     }
 
     // MARK: - 应用内音量 / 静音（r25-B2 #4）
@@ -618,6 +770,13 @@ final class PlaybackStore: ObservableObject {
         loginPromptPlatform = nil
         progress = 0
         currentTrack = nil
+        // r31：停播即无当前曲目——单曲覆盖、实际档位、原文标签、
+        // 降级提示一并清掉，下次点播从默认档重新开始。
+        trackQualityOverride = nil
+        actualQuality = nil
+        servedQualityLabel = nil
+        downgradeNotice = nil
+        currentVia = ""
     }
 
     /// 停掉 Apple Music 整首引擎（切歌到非 AM / 回落试听 / 停播时调）；
@@ -650,6 +809,14 @@ final class PlaybackStore: ObservableObject {
         proxyTried = false
         fallbackRetried = false
         lxDowngradeRetried = false
+        // r31：单曲覆盖只对上一首歌有效——换了歌（id 或平台变了）就清掉，
+        // 回全局默认档；同首歌重播（选档后立即重解析）不动覆盖。
+        if currentTrack?.id != track.id || currentTrack?.platform != track.platform {
+            trackQualityOverride = nil
+        }
+        servedQualityLabel = nil
+        downgradeNotice = nil
+        currentVia = ""
         // 第 22 轮第 5 件：入口第一步就记 "play start"（带 gen）——之前它
         // 记在 @Published 赋值之后，tap→entry 之间是黑洞；现在分两步：
         // entry（Task 调度到了）与 state set（赋值完成），死在哪一段
@@ -710,6 +877,8 @@ final class PlaybackStore: ObservableObject {
             isPlaying = false
             errorMessage = result?.reason ?? "unavailable"
             lastFetchReason = result?.reason ?? "unavailable"
+            // r31-videoreward：reason vip 时记一次服务端拒绝（本地资格立即失效）。
+            noteVideoReward(track: track, result: result)
             // r28：酷狗取链报 login 时立登录提示信号（播放页据此弹二维码
             // 登录入口；其它原因不立，不把每种失败都变成登录弹窗）。
             loginPromptPlatform = lastFetchReason == "login" ? track.platform : nil
@@ -719,6 +888,19 @@ final class PlaybackStore: ObservableObject {
         lastFetchVia = result.via
         lastFetchReason = result.reason
         actualQuality = result.actualQuality
+        servedQualityLabel = result.servedLabel
+        // r31-videoreward：平台腿放行 VIP 歌时记一次已验证有资格（只记证据，不拦播放）。
+        noteVideoReward(track: track, result: result)
+        // r31-clouddrive：来源同步进 currentVia（播放页/首页卡片据此显示
+        // 「网盘」）；云盘命中时用 resolvedTrack 只补当前曲目缺失的字段。
+        currentVia = result.via
+        if result.via == "cloud", let resolved = result.resolvedTrack {
+            applyCloudTrack(resolved)
+        }
+        // r31：实际档位低于请求档 → 记一条降级提示（开关开时才进 UI 文案，
+        // 开关关时只记 DiagLog；见 recordDowngradeIfNeeded）。
+        recordDowngradeIfNeeded(requested: preferredQuality, served: result.actualQuality,
+                                via: result.via)
         if result.isTrial || result.isPreview {
             currentTrack?.isTrial = true
         }
@@ -726,6 +908,11 @@ final class PlaybackStore: ObservableObject {
 
         activateSessionOnce()
         await startItem(url: url, track: track, gen: gen)
+        // r31：起播后异步跑实测链（AVFoundation 流实测 → 文件头 →
+        // URL 文件名 → 音源返回标签），测到就替换宣称档位，测不到保留；
+        // 后台任务，不阻塞起播、不改进度/歌词状态。
+        beginQualityMeasurement(url: url, claimed: result.actualQuality,
+                                servedLabel: result.servedLabel, track: track, gen: gen)
     }
 
     /// 把地址交给 AVPlayer 并起播（token 抢占丢弃点 + 状态观察都落在这里）。
@@ -850,12 +1037,21 @@ final class PlaybackStore: ObservableObject {
                 let track = self.queue[idx].track
                 DiagLog.shared.recordPlaybackStep("am player auto-advance source=\(track.platform) id=\(track.id) gen=\(gen)")
                 self.currentIndex = idx
+                // AM 引擎自己切到了这首（它可能是刚插进来的下一首）：起播即
+                // 摘掉待播标记，与 play(queueItem:) 的行为一致。
+                self.playNextQueueIds.removeAll { $0 == self.queue[idx].queueId }
                 self.currentTrack = track
                 self.progress = 0
                 self.duration = track.durationSeconds
                 self.isLiked = self.likedIds.contains(Self.likeKey(for: track))
                 self.startedTrackId = track.id
                 self.didRecordFirstTimeUpdate = false
+                // r31：AM 队列内自动切歌也是换歌——单曲覆盖清掉，回默认档；
+                // AM 全曲不填实际档位（播放器不回），原文标签与降级提示也清掉。
+                self.trackQualityOverride = nil
+                self.actualQuality = nil
+                self.servedQualityLabel = nil
+                self.downgradeNotice = nil
                 self.lyrics = []
                 self.currentLyricIndex = -1
                 self.lyricsTask?.cancel()
@@ -872,12 +1068,7 @@ final class PlaybackStore: ObservableObject {
             Task { @MainActor in
                 guard self.usingAppleMusicPlayer, gen == self.currentPlayGeneration else { return }
                 DiagLog.shared.recordPlaybackStep("am player queue ended gen=\(gen)")
-                if self.repeatMode == .one {
-                    self.seek(to: 0)
-                    self.resume()
-                } else {
-                    self.next()
-                }
+                self.handleTrackEnded()
             }
         }
     }
@@ -915,12 +1106,7 @@ final class PlaybackStore: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 guard gen == self.currentPlayGeneration else { return }
-                if self.repeatMode == .one {
-                    self.seek(to: 0)
-                    self.resume()
-                } else {
-                    self.next()
-                }
+                self.handleTrackEnded()
             }
         }
         let failObserver = NotificationCenter.default.addObserver(
@@ -966,7 +1152,18 @@ final class PlaybackStore: ObservableObject {
                 lastFetchVia = result.via
                 lastFetchReason = result.reason
                 actualQuality = result.actualQuality
+                servedQualityLabel = result.servedLabel
+                currentVia = result.via
+                if result.via == "cloud", let resolved = result.resolvedTrack {
+                    applyCloudTrack(resolved)
+                }
+                // r31-videoreward：重试拿到平台腿地址且是 VIP 歌时同样记一次已验证有资格。
+                noteVideoReward(track: track, result: result)
+                recordDowngradeIfNeeded(requested: degraded, served: result.actualQuality,
+                                        via: result.via)
                 await startItem(url: url, track: track, gen: gen)
+                beginQualityMeasurement(url: url, claimed: result.actualQuality,
+                                        servedLabel: result.servedLabel, track: track, gen: gen)
                 return
             }
         }
@@ -986,7 +1183,18 @@ final class PlaybackStore: ObservableObject {
                 lastFetchVia = result.via
                 lastFetchReason = result.reason
                 actualQuality = result.actualQuality
+                servedQualityLabel = result.servedLabel
+                currentVia = result.via
+                if result.via == "cloud", let resolved = result.resolvedTrack {
+                    applyCloudTrack(resolved)
+                }
+                // r31-videoreward：重试拿到平台腿地址且是 VIP 歌时同样记一次已验证有资格。
+                noteVideoReward(track: track, result: result)
+                recordDowngradeIfNeeded(requested: preferredQuality, served: result.actualQuality,
+                                        via: result.via)
                 await startItem(url: url, track: track, gen: gen)
+                beginQualityMeasurement(url: url, claimed: result.actualQuality,
+                                        servedLabel: result.servedLabel, track: track, gen: gen)
                 return
             }
         }
@@ -996,6 +1204,10 @@ final class PlaybackStore: ObservableObject {
         isLoading = false
         isPlaying = false
         errorMessage = lastFetchReason.isEmpty ? "unavailable" : lastFetchReason
+        // r31-videoreward：全档重试耗尽仍是 vip 拒绝 → 本地资格立即失效（服务端为准）。
+        if lastFetchReason == "vip" {
+            VideoRewardStore.shared.noteVIPRefusal(platform: track.platform)
+        }
         DiagLog.shared.recordPlaybackStep("play FAIL all tiers source=\(track.platform) id=\(track.id) reason=\(lastFetchReason)")
     }
 
@@ -1008,13 +1220,15 @@ final class PlaybackStore: ObservableObject {
     }
 
     /// LX 死链降档（r26）：实际回档往下降一档（LX 档位顺序 master →
-    /// atmos → hires → flac24bit → 320k → 128k，按 canon 回的档位映射，
-    /// 不是通用 rank——surround/spatial 在 lx canon 里不会出现）。
-    /// 已是最低档（128k）/ 回档未知时回 nil，不降档，直接走平台腿。
+    /// atmos → hires → flac24bit → 320k → 128k，按 canon 回的档位映射）。
+    /// 这是「地址进了播放器才发现是死链」的失败恢复（只走一次），不是
+    /// 请求时的降档阶梯——R4 删的是请求档一路降到 standard，resolveURL
+    /// 里没有那种 ladder（见 resolveURL 注释）。已是最低档（128k）/
+    /// 回档未知时回 nil，不降档，直接走平台腿。
     private static func degradedLXQuality(below actual: AudioQuality?) -> AudioQuality? {
         switch actual {
-        case .master: return .spatial     // lx: master → atmos
-        case .dolby: return .hires       // lx: atmos → hires
+        case .master: return .atmos      // lx: master → atmos
+        case .atmos, .dolby, .surround: return .hires  // lx: atmos → hires
         case .hires: return .lossless     // lx: hires → flac24bit
         case .lossless: return .exhigh    // lx: flac24bit → 320k
         case .exhigh: return .standard    // lx: 320k → 128k
@@ -1022,15 +1236,29 @@ final class PlaybackStore: ObservableObject {
         }
     }
 
-    /// 取链编排（player.js fetchTrackUrl 的顺序；每一档只在上一档明确拿不到
-    /// 地址时才跑）。返回 nil = 各档都拿不到（调用方按 reason 报错，不编地址）。
+    /// 取链编排（r31 音质系统替换；每一腿只在上一腿明确拿不到地址
+    /// 时才跑）。返回 nil = 各腿都拿不到（调用方按 reason 报错，不编地址）。
+    /// 顺序只由设置「播放来源」三段定（R1/R2 已删：不问会员/登录）：
+    /// - automatic：LX 优先取请求档、账号只兜底；先拿到的档位低于请求档
+    ///   时，先记下它，再向另一腿要高档，留档高者（Moumusic
+    ///   officialFallback 的结构，方向反过来：Lizi 是 LX 先）。
+    /// - official：账号腿（平台 → 云盘）先，拿不到时走 LX。
+    /// - thirdParty：LX 腿先，拿不到时走账号腿。
+    /// R7 已删：三段只是优先顺序，不是硬隔离——任一段拿不到时另一段
+    /// 都可兜底。R4 已删：没有「请求档一路降到 standard」的 ladder，
+    /// 每条腿都只发一次请求档；死链降档只在 handlePlaybackFailure 2a
+    /// （地址进了播放器才发现是死的）走一次。R5 已删：试听地址不再
+    /// 拒掉，返回什么播什么（isTrial 只打标记）。
     /// 第 22 轮第 5 件：每腿 await 之后都查代际（Moumusic 同款守卫）——
     /// 新一代已来 / 任务已取消时立刻回 nil，不再往下烧平台请求、不把旧地址
     /// 交给新一代；7 个平台都走这同一条编排（平台腿在 NativeBridge.songURL
-    /// 里按平台分，LX 腿只覆盖有 LX 解析的平台，见 lxSupported）。
+    /// 里按平台分，LX 腿只覆盖有 LX 解析的平台，见 lxSupportedPlatforms）。
     /// `quality`（r26）：只给 LX 死链降档重试用（handlePlaybackFailure
-    /// 2a）；不传时 LX 腿用 preferredQuality，平台腿永远用 preferredQuality。
-    private func resolveURL(for track: Track, gen: Int, skips: SkipSet = SkipSet(), quality: AudioQuality? = nil) async -> NativeBridge.SongURLResult? {
+    /// 2a）；不传时各腿都用 preferredQuality（单曲覆盖 → 全局默认档）。
+    /// `forceQuality`（r31-download）：下载所选档——传了就同时进三条腿
+    /// （LX / 平台 / 云盘）；不传时各腿走 quality ?? preferredQuality，
+    /// 既有重试路径（只传 quality 不传 forceQuality）的行为一字不动。
+    private func resolveURL(for track: Track, gen: Int, skips: SkipSet = SkipSet(), quality: AudioQuality? = nil, forceQuality: AudioQuality? = nil) async -> NativeBridge.SongURLResult? {
         DiagLog.shared.recordPlaybackStep("resolve start source=\(track.platform) id=\(track.id) gen=\(gen)")
         // 本地文件：地址就是文件 URL，不走 LX、不走平台接口。
         if track.platform == "local" {
@@ -1039,80 +1267,321 @@ final class PlaybackStore: ObservableObject {
             }
             return NativeBridge.SongURLResult(reason: "unavailable", via: "local")
         }
-        let lxSupported = ["netease", "qq", "kuwo", "qishui", "kugou", "bodian"].contains(track.platform)
-        let member = await NativeBridge.isMember(platform: track.platform)
-        guard gen == resolveGeneration, !Task.isCancelled else {
-            DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=member source=\(track.platform) id=\(track.id)")
-            return nil
+        // r31-download：已下载优先播本地（Moumusic PlayerService 同款：
+        // 取链先查下载记录，文件在就直接播本地文件，来源标「本地下载」、
+        // 音质取记录里的实际音质；没有记录才走网络取链）。
+        // r27 旧下载同样命中（record(for:) 含旧映射兼容分支，文件在
+        // Documents/LocalMusic/ 里）。
+        if let record = DownloadStore.shared.record(for: track) {
+            DiagLog.shared.recordPlaybackStep("resolve local-download ok source=\(track.platform) id=\(track.id) via=local quality=\(record.quality)")
+            return NativeBridge.SongURLResult(url: record.fileURL,
+                                              actualQuality: record.actualQuality,
+                                              servedLabel: record.qualityLabel,
+                                              via: "local")
         }
-        // 没会员 → LX 先（拿整首）；有会员 → 平台先。
-        // r26：LX 腿用 quality（降档重试传进来的档位）或 preferredQuality。
-        let lxQuality = quality ?? preferredQuality
-        let lxFirst = !skips.skipLX && lxSupported && !member
+        let requested = forceQuality ?? quality ?? preferredQuality
+        let mode = SettingsStore.storedPlaybackSourceMode()
+        // r31-membership：网易取高音质档前懒补一次会员信息（已有 vipInfo
+        // 不发请求；失败保持未知，不拦播放——会员校验只识别、不卡档，
+        // 见 LoginStore.ensureVIPInfo）。
+        if track.platform == "netease" {
+            await LoginStore.shared.ensureVIPInfo(platform: "netease")
+        }
+        // r31-membership：酷狗按会员分流——已登录且会员态已知为非会员时
+        // 不走官方腿，全走 LX 自定义音源（音质按 LX 返回的实际音质，
+        // 「解除限制」口径：返回什么播什么、显示什么，见 lxSongURL）；
+        // 会员 / 会员态未知 / 未登录时走原编排（未知时官方腿先试，拿不到
+        // 再 LX 兜底，不把会员误判成非会员挡在门外）。云盘是用户自己的
+        // 文件，不属官方曲库，不随会员分流。分流只决定腿，不决定档位：
+        // 任何「本地会员旗为假就跳过高档请求」的逻辑都不存在（全仓已查，
+        // 见 verification/r31-membership.cjs §7）。
+        let kugouNonMemberLXOnly = track.platform == "kugou"
+            && LoginStore.shared.isLoggedIn(platform: "kugou")
+            && LoginStore.shared.vipKnown(platform: "kugou")
+            && !LoginStore.shared.isVip(platform: "kugou")
         var lastReason = ""
-        if lxFirst, let lx = await NativeBridge.lxSongURL(track: track, quality: lxQuality) {
-            guard gen == resolveGeneration, !Task.isCancelled else {
-                DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=lx-first source=\(track.platform) id=\(track.id)")
-                return nil
+        switch mode {
+        case .automatic:
+            // r31 第三推改顺序（用户长期优先级：官方 → 个人云盘 → LX）：
+            // 云盘腿在 LX 腿之前跑——云盘是用户自己的文件，有就先播它，
+            // 不必等 LX；LX 仍优先于官方腿（Moumusic 自动模式设计）。
+            if let cloud = await cloudLeg(track: track, gen: gen, skips: skips, quality: requested) {
+                return cloud
             }
-            DiagLog.shared.recordPlaybackStep("resolve lx-first ok source=\(track.platform) id=\(track.id)")
-            return lx
-        }
-        guard gen == resolveGeneration, !Task.isCancelled else {
-            DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=lx-first source=\(track.platform) id=\(track.id)")
-            return nil
-        }
-        if !skips.skipPlatform {
-            let r = await NativeBridge.songURL(track: track, quality: preferredQuality)
-            guard gen == resolveGeneration, !Task.isCancelled else {
-                DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=platform source=\(track.platform) id=\(track.id)")
-                return nil
-            }
-            lastReason = r.reason
-            if let url = r.url {
-                // 没会员 + LX 已先跑过且没拿到时，官方的试听地址直接拒掉（不放试听片段）。
-                if lxFirst && r.isTrial {
-                    lastReason = "vip"
-                    DiagLog.shared.recordPlaybackStep("resolve platform trial rejected source=\(track.platform) id=\(track.id)")
-                } else {
-                    DiagLog.shared.recordPlaybackStep("resolve platform ok source=\(track.platform) id=\(track.id) via=platform")
-                    return r
+            // LX 优先取请求档、账号只兜底。
+            if let lx = await lxLeg(track: track, gen: gen, skips: skips, quality: requested) {
+                return await upgradeIfLower(lx, requested: requested) {
+                    // 酷狗已知非会员不走官方腿：LX 档位低也不向官方腿要高档。
+                    guard !kugouNonMemberLXOnly else { return nil }
+                    return await self.platformLeg(track: track, gen: gen, skips: skips, quality: requested)
                 }
             }
-        }
-        if !skips.skipCloud, track.platform == "netease",
-           let cloud = await NativeBridge.cloudSongURL(track: track) {
-            guard gen == resolveGeneration, !Task.isCancelled else {
-                DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=cloud source=\(track.platform) id=\(track.id)")
-                return nil
+            if !kugouNonMemberLXOnly,
+               let platform = await platformLeg(track: track, gen: gen, skips: skips, quality: requested) {
+                lastReason = platform.reason
+                if platform.url != nil { return platform }
             }
-            DiagLog.shared.recordPlaybackStep("resolve cloud ok id=\(track.id)")
-            return cloud
-        }
-        guard gen == resolveGeneration, !Task.isCancelled else {
-            DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=cloud source=\(track.platform) id=\(track.id)")
-            return nil
-        }
-        if !lxFirst, !skips.skipLX, lxSupported,
-           let lx = await NativeBridge.lxSongURL(track: track, quality: lxQuality) {
-            guard gen == resolveGeneration, !Task.isCancelled else {
-                DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=lx-fallback source=\(track.platform) id=\(track.id)")
-                return nil
+        case .official:
+            // 账号腿先（平台 → 云盘），拿不到时走 LX。
+            if !kugouNonMemberLXOnly,
+               let platform = await platformLeg(track: track, gen: gen, skips: skips, quality: requested) {
+                lastReason = platform.reason
+                if platform.url != nil {
+                    return await upgradeIfLower(platform, requested: requested) {
+                        // r31 第三推改顺序：升级先问云盘再问 LX（用户长期优先级）。
+                        if let cloud = await self.cloudLeg(track: track, gen: gen, skips: skips, quality: requested) {
+                            return cloud
+                        }
+                        return await self.lxLeg(track: track, gen: gen, skips: skips, quality: requested)
+                    }
+                }
             }
-            DiagLog.shared.recordPlaybackStep("resolve lx fallback ok source=\(track.platform) id=\(track.id)")
-            return lx
+            if let cloud = await cloudLeg(track: track, gen: gen, skips: skips, quality: requested) {
+                return cloud
+            }
+            if let lx = await lxLeg(track: track, gen: gen, skips: skips, quality: requested) {
+                return lx
+            }
+        case .thirdParty:
+            // LX 腿先，拿不到时走账号腿。
+            if let lx = await lxLeg(track: track, gen: gen, skips: skips, quality: requested) {
+                return lx
+            }
+            if !kugouNonMemberLXOnly,
+               let platform = await platformLeg(track: track, gen: gen, skips: skips, quality: requested) {
+                lastReason = platform.reason
+                if platform.url != nil { return platform }
+            }
+            if let cloud = await cloudLeg(track: track, gen: gen, skips: skips, quality: requested) {
+                return cloud
+            }
         }
         return NativeBridge.SongURLResult(reason: lastReason.isEmpty ? "unavailable" : lastReason,
                                           via: "platform")
     }
 
-    /// r27 下载用：复用播放取链整条编排（resolveURL：官方 → 云盘 → LX；
-    /// 取链全失败时只回失败原因、不回地址，下载按失败处理）。
+    /// 有 LX 解析的平台（LX 腿只覆盖这些；Apple Music / 本地没有 LX 解析）。
+    private static let lxSupportedPlatforms: Set<String> = ["netease", "qq", "kuwo", "qishui", "kugou", "bodian"]
+
+    /// LX 腿：返回 nil = 跳过 / 拿不到 / 代际过期（每腿 await 之后都查
+    /// 代际，第 22 轮第 5 件 Moumusic 同款守卫）。
+    private func lxLeg(track: Track, gen: Int, skips: SkipSet, quality: AudioQuality) async -> NativeBridge.SongURLResult? {
+        guard !skips.skipLX, Self.lxSupportedPlatforms.contains(track.platform) else { return nil }
+        let result = await NativeBridge.lxSongURL(track: track, quality: quality)
+        guard gen == resolveGeneration, !Task.isCancelled else {
+            DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=lx source=\(track.platform) id=\(track.id)")
+            return nil
+        }
+        guard let result, result.url != nil else { return nil }
+        DiagLog.shared.recordPlaybackStep("resolve lx ok source=\(track.platform) id=\(track.id)")
+        return result
+    }
+
+    /// 平台腿：返回 nil = 跳过 / 代际过期；url 为 nil 的结果也原样回
+    /// （reason 给调用方记 lastReason，不丢失败原因）。
+    private func platformLeg(track: Track, gen: Int, skips: SkipSet, quality: AudioQuality) async -> NativeBridge.SongURLResult? {
+        guard !skips.skipPlatform else { return nil }
+        let result = await NativeBridge.songURL(track: track, quality: quality)
+        guard gen == resolveGeneration, !Task.isCancelled else {
+            DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=platform source=\(track.platform) id=\(track.id)")
+            return nil
+        }
+        return result
+    }
+
+    /// 云盘腿（网易/酷狗个人云盘）：返回 nil = 跳过 / 不是网易或酷狗 / 没存到 /
+    /// 代际过期。仍要登录（SessionStore.hasMusicU / 酷狗 token）——读自己的云盘文件
+    /// 是取数据的必要条件，不是档位限制；没登录时这腿直接不存在，不报错。
+    /// 网易认 MUSIC_U（NativeBridge.neteaseCloudSongURL 内 guard），酷狗认
+    /// 服务端 401（调列表时回 401 即未登录，见 NativeBridge.kugouCloudSongURL）。
+    private func cloudLeg(track: Track, gen: Int, skips: SkipSet, quality: AudioQuality) async -> NativeBridge.SongURLResult? {
+        guard !skips.skipCloud, track.platform == "netease" || track.platform == "kugou" else { return nil }
+        let result = await NativeBridge.cloudSongURL(track: track, quality: quality)
+        guard gen == resolveGeneration, !Task.isCancelled else {
+            DiagLog.shared.recordPlaybackStep("resolve stale gen=\(gen) leg=cloud source=\(track.platform) id=\(track.id)")
+            return nil
+        }
+        guard let result, result.url != nil else { return nil }
+        DiagLog.shared.recordPlaybackStep("resolve cloud ok id=\(track.id)")
+        return result
+    }
+
+    /// 云盘元数据只补缺失项（r31-clouddrive）：封面空 → 补，时长 0 → 补，
+    /// 歌手空/「未知歌手」→ 补，专辑空 → 补，歌名空 → 补；已有的标题/歌手/
+    /// 专辑/封面一律不动，不拿云盘文件名覆盖用户看到的曲名。时长补上时
+    /// duration 也同步（原来是 0 才补）。
+    private func applyCloudTrack(_ resolved: Track) {
+        guard var current = currentTrack else { return }
+        var changed = false
+        if current.coverURL == nil, let cover = resolved.coverURL {
+            current.coverURL = cover
+            changed = true
+        }
+        if current.durationMs == 0, resolved.durationMs > 0 {
+            current.durationMs = resolved.durationMs
+            changed = true
+        }
+        if (current.artist.isEmpty || current.artist == "未知歌手"),
+           !resolved.artist.isEmpty, resolved.artist != "未知歌手" {
+            current.artist = resolved.artist
+            changed = true
+        }
+        if current.album.isEmpty, !resolved.album.isEmpty {
+            current.album = resolved.album
+            changed = true
+        }
+        if current.title.isEmpty, !resolved.title.isEmpty {
+            current.title = resolved.title
+            changed = true
+        }
+        guard changed else { return }
+        currentTrack = current
+        if duration == 0, resolved.durationMs > 0 { duration = resolved.durationSeconds }
+    }
+
+    /// 两条腿谁的档位高（nil 档位 = 未知，算最低；同档时先拿到的赢，
+    /// 不换手）。
+    private static func higherQualityResult(_ a: NativeBridge.SongURLResult,
+                                            _ b: NativeBridge.SongURLResult) -> NativeBridge.SongURLResult {
+        let ra = a.actualQuality?.rank ?? 0
+        let rb = b.actualQuality?.rank ?? 0
+        return rb > ra ? b : a
+    }
+
+    /// 先拿到的结果档位低于请求档时，向另一腿要高档；另一腿拿不到
+    /// 或更低时用回先拿到的（绝不丢掉已有的可播地址）。
+    /// `other` 只在需要时才跑，不多烧一次请求。
+    private func upgradeIfLower(_ first: NativeBridge.SongURLResult, requested: AudioQuality,
+                                other: () async -> NativeBridge.SongURLResult?) async -> NativeBridge.SongURLResult {
+        let firstRank = first.actualQuality?.rank ?? 0
+        guard firstRank < requested.rank else { return first }
+        guard let second = await other(), second.url != nil else { return first }
+        DiagLog.shared.recordPlaybackStep("resolve upgrade compare first=\(first.actualQuality?.rawValue ?? "-") second=\(second.actualQuality?.rawValue ?? "-") requested=\(requested.rawValue)")
+        return Self.higherQualityResult(first, second)
+    }
+
+    /// r27 下载用：复用播放取链整条编排（resolveURL：按「播放来源」
+    /// 三段走；取链全失败时只回失败原因、不回地址，下载按失败处理）。
     /// 不推进代际（不取消在播任务）：用当前 resolveGeneration 快照；
     /// 取链中途切歌导致代际变化时 resolveURL 因 gen 对不上回 nil，
-    /// 下载按失败处理，用户重试。质量走 preferredQuality（resolveURL 内定）。
-    func resolveURLForDownload(track: Track) async -> NativeBridge.SongURLResult? {
-        await resolveURL(for: track, gen: resolveGeneration, quality: preferredQuality)
+    /// 下载按失败处理，用户重试。
+    /// 质量（r31-download）：传了 quality 就按所选档取链（forceQuality
+    /// 同时进三条腿）；不传时走 preferredQuality（resolveURL 内定）。
+    /// 注意：已下载的歌调它会直接回本地文件（resolveURL 的本地优先分支），
+    /// DownloadStore.download() 已先拦已下载，这里只作第二道闸。
+    func resolveURLForDownload(track: Track, quality: AudioQuality? = nil) async -> NativeBridge.SongURLResult? {
+        await resolveURL(for: track, gen: resolveGeneration, forceQuality: quality)
+    }
+
+    // MARK: - 降级提示 / 实测链 / 探档位（r31 音质系统替换）
+
+    /// r31-videoreward：免费播放资格校验的播放侧钩子（只记证据，不拦播放）。
+    /// - 平台腿回了地址且这首是 VIP 歌 → `notePlatformGranted` 记一次已验证有资格
+    ///   （只对曲目行带付费标记的平台有效；LX / 云盘 / 本地腿不算证据）。
+    /// - 地址为空且 reason 是 vip → `noteVIPRefusal`，本地资格立即失效（服务端为准）。
+    /// 放行语义：这里不做任何拦截——服务端给了地址就正常播；资格记录只是校验证据。
+    private func noteVideoReward(track: Track, result: NativeBridge.SongURLResult?) {
+        guard let result else { return }
+        if result.url != nil {
+            VideoRewardStore.shared.notePlatformGranted(track: track, via: result.via)
+        } else if result.reason == "vip" {
+            VideoRewardStore.shared.noteVIPRefusal(platform: track.platform)
+        }
+    }
+
+    /// 实际档位低于请求档时记一笔（Moumusic「音质降级时提示」的结构）：
+    /// DiagLog 永远记；UI 文案只在降级提示开关开时才置（开关关时
+    /// downgradeNotice 保持 nil，选择器里不弹提示、日志里仍有据可查）。
+    /// 档位未知（actualQuality 为 nil）不算降级——不知道就别瞎提示。
+    private func recordDowngradeIfNeeded(requested: AudioQuality, served: AudioQuality?,
+                                         via: String) {
+        guard let served else { return }
+        guard served.rank < requested.rank else { return }
+        let servedText = served.displayName
+        DiagLog.shared.recordPlaybackStep(
+            "quality downgraded requested=\(requested.rawValue) served=\(served.rawValue) via=\(via)")
+        guard SettingsStore.storedQualityDowngradeNotice() else { return }
+        downgradeNotice = "这首歌没有「\(requested.displayName)」音源，已按「\(servedText)」播放"
+    }
+
+    /// 起播后异步跑实测链（StreamQualityMeasurer：AVFoundation 流实测 →
+    /// 文件头 → URL 文件名 → 音源返回标签）。测到档位就替换 resolve 时
+    /// 的宣称档位（实测是终审）；测不到档位但有原文标签、且 resolve 时
+    /// 也没定档时，补原文标签；其余情况保留 resolve 时的值。
+    /// 代际 / 曲目对不上时直接丢弃，旧实测绝不盖到新歌头上。
+    private func beginQualityMeasurement(url: URL, claimed: AudioQuality?,
+                                         servedLabel: String?, track: Track, gen: Int) {
+        Task { @MainActor in
+            let measured = await StreamQualityMeasurer.measure(url: url, claimed: claimed,
+                                                               servedLabel: servedLabel)
+            guard gen == self.currentPlayGeneration,
+                  self.currentTrack?.id == track.id,
+                  self.currentTrack?.platform == track.platform else { return }
+            if let tier = measured.tier {
+                self.actualQuality = tier
+                self.servedQualityLabel = nil
+                DiagLog.shared.recordPlaybackStep(
+                    "quality measured source=\(track.platform) id=\(track.id) tier=\(tier.rawValue)")
+            } else if self.actualQuality == nil, let label = measured.rawLabel {
+                self.servedQualityLabel = label
+            }
+        }
+    }
+
+    /// 探档位缓存（track id + platform + mode → 确认过的档位集合，
+    /// 60 秒有效；Moumusic qualityAvailabilityCache 同款结构）。
+    private var probeCache: [String: (at: Date, tiers: Set<AudioQuality>)] = [:]
+
+    /// 探档位（r31）：对当前这首歌，逐档问两条腿（LX 腿 + 平台腿，
+    /// 并发、8 秒总上限），一档只有在某条腿原样返回该档时才算确认
+    /// （served == 请求档才算；腿内部降档回来的不算——问 master 回
+    /// 320k 只能确认 320k，不能确认 master）。
+    /// 结果只给选择器打「可播」标记用（信息性），绝不拿来过滤选择器：
+    /// R3 已删，9 档永远全列、永远可点，没探到的档照样能选、照样发请求。
+    /// 汽水/波点/Apple Music 没有 Moumusic 对照：走 LX 腿 + 平台腿
+    /// 的实际返回为准（Apple Music 的 LX 腿恒为空，只剩平台腿的试听）。
+    func probeAvailableQualities(for track: Track) async -> Set<AudioQuality> {
+        let key = "\(track.platform)\u{1f}\(track.id)\u{1f}\(SettingsStore.storedPlaybackSourceMode().rawValue)"
+        if let hit = probeCache[key], Date().timeIntervalSince(hit.at) < 60 {
+            return hit.tiers
+        }
+        // 8 秒总上限：探档位只是选择器的提示，不值得为一档死等；
+        // 超时（或全失败）按「这次没探到」处理，不缓存空结果，下次打开再探。
+        let tiers = await withTaskGroup(of: Set<AudioQuality>.self) { group in
+            group.addTask { await self.probeTiersUncapped(for: track) }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                return Set<AudioQuality>()
+            }
+            let first = await group.next() ?? []
+            group.cancelAll()
+            return first
+        }
+        guard !tiers.isEmpty else { return tiers }
+        probeCache[key] = (at: Date(), tiers: tiers)
+        if probeCache.count > 200 { probeCache.removeAll() }
+        return tiers
+    }
+
+    /// 探档位的无上限本体（9 档并发：每档先问 LX 腿、再问平台腿；
+    /// 一档只有在某条腿原样返回该档时才算确认）。
+    private func probeTiersUncapped(for track: Track) async -> Set<AudioQuality> {
+        await withTaskGroup(of: AudioQuality?.self) { group in
+            for tier in AudioQuality.allCases {
+                group.addTask {
+                    let lx = await NativeBridge.lxSongURL(track: track, quality: tier)
+                    if let lx, lx.url != nil, lx.actualQuality == tier { return tier }
+                    let platform = await NativeBridge.songURL(track: track, quality: tier)
+                    if platform.url != nil, platform.actualQuality == tier { return tier }
+                    return nil
+                }
+            }
+            var found = Set<AudioQuality>()
+            for await tier in group {
+                if let tier { found.insert(tier) }
+            }
+            return found
+        }
     }
 
     // MARK: - 进度（AVPlayer periodic time observer 驱动）

@@ -63,11 +63,11 @@ struct LoginSheetView: View {
         case "netease":
             NetEaseLoginView()
         case "qq":
-            QQLoginView()
+            QQMusicLoginSheet()
         case "qishui":
             QishuiLoginView(onClose: close)
         case "kugou":
-            FoliaKugouLoginView(onClose: close)
+            KugouLoginSheet(onClose: close)
         case "bodian":
             BodianLoginView(onClose: close)
         case "kuwo":

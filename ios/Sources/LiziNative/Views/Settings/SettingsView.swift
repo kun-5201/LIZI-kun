@@ -1,9 +1,11 @@
+import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
 /// 设置页（P3-C，屏幕 11）：对照壳版 `public/index.html` 的 `#view-settings`
-/// 整页 + `app.js` 设置逻辑，8 分区全做（r25 加形态歌词），不漏分区、
-/// 不自造不存在的开关。
+/// 整页 + `app.js` 设置逻辑，r31-settings-organization 归档后 8 分区已落 +
+/// 「音乐与音质」预留位 1 个（音质替换工在加，见 body 里预留注释）；
+/// 每项都归进一个分区，无孤项、无重复项、无死入口（去重记录见下）。
 ///
 /// 对照表（壳版行 → 原生实现）：
 /// 1. 平台账号：7 行平铺（网易云/QQ/酷狗/汽水/波点/酷我/Apple Music），
@@ -23,22 +25,67 @@ import UniformTypeIdentifiers
 /// 3. 本地音乐：数量实读 LocalMusic 清单；在首页显示开关真持久化；
 ///    导入按钮接首页同款导入器（系统文件选择器，UTType.audio 多选，
 ///    `LocalMusic.importFiles`），导入后数量当场刷新（r25 #47）。
-/// 4. 音效：9 档音质真选（调 PlaybackStore.setPreferredQuality，当场影响
-///    取链档位）；均衡器细调（10 套预设 + 7 段 EQ）是 P4，本轮只做入口行
-///    + 空态提示。壳版第 9 档 DTS:X 无上游流，原生不提供，不编。
+/// 4. 音乐与音质（r31 音质系统替换，已落地）：播放来源三段
+///    （自动/账号优先/第三方优先，只定优先顺序，不硬隔离）+
+///    默认档 Picker（9 档全列，默认 exhigh，调
+///    PlaybackStore.setPreferredQuality 写 settings.audioQuality，
+///    当场影响取链档位）+ 音质降级时提示开关。
+///    旧「音效」分区已删（r31-settings-organization 去重）：均衡器细调
+///    （10 套预设 + 7 段 EQ）P4 未实现，旧入口行只弹提示，是死入口，
+///    已删，不留。设置页与播放页的选档不是重复：本分区默认档 Picker
+///    （9 档，改全局默认档，切歌不丢）与播放页底部音质芯片选择器
+///    （9 档，单曲覆盖，切歌清掉）各管各的，都留着（r31 第三推：
+///    音质替换工按批准设计重加默认档 Picker，旧「设置页 9 档选档已删」口径过期）。
+///    壳版第 9 档 DTS:X 无上游流，原生不提供，不编。
 /// 5. 播放页排版：4 套版式（默认/左右对半/上下分屏/极小封面）真持久化
 ///    `lizi.now.layout`；PlayerView r25 已按版式重排（对照见 PlayerView
-///    文件头）。LRCLIB 兜底开关真生效（Lrclib.isEnabled 同键）。
-/// 5b. 形态歌词（r25 #31）：原文 / 双文 / 译文三档（壳版 `#set-stage-lyric`，
-///    键 `lizi.stage.lyricMode`，默认原文），只改形态里显示的字；
-///    StageBridge 按档出词。
-/// 6. 外观：平台头像/平台颜色/大厅内容轨/动画插图（默认开，`lizi.animatedArtwork`，
-///    与 NowPlayingCoordinator 同键）/我的专辑展示/跑马带速度，全真持久化；
-///    主页背景与大厅背景效果原生本轮做不了，只做诚实空态行 + 提示；
-///    字体选择/快捷键壳版本身就是「待开放」，原样照搬为静态行；开场引导
-///    壳版已隐藏（hidden），不复刻。
+///    文件头）。LRCLIB 兜底开关原在这里，r31-settings-sections 挪进
+///    下面的「歌词显示」分区（键与默认值不动）。
+/// 5c. 歌词显示（r31-settings-sections，只归类现有设置，不新增歌词功能）：
+///    LRCLIB 歌词兜底（原在播放页排版区，键 `lizi.lrclib.enabled`，默认开）
+///    + 形态歌词三档（原 5b 独立分区，壳版 `#set-stage-lyric`，键
+///    `lizi.stage.lyricMode`，默认原文）；只改歌词显示方式，播放页歌词
+///    与形态显示的字都不新增、不改逻辑。
+/// 5d. 显示与性能（r31-settings-sections）：120Hz 高刷新率开关（默认开，
+///    键 `lizi.display.highRefreshRate`，控两处 CADisplayLink 的
+///    preferredFrameRateRange 上限：开 120 / 关 60；plist 解锁是编译期，
+///    运行时关不掉）+ 动画插图（原在外观区，键 `lizi.animatedArtwork`，
+///    默认开，锁屏动态封面）。
+/// 6. 外观（r31-settings-organization 去重后只剩真能用的两项：我的专辑展示
+///    + 推荐跑马带速度，全真持久化；r31-imagebg 再加「背景」一项，
+///    静态图片 / 动态壁纸真实现，见 appearanceSection）：
+///    平台头像/平台颜色/大厅内容轨三开关已删——只写 UserDefaults，原生大厅
+///    从不读这三把键（只剩壳版 public/app.js 在读，原生包不走那条路），
+///    拨了没任何效果，是假开关；大厅消费对应键后再加回。
+///    主页背景/大厅背景效果两行原是只弹「暂不支持」提示的死入口，
+///    r31-imagebg 已真做出来（不是把死入口贴回去）：外观区「背景」行，
+///    相册选图/选视频、落盘保存、重启保留、首页/大厅生效、可读性蒙版；
+///    字体选择/快捷键两行已删——壳版「待开放」静态行，点按无反应。
+///    开场引导壳版已隐藏（hidden），不复刻。
+///    动画插图原在这里，r31-settings-sections 挪进上面的「显示与性能」分区。
 /// 7. 关于：版本（Bundle）、构建（LiziNativeBuildInfo，CI 生成）、诊断日志
-///    （查看/复制，读 DiagLog）、QQ 群、赞助（支付宝收款码链接，均照抄壳版）。
+///    （查看/复制/清空，读/清 DiagLog）、QQ 群、赞助（支付宝收款码链接，均照抄壳版）。
+///
+/// r31-settings-organization 去重清单（删了哪个 → 留了哪个）：
+/// - 设置页 9 档选档 → 留（改）：音质替换工在「音乐与音质」分区重加了
+///   9 档默认档 Picker（调 PlaybackStore.setPreferredQuality，改全局默认档，
+///   切歌不丢）；播放页底部音质芯片选择器也留（PlayerBottomDock.qualityPickerSheet，
+///   单曲覆盖，切歌清掉）。两个选档各管各的，不是重复（r31 第三推，旧「删」口径过期）。
+/// - 音效/均衡器入口行 → 删（P4 未实现，只弹提示）；无留件，均衡器没有。
+/// - 平台头像/平台颜色/大厅内容轨三开关 → 删（原生无消费者）；无留件。
+/// - 主页背景/大厅背景效果/字体选择/快捷键四行 → 删（只弹提示或静态行）；
+///   无留件，这四项原生没有。（r31-imagebg 更正：主页背景/大厅背景效果
+///   已真实现，见外观区「背景」；字体选择/快捷键仍没有。）
+/// 查过不是重复、留下的：本地音乐导入（首页与设置页各一个入口，同调
+/// LocalMusic.importFiles，同一实现、不同页面的入口，不算重复项）；
+/// 形态歌词三档、LRCLIB、动画插图、120Hz、每日签到/自动签到、播放页排版，
+/// 全仓各只有一个设置入口。播放页音质芯片只剩底部一处（r29 已删歌名下角标）。
+///
+/// 没有（做不了/没接口，老实写清）：均衡器细调；
+/// 字体选择；快捷键；平台头像/平台颜色/大厅内容轨
+/// （原生大厅未消费对应键）。以上均不在设置页摆入口。
+/// （r31-imagebg：主页背景自定义 / 大厅背景效果已实现，不再列在这里，
+/// 见外观区「背景」。）
 ///
 /// 注意：`LiziNativeBuildInfo` 由构建工作流 `ipa-native` job 的
 /// 「Write native build info」一步在构建机上生成
@@ -47,12 +94,20 @@ import UniformTypeIdentifiers
 /// P2 报告说它因无 UI 引用被 strip 掉——本页真实引用它（短 commit + build
 /// 号 + 日期），让它进包。
 struct SettingsView: View {
-    @EnvironmentObject var playback: PlaybackStore
-    @StateObject private var settings = SettingsStore()
+    @StateObject private var settings = SettingsStore.shared
+    /// r31-mquality 残留补（构建工 r31 修）：musicQualitySection 的默认音质
+    /// Picker setter 调 playback.setPreferredQuality，但本文件没声明 playback，
+    /// 编译不过（下载工报的 SettingsView:583 行引用）。App 根部经
+    /// .environmentObject 下发 PlaybackStore（LiziNativeApp，与
+    /// PlatformStripView 同款），这里直接取环境对象；不改调 SettingsStore
+    /// 写口，因为 setPreferredQuality 还负责写盘 + 推 shared 刷新。
+    @EnvironmentObject private var playback: PlaybackStore
     /// r23f：登录底座（r23a，`Views/Login/`）——设置页只消费它的接口
     /// （约定见 `LoginSheetTarget.swift` 文件头）；登录/登出成功后它发布
     /// 变化，账号行随之重绘。未落地前本引用编译不过（见 r23f 驱动 GAP）。
     @ObservedObject private var loginStore = LoginStore.shared
+    /// r31-download：下载管理行读下载清单（数量/大小当场刷新）。
+    @ObservedObject private var downloads = DownloadStore.shared
 
     /// 未登录行点开的登录页目标；账号详情里防御分支的「去登录」也用它。
     @State private var loginTarget: LoginSheetTarget?
@@ -67,12 +122,26 @@ struct SettingsView: View {
     @State private var rebindURLInput = ""
     @State private var showDiagnostics = false
     @State private var diagnosticsText = ""
+    /// r31 日志清空：展开日志区底部「清空日志」的二次确认弹窗开关。
+    @State private var showClearDiagnosticsConfirm = false
     /// r25 #47：本地导入文件选择器 + 导入结果行（导入后数量显示当场刷新）。
     @State private var showLocalImporter = false
     @State private var localImportStatus: String? = nil
     /// r25 #45：网易每日签到结果行 + 进行中态。
     @State private var dailySigninStatus = ""
     @State private var isSigningIn = false
+    /// r31-imagebg：背景（外观区）——系统 PhotosPicker 选图/选视频
+    /// （matching: .images / .videos），读到后交 BackgroundStore 落盘；
+    /// backgroundStatus 是选图/选视频结果行（不用 Notice，见文件头
+    /// r31-settings-organization §5a：Notice 只留诊断日志的回执）。
+    @ObservedObject private var background = BackgroundStore.shared
+    @State private var showImagePicker = false
+    @State private var showVideoPicker = false
+    @State private var imagePickerItem: PhotosPickerItem?
+    @State private var videoPickerItem: PhotosPickerItem?
+    @State private var backgroundStatus: String? = nil
+    /// r31-download：下载管理页 sheet 开关。
+    @State private var showDownloads = false
 
     var body: some View {
         ScrollView {
@@ -80,9 +149,11 @@ struct SettingsView: View {
                 accountSection
                 lxSection
                 localMusicSection
-                audioSection
+                musicQualitySection
                 nowLayoutSection
-                stageLyricSection
+                storageDownloadSection
+                lyricsSection
+                displayPerformanceSection
                 appearanceSection
                 aboutSection
             }
@@ -93,6 +164,13 @@ struct SettingsView: View {
         .background(LiziTokens.paper)
         .onAppear {
             settings.refreshLXSources()
+            // r31-signin：进设置页时重读最近一次签到结果（自动签可能
+            // 在后台跑完，本页 @State 还是旧的；重启后也由此恢复显示）。
+            // 手动签到进行中时不动，等它自己落结果。
+            if !isSigningIn {
+                settings.refreshSigninStatus()
+                dailySigninStatus = settings.lastSigninStatus
+            }
             // r23f：设置页出现时刷新登录态（登录/登出可能发生在别处——
             // 登录页、账号详情页；回来时行状态必须是最新的）。
             loginStore.refresh()
@@ -103,6 +181,9 @@ struct SettingsView: View {
         .sheet(item: $accountDetailTarget) { target in
             AccountDetailView(platform: target.platform)
         }
+        .sheet(isPresented: $showDownloads) {
+            DownloadsView()
+        }
         .alert(item: $notice) { n in
             Alert(title: Text(n.title), message: Text(n.message),
                   dismissButton: .default(Text("知道了")))
@@ -111,6 +192,27 @@ struct SettingsView: View {
                       allowedContentTypes: [UTType(filenameExtension: "js") ?? .plainText],
                       allowsMultipleSelection: true) { result in
             handleLXFileImport(result)
+        }
+        // r31-imagebg：背景选图/选视频（系统 PhotosPicker，不自己写相册）。
+        .photosPicker(isPresented: $showImagePicker, selection: $imagePickerItem, matching: .images)
+        .photosPicker(isPresented: $showVideoPicker, selection: $videoPickerItem, matching: .videos)
+        .onChange(of: imagePickerItem) { item in
+            Task { @MainActor in
+                await handleImagePick(item)
+                imagePickerItem = nil
+            }
+        }
+        .onChange(of: videoPickerItem) { item in
+            Task { @MainActor in
+                await handleVideoPick(item)
+                videoPickerItem = nil
+            }
+        }
+        // r31-imagebg：模式先切、文件后选——切到图片/视频但还没文件时
+        // 弹对应的选图器；取消就停在「未选图/未选视频」，首页显示默认背景。
+        .onChange(of: background.mode) { newMode in
+            if newMode == .image && background.backgroundImage == nil { showImagePicker = true }
+            if newMode == .video && !background.hasVideoFile { showVideoPicker = true }
         }
     }
 
@@ -243,6 +345,13 @@ struct SettingsView: View {
                     .font(.liziBody(size: LiziTokens.size13))
                     .foregroundColor(LiziTokens.ink2)
             }
+            // r31-signin：每日自动签到开关（默认关——现有签到是手动的，
+            // 见 SettingsStore 网易每日签到区注释）。开 = 每天自动签到
+            // 一次，今天已签过（手动/自动任一）就跳过，不重复签；
+            // 关 = 不自动签。7 个平台里只有网易有可用签到接口，
+            // 其它平台没有，不编。
+            toggleRow("每日自动签到", hint: "打开后每天自动签到一次（仅网易云音乐有签到接口）；今天已签过就不再重复签", isOn: $settings.autoDailySignIn)
+                .accessibilityLabel("每日自动签到")
             Button(action: { showPlatformManager.toggle() }) {
                 HStack {
                     rowLabel("平台管理", hint: "勾选要在大厅「我的」和顶部平台条里显示的平台；登录、播放不受影响")
@@ -491,57 +600,122 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - 4. 音效
+    // MARK: - r31-imagebg：背景选图/选视频处理
 
-    private var audioSection: some View {
-        sectionCard(title: "音效", note: "九档音质，显示的永远是实际返回的档位。均衡器细调 P4 上线。") {
-            ForEach(AudioQuality.allCases, id: \.self) { quality in
-                Button(action: { playback.setPreferredQuality(quality) }) {
-                    HStack {
-                        rowLabel(quality.displayName, hint: audioQualityBitrate(quality))
-                        Spacer()
-                        if playback.preferredQuality == quality {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(LiziTokens.ink2)
-                        }
-                    }
-                }
-                .buttonStyle(.plain)
+    /// 相册选图（PhotosPicker，matching: .images）：读到 Data 交
+    /// BackgroundStore.saveImageData 落盘（最长边 1920、JPEG 0.85，
+    /// 只存沙盒文件）；解不开/写盘失败都写明原因，不静默、不弹 Notice。
+    private func handleImagePick(_ item: PhotosPickerItem?) async {
+        guard let item else { return }
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self) else {
+                backgroundStatus = "选图失败：读不到这张图片。"
+                return
             }
-            Divider()
-            Button(action: {
-                notice = Notice(title: "音效 / 均衡器",
-                                message: "均衡器细调（10 套预设 + 7 段 EQ）P4 上线，本轮只做 9 档音质选择。当前预设：平直（默认）。")
-            }) {
-                HStack {
-                    rowLabel("音效 / 均衡器", hint: "10 套预设 + 7 段 EQ，P4 上线")
-                    Spacer()
-                    Text("\(playback.preferredQuality.displayName) · 平直")
-                        .font(.liziBody(size: LiziTokens.size13))
-                        .foregroundColor(LiziTokens.ink2)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(LiziTokens.ink3)
-                }
-            }
-            .buttonStyle(.plain)
+            backgroundStatus = background.saveImageData(data)
+                ? "背景图片已设置（已存到本机，重启还在）。"
+                : "选图失败：这张图片打不开，换一张试试。"
+        } catch {
+            backgroundStatus = "选图失败：\(error.localizedDescription)"
         }
     }
 
-    /// 壳版 `public/audio/eq-engine.js` QUALITIES 里的码率标注（DTS:X 除外，
-    /// 它在壳版里就是 unsupported、无上游流，原生不提供这一档）。
+    /// 相册选视频（PhotosPicker，matching: .videos）：`loadFileRepresentation`
+    /// 拿到的临时文件原样交 BackgroundStore.saveVideoFile 拷进沙盒
+    /// （不转码）；拷失败写明原因，不静默、不弹 Notice。
+    private func handleVideoPick(_ item: PhotosPickerItem?) async {
+        guard let item else { return }
+        do {
+            guard let url = try await item.loadFileRepresentation(
+                forTypeIdentifier: UTType.movie.identifier) else {
+                backgroundStatus = "选视频失败：读不到这个视频。"
+                return
+            }
+            backgroundStatus = background.saveVideoFile(from: url)
+                ? "动态壁纸已设置（视频已存到本机，静音循环播放，重启还在）。"
+                : "选视频失败：存不下这个视频，换一个小一点的试试。"
+        } catch {
+            backgroundStatus = "选视频失败：\(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - 4. 音乐与音质（r31 音质系统替换，已落地）
+
+    /// 播放来源三段 + 默认音质 Picker + 降级提示开关。
+    /// - 播放来源：三段只定腿的优先顺序（自动 = LX 优先、账号兜底；
+    ///   账号优先 = 账号腿先；第三方优先 = LX 腿先），不硬隔离——
+    ///   任一段拿不到时另一段都可兜底（R7 已删）。
+    /// - 默认音质：全局默认档（默认 exhigh），9 档全列，不探测、
+    ///   不设限（R3 已删）；改完下次点播即生效，不改当前这首歌
+    ///   的单曲覆盖（播放页选档才是单曲覆盖，切歌清掉）。
+    /// - 降级提示：实际档位低于请求档时，提示文案进播放页音质
+    ///   选择器；关掉只记日志，不提示。
+    /// 显示的永远是实际返回的档位（芯片/首页卡片读
+    /// PlaybackStore.servedQualityText），不是这里选的请求档。
+    private var musicQualitySection: some View {
+        sectionCard(title: "音乐与音质", note: "默认音质是没选单曲覆盖时的取链档位；显示的永远是实际返回的档位。") {
+            Picker("播放来源", selection: $settings.playbackSourceMode) {
+                ForEach(PlaybackSourceMode.allCases, id: \.self) { mode in
+                    Text(mode.shortDisplayName).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            Text(settings.playbackSourceMode.explanation)
+                .font(.liziBody(size: LiziTokens.size13))
+                .foregroundColor(LiziTokens.ink3)
+            Picker("默认音质", selection: Binding(
+                get: { settings.audioQuality },
+                set: { quality in playback.setPreferredQuality(quality) }
+            )) {
+                ForEach(AudioQuality.allCases, id: \.self) { quality in
+                    Text("\(quality.displayName) · \(audioQualityBitrate(quality))").tag(quality)
+                }
+            }
+            .pickerStyle(.menu)
+            toggleRow("音质降级时提示",
+                      hint: "实际档位低于所选档位时，在音质选择器里提示已按实际档位播放；关闭后只记日志，不提示。",
+                      isOn: $settings.qualityDowngradeNotice)
+        }
+    }
+
+    /// 9 档的技术标注（选择器里的补充说明；Moumusic sourceDisplayName
+    /// 的 Lizi 版：档位名 + 英文/码率，不宣称音源没给过的档位）。
     private func audioQualityBitrate(_ q: AudioQuality) -> String {
         switch q {
         case .standard: return "128 kbps"
         case .higher: return "192 kbps"
         case .exhigh: return "320 kbps"
-        case .lossless: return "FLAC"
-        case .hires: return "Hi-Res"
-        case .surround: return "环绕声"
-        case .dolby: return "Dolby Atmos"
-        case .spatial: return "臻品全景声 3.0"
-        case .master: return "臻品母带 4.0"
+        case .lossless: return "无损 FLAC"
+        case .hires: return "Hi-Res / FLAC 24-bit"
+        case .atmos: return "高清环绕声 / Spatial"
+        case .dolby: return "杜比全景声 / Dolby Atmos"
+        case .surround: return "沉浸环绕声 / Surround"
+        case .master: return "超清母带 / Master"
+        }
+    }
+
+    // MARK: - 3b. 存储与下载（r31-download）
+
+    /// 存储与下载分区（Moumusic 设置「存储与下载」分区同款入口）：
+    /// 「下载管理」行进 DownloadsView（正在下载进度 / 已下载点播 / 左滑删除）；
+    /// 摘要实读下载清单（已下载 N 首 · X MB），下载不设会员/登录门，
+    /// 返回什么音质就下什么、显示实际下载音质。
+    /// 位置在播放页排版之前、本地音乐之后；不占「音乐与音质」的位置
+    ///（那个分区是音质替换工的 musicQualitySection，不抢）。
+    private var storageDownloadSection: some View {
+        sectionCard(title: "存储与下载",
+                    note: "下载的歌曲存在本机，不上传；播放时优先播本地文件。") {
+            Button(action: { showDownloads = true }) {
+                HStack {
+                    rowLabel("下载管理", hint: downloads.summaryText)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(LiziTokens.ink2)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("下载管理 \(downloads.summaryText)")
         }
     }
 
@@ -566,20 +740,27 @@ struct SettingsView: View {
             Text("选择已保存（lizi.now.layout），进播放页即按版式重排（02/04/06 各改什么见播放页文件头对照表）。")
                 .font(.liziBody(size: LiziTokens.size13))
                 .foregroundColor(LiziTokens.ink3)
-            toggleRow("LRCLIB 歌词兜底",
-                      hint: "官方歌词优先；打开后官方没有歌词时才用 LRCLIB 歌词库兜底。",
-                      isOn: $settings.lrclibEnabled)
+            // r31-settings-sections：LRCLIB 歌词兜底开关挪进下面的
+            // 「歌词显示」分区（键与默认值不动，这里只留版式）。
         }
     }
 
-    // MARK: - 5b. 形态歌词（r25 #31）
-
-    /// 形态歌词三档（壳版 `#set-stage-lyric`，见 `SettingsStore`）：
-    /// 原文 / 双文 / 译文；只改形态里显示的字，播放页歌词不动。
-    /// 原生设置页没有单独的「形态」分区（壳版 `set-sec-stagelyric` 在
-    /// 播放页排版区与外观区之间），这里单立一节、放在同样的位置。
-    private var stageLyricSection: some View {
-        sectionCard(title: "形态歌词", note: "只改形态（可视化）里显示的字；播放页歌词不动。没有译文的歌照旧显示原文。") {
+    // MARK: - 5c. 歌词显示（r31-settings-sections）
+    //
+    // 只归类现有歌词显示设置，不新增歌词功能：
+    // - LRCLIB 歌词兜底：原在播放页排版区，逐字挪过来（键
+    //   `lizi.lrclib.enabled`、默认开、hint 文案都不动）；
+    // - 形态歌词三档：原 5b 独立分区（r25 #31），整节并进来
+    //   （Picker 与说明文案都不动，只改形态里显示的字）。
+    // 位置 = 原 5b 形态歌词的位置（播放页排版区之后、外观区之前），
+    // 其他分区顺序不动。
+    private var lyricsSection: some View {
+        sectionCard(title: "歌词显示", note: "只改歌词显示方式；官方歌词优先，没有歌词时不编歌词。") {
+            toggleRow("LRCLIB 歌词兜底",
+                      hint: "官方歌词优先；打开后官方没有歌词时才用 LRCLIB 歌词库兜底。",
+                      isOn: $settings.lrclibEnabled)
+            // 形态歌词三档（壳版 `#set-stage-lyric`，见 `SettingsStore`）：
+            // 原文 / 双文 / 译文；只改形态里显示的字，播放页歌词不动。
             Picker("显示", selection: $settings.stageLyricMode) {
                 ForEach(SettingsStore.stageLyricModes, id: \.id) { mode in
                     Text(mode.name).tag(mode.id)
@@ -593,38 +774,34 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - 6. 外观
-
-    private var appearanceSection: some View {
-        sectionCard(title: "外观") {
-            toggleRow("平台头像",
-                      hint: "关闭时大厅的平台方块只显示平台图标，不显示账号头像。",
-                      isOn: $settings.platformAvatar)
-            toggleRow("用平台颜色铺色",
-                      hint: "关闭时铺色态取当前专辑封面的颜色；打开后回到平台品牌色。",
-                      isOn: $settings.platformColor)
-            toggleRow("大厅内容轨",
-                      hint: "开：精选/喜欢/收藏直接在跑马带里切换；关：恢复点击卡片跳浏览页的旧交互。",
-                      isOn: $settings.hallRail)
+    // MARK: - 5d. 显示与性能（r31-settings-sections）
+    //
+    // 120Hz 高刷新率开关 + 动画插图（原在外观区，逐字挪过来，键
+    // `lizi.animatedArtwork`、默认开、hint 文案都不动）。
+    // 位置 = 外观区之前（播放页排版/歌词显示之后），其他分区顺序不动。
+    // 120Hz 开关控运行时帧率：开 = 两处 CADisplayLink 上限 120，
+    // 关 = 上限 60（SettingsStore.frameRateRange()）；plist 的
+    // CADisableMinimumFrameDurationOnPhone 是编译期解锁，运行时关不掉，
+    // 开关能控的就是这两处 link；默认开 = 120Hz 工既有行为不变。
+    private var displayPerformanceSection: some View {
+        sectionCard(title: "显示与性能", note: "高刷只在 ProMotion 机型上生效，60Hz 机型不受影响；动画插图关掉后锁屏回静态专辑图。") {
+            toggleRow("120Hz 高刷新率",
+                      hint: "打开时跑马带与动画按 120Hz 刷新（仅 ProMotion 机型生效）；关闭后限速 60Hz，更省电。",
+                      isOn: $settings.highRefreshRate)
+                .accessibilityLabel("120Hz 高刷新率")
             toggleRow("动画插图",
                       hint: "打开时锁屏专辑封面会动（本地生成，每首歌都有）；关闭后回到静态专辑图。仅 iOS 26+ 生效。",
                       isOn: $settings.animatedArtwork)
-            Button(action: {
-                notice = Notice(title: "主页背景",
-                                message: "原生版暂不支持自定义主页背景（壳版用粘贴地址 / 选本地文件）。当前：默认渐变。")
-            }) {
-                HStack {
-                    rowLabel("主页背景")
-                    Spacer()
-                    Text("默认渐变")
-                        .font(.liziBody(size: LiziTokens.size13))
-                        .foregroundColor(LiziTokens.ink2)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(LiziTokens.ink3)
-                }
-            }
-            .buttonStyle(.plain)
+        }
+    }
+
+    // MARK: - 6. 外观
+
+    private var appearanceSection: some View {
+        sectionCard(title: "外观", note: "只留真能用的三项。") {
+            // r31-settings-organization：平台头像/平台颜色/大厅内容轨
+            // 三开关已删（只写键、原生大厅从不读，拨了无效，见文件头）；
+            // 动画插图 r31-settings-sections 已挪进「显示与性能」分区。
             Button(action: {
                 settings.myAlbumsForm = settings.myAlbumsForm == "flow" ? "spine" : "flow"
             }) {
@@ -652,36 +829,81 @@ struct SettingsView: View {
                 }
                 Slider(value: $settings.marqueeSpeed, in: 0...100, step: 1)
             }
-            Button(action: {
-                notice = Notice(title: "大厅背景效果",
-                                message: "原生大厅暂无背景动效，当前默认「流色」。壳版 6 种（流色/波浪线/等离子/渐变百叶/光束/抖色）待原生化。")
-            }) {
+            // r31-imagebg：背景（首页 / 大厅背景真实现；对照表 #18 / #20）：
+            // 模式三段（默认 / 静态图片 / 动态壁纸）+ 两个选图按钮 +
+            // 恢复默认；选图/选视频走系统 PhotosPicker（见 body 末尾
+            // .photosPicker），读到后交 BackgroundStore 落盘保存；
+            // 状态行只写结果，不弹 Notice（Notice 只留诊断日志回执）。
+            VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    rowLabel("大厅背景效果", hint: "铺色态海报背后那块动效，换一个立刻生效")
+                    rowLabel("背景", hint: "首页 / 大厅的底色背景；不设就用默认背景")
                     Spacer()
-                    Text("流色（默认）")
+                    Text(background.statusText)
                         .font(.liziBody(size: LiziTokens.size13))
                         .foregroundColor(LiziTokens.ink2)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(LiziTokens.ink3)
                 }
-            }
-            .buttonStyle(.plain)
-            HStack {
-                rowLabel("字体选择", hint: "待开放")
-                Spacer()
-                Text("Geist")
+                Picker("背景", selection: $background.mode) {
+                    Text("默认").tag(BackgroundStore.Mode.none)
+                    Text("静态图片").tag(BackgroundStore.Mode.image)
+                    Text("动态壁纸").tag(BackgroundStore.Mode.video)
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel("背景")
+                if background.mode == .image, let image = background.backgroundImage {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 96, height: 54)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .accessibilityLabel("当前背景图片预览")
+                }
+                if background.mode == .video, background.hasVideoFile {
+                    HStack(spacing: 6) {
+                        Image(systemName: "film")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(LiziTokens.ink2)
+                        Text("视频已设置\(background.fileSizeText.map { " · \($0)" } ?? "")")
+                            .font(.liziBody(size: LiziTokens.size13))
+                            .foregroundColor(LiziTokens.ink2)
+                    }
+                }
+                HStack(spacing: 12) {
+                    Button("选图片") { showImagePicker = true }
+                        .font(.liziBody(size: LiziTokens.size13, weight: .medium))
+                        .foregroundColor(LiziTokens.ink2)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(LiziTokens.paper)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .accessibilityLabel("从相册选一张图片做背景")
+                    Button("选动态壁纸") { showVideoPicker = true }
+                        .font(.liziBody(size: LiziTokens.size13, weight: .medium))
+                        .foregroundColor(LiziTokens.ink2)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(LiziTokens.paper)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .accessibilityLabel("从相册选一段视频做动态壁纸")
+                    Spacer()
+                    if background.hasCustomBackground {
+                        Button("恢复默认", role: .destructive) { background.clearBackground() }
+                            .font(.liziBody(size: LiziTokens.size13, weight: .medium))
+                            .accessibilityLabel("恢复默认背景")
+                    }
+                }
+                if let backgroundStatus {
+                    Text(backgroundStatus)
+                        .font(.liziBody(size: LiziTokens.size13))
+                        .foregroundColor(LiziTokens.ink2)
+                }
+                Text("图片 / 视频存在本机沙盒里，相册原图删了背景还在；背景上有一层浅色蒙版，深色字一直可读；视频背景静音循环播放，切后台暂停。")
                     .font(.liziBody(size: LiziTokens.size13))
-                    .foregroundColor(LiziTokens.ink2)
+                    .foregroundColor(LiziTokens.ink3)
             }
-            HStack {
-                rowLabel("快捷键", hint: "待开放")
-                Spacer()
-                Text("默认")
-                    .font(.liziBody(size: LiziTokens.size13))
-                    .foregroundColor(LiziTokens.ink2)
-            }
+            // r31-settings-organization：大厅背景效果/字体选择/快捷键
+            // 三行已删（前者只弹「暂无」提示，后两者是「待开放」静态行，
+            // 点按无反应，见文件头）；r31-imagebg 更正：大厅背景效果
+            // 已真实现（上面「背景」行），字体选择/快捷键仍没有，不摆入口。
         }
     }
 
@@ -734,6 +956,38 @@ struct SettingsView: View {
                     .padding(10)
                     .background(LiziTokens.paper)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
+                // r31 日志清空：按钮只放在「查看」展开后的日志区最底部，
+                // 不放在「诊断日志」主行（查看/复制那一行）——平时滑设置页
+                // 碰不到它；点一下先弹二次确认（同款见队列「清空队列」、
+                // 账号详情「退出登录」），确认才真清，清完弹 Notice
+                // 「日志已清空。」并当场把展开的文本刷成空 JSON。
+                HStack {
+                    Spacer()
+                    Button {
+                        showClearDiagnosticsConfirm = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "trash")
+                                .font(.system(size: 12, weight: .medium))
+                            Text("清空日志")
+                                .font(.liziBody(size: LiziTokens.size13, weight: .medium))
+                        }
+                        .foregroundStyle(Color.red)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.white.opacity(0.12), in: Capsule())
+                    }
+                    .accessibilityLabel("清空诊断日志")
+                }
+                .alert("清空日志", isPresented: $showClearDiagnosticsConfirm) {
+                    Button("清空", role: .destructive) {
+                        diagnosticsText = settings.clearDiagnostics()
+                        notice = Notice(title: "诊断日志", message: "日志已清空。")
+                    }
+                    Button("取消", role: .cancel) {}
+                } message: {
+                    Text("将清空当前全部诊断日志（最近请求、事件、日志、播放面包屑），清空后无法恢复。")
+                }
             }
             Button(action: { openExternal("https://qm.qq.com/q/U6XytT33mC") }) {
                 HStack {

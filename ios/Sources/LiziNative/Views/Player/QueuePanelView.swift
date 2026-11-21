@@ -7,6 +7,9 @@ import SwiftUI
 /// 出现多次时点第几行就播第几行，r25-B2 U6；旧 `play(item.track)` 按
 /// id+platform 找第一个匹配项，点第二行会播成第一行，已不用）。
 /// 当前在播的行高亮 + 「正在播放」标记。
+/// r31：`store.playNext(_:)` 插进来的歌在行右侧打「下一首」徽章（替代
+/// 时长显示），头部再给一个「· 下一首 N 首」总数；起播后徽章即摘掉，
+/// 那行改回「正在播放」。
 /// 左滑删除单行（`store.removeFromQueue(at:)`）+ 头部「清空」按钮
 /// （二次确认后 `store.clearQueue()`，清空并停止；r25-B2 U3）。
 /// 列表用 List（swipeActions 只在 List 行上生效，ScrollView 里不生效），
@@ -41,7 +44,8 @@ struct QueuePanelView: View {
                 List {
                     ForEach(Array(store.queue.enumerated()), id: \.element.id) { index, item in
                         VStack(spacing: 0) {
-                            QueueRowView(item: item, isCurrent: index == store.currentIndex)
+                            QueueRowView(item: item, isCurrent: index == store.currentIndex,
+                                         isPlayNext: store.isPlayNext(queueId: item.queueId))
                                 .onTapGesture { store.play(queueItem: item) }
                             Divider()
                                 .background(Color.white.opacity(0.08))
@@ -107,6 +111,14 @@ struct QueuePanelView: View {
                 Text("共 \(store.queue.count) 首")
                     .font(.system(size: PlayerTokens.textXs))
                     .foregroundStyle(PlayerTokens.playerDim)
+
+                // r31：待播的下一首有几首（插进去的歌在面板里看得见：行上有
+                // 「下一首」徽章，这里再给一个总数；为 0 时不显示，不占地方）。
+                if store.playNextQueueIds.count > 0 {
+                    Text("· 下一首 \(store.playNextQueueIds.count) 首")
+                        .font(.system(size: PlayerTokens.textXs, weight: .medium))
+                        .foregroundStyle(PlayerTokens.accent)
+                }
             }
 
             if let onClose {
@@ -126,9 +138,14 @@ struct QueuePanelView: View {
 }
 
 /// 队列里的一行。
+/// r31：`isPlayNext` 为真时（这首是「下一首播放」插进来的）在右侧打
+/// 「下一首」徽章，替代时长显示——插进去的歌在面板里一眼看得见；
+/// 起播后待播标记即摘掉（`play(queueItem:)` 里清），徽章随之消失，
+/// 那行改回「正在播放」。
 struct QueueRowView: View {
     let item: QueueItem
     let isCurrent: Bool
+    let isPlayNext: Bool
 
     var body: some View {
         HStack(spacing: 12) {
@@ -153,6 +170,17 @@ struct QueueRowView: View {
                 Text("正在播放")
                     .font(.system(size: PlayerTokens.textXs, weight: .medium))
                     .foregroundStyle(PlayerTokens.accent)
+            } else if isPlayNext {
+                Text("下一首")
+                    .font(.system(size: PlayerTokens.textXs, weight: .medium))
+                    .foregroundStyle(PlayerTokens.accent)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .overlay(
+                        Capsule()
+                            .stroke(PlayerTokens.accent.opacity(0.6), lineWidth: 1)
+                    )
+                    .accessibilityLabel("下一首播放 \(item.track.title)")
             } else {
                 Text(PlayerTokens.formatDuration(item.track.durationSeconds))
                     .font(.system(size: PlayerTokens.textXs))

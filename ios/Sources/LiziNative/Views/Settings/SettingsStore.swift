@@ -1,4 +1,5 @@
 import Foundation
+import QuartzCore
 
 /// 设置统一存储（P3-C，NATIVE-REWRITE-PLAN.md §5 缺口 7）。
 ///
@@ -10,21 +11,91 @@ import Foundation
 /// |---|---|---|---|
 /// | 动画插图 | `lizi.animatedArtwork` | 开 | 与 NowPlayingCoordinator 同键，开关真生效 |
 /// | LRCLIB 兜底 | `lizi.lrclib.enabled` | 开 | 与 Lrclib.enabledKey 同键 |
-/// | 平台头像 | `lizi.hall.platAvatar` | 关 | 壳版键；原生大厅暂未消费（见 SettingsView 注释） |
-/// | 平台颜色铺色 | `lizi.hall.platColor` | 关 | 壳版键；同上 |
-/// | 大厅内容轨 | `lizi.hall.rail` | 开 | 壳版键；同上 |
+/// （r31-settings-organization 已删：平台头像 `lizi.hall.platAvatar` /
+/// 平台颜色 `lizi.hall.platColor` / 大厅内容轨 `lizi.hall.rail` 三开关
+/// 只写键、原生大厅从不读，拨了无效；壳版 public/app.js 仍自带这三项，
+/// 原生包不走那条路。大厅消费对应键后再加回。）
 /// | 本地音乐首页显示 | `lizi.local.show` | 开 | 壳版键；HomeView 已消费（r25） |
 /// | 播放页版式 | `lizi.now.layout` | `""`（默认） | 壳版 `player-layouts.js` 的键；PlayerView 已消费（r25） |
 /// | 形态歌词 | `lizi.stage.lyricMode` | `orig`（原文） | 壳版键（安卓快照 `app.js:1901-1905`，`#set-stage-lyric`）；三档非开关：`orig` 原文 / `both` 双文 / `trans` 译文；StageBridge 已消费（r25） |
 /// | 平台管理（显示哪些平台） | `lizi.platforms.v1` | 全选（无键） | 壳版语义：没存 = 全部；全选 = 删键 |
 /// | 我的专辑展示 | `lizi.native.myAlbums.form` | spine | 原生键：MyAlbumsView 读这把键，壳版键不跟 |
 /// | 跑马带速度 | `lizi.native.hall.marq.speed` | 24 | 原生键：HomeViewModel 读这把键 |
-/// | 音质 | `lizi.native.quality` | lossless | 经 PlaybackStore 读写，不在这里另起键 |
+/// | 背景模式 | `lizi.background.mode` | `none`（默认背景） | r31-imagebg：`none` 默认 / `image` 静态图片 / `video` 动态壁纸（视频）；BackgroundStore 持有，HomeBackgroundView 消费；图片文件在 Application Support/lizi.background/background-image.jpg（无键，模式键即开关） |
+/// | 背景视频文件名 | `lizi.background.videoFile` | `background-video.mov` | r31-imagebg：视频原扩展名保存（mov/mp4/m4v），文件在 Application Support/lizi.background/ |
+/// | 默认音质 | `settings.audioQuality` | exhigh | r31：SettingsStore 持有（旧键 lizi.native.quality 一次性迁入，"spatial" 迁 .surround） |
+/// | 播放来源 | `settings.playbackSourceMode` | automatic | r31：三段（自动/账号优先/第三方优先），只定优先顺序，不硬隔离 |
+/// | 音质降级时提示 | `settings.qualityDowngradeNotice` | 开 | r31：实际档位低于请求档时，降级提示文案进选择器；关时只记日志 |
 /// | LX 自动切换 | `lxAutoSwitch` | 关 | LXSourceRegistry 同键 |
+/// | 120Hz 高刷 | `lizi.display.highRefreshRate` | 开 | r31-settings-sections：只控两处 CADisplayLink 的 `preferredFrameRateRange` 上限（开 120 / 关 60）；plist 的 CADisableMinimumFrameDurationOnPhone 是编译期解锁，运行时关不掉 |
+/// | 每日自动签到 | `lizi.dailySignin.auto` | 关 | r31-signin：开 = 每天自动签一次（仅网易有签到接口）；默认关（现有签到是手动的，见下方网易每日签到区注释） |
 ///
-/// 音质不由本 store 存：`PlaybackStore.setPreferredQuality` 是唯一写口，
-/// 设置页只调它（取链档位当场生效，见 PlaybackStore.resolveURL）。
+/// 音质由本 store 存（r31 起）：默认档 / 播放来源 / 降级提示开关都在
+/// 这里；`PlaybackStore.setPreferredQuality` 是全局默认档的写口
+/// （写 settings.audioQuality），播放页选档是单曲覆盖，走
+/// `PlaybackStore.setTrackQualityOverride`（不写盘，切歌清掉）。
+/// 全 App 共用一个实例（`SettingsStore.shared`）：设置页与 PlaybackStore
+/// 读同一份 @Published，拨动当场刷新，不各建各的。
 final class SettingsStore: ObservableObject {
+    static let shared = SettingsStore()
+
+    // MARK: - 音乐与音质（r31 音质系统替换：Moumusic 的结构、Lizi 的语义）
+
+    /// 全局默认档的键（Moumusic settings.audioQuality 同款键名）。
+    static let audioQualityKey = "settings.audioQuality"
+    /// 播放来源三段的键（Moumusic settings.playbackSourceMode 同款键名）。
+    static let playbackSourceModeKey = "settings.playbackSourceMode"
+    /// 降级提示开关的键（Moumusic qualityDowngradeNotice 同款键名）。
+    static let qualityDowngradeNoticeKey = "settings.qualityDowngradeNotice"
+
+    /// 读全局默认档（静态口，供 PlaybackStore 取链时读：它不持有
+    /// SettingsStore 实例）。默认 exhigh；旧键 lizi.native.quality
+    /// 有值时一次性迁入（"spatial" 是已删的档位，迁成最接近的
+    /// .surround；非法值丢弃），迁完删旧键。
+    static func storedAudioQuality() -> AudioQuality {
+        if let raw = UserDefaults.standard.string(forKey: audioQualityKey),
+           let q = AudioQuality(rawValue: raw) { return q }
+        if let raw = UserDefaults.standard.string(forKey: "lizi.native.quality") {
+            let migrated: AudioQuality? = raw == "spatial" ? .surround : AudioQuality(rawValue: raw)
+            UserDefaults.standard.removeObject(forKey: "lizi.native.quality")
+            if let q = migrated {
+                UserDefaults.standard.set(q.rawValue, forKey: audioQualityKey)
+                return q
+            }
+        }
+        return .exhigh
+    }
+
+    /// 读播放来源三段（静态口，供 PlaybackStore 取链时读）。默认自动。
+    static func storedPlaybackSourceMode() -> PlaybackSourceMode {
+        if let raw = UserDefaults.standard.string(forKey: playbackSourceModeKey),
+           let mode = PlaybackSourceMode(rawValue: raw) { return mode }
+        return .automatic
+    }
+
+    /// 读降级提示开关（静态口，供 PlaybackStore 记降级时读）。默认开。
+    static func storedQualityDowngradeNotice() -> Bool {
+        if UserDefaults.standard.object(forKey: qualityDowngradeNoticeKey) == nil { return true }
+        return UserDefaults.standard.bool(forKey: qualityDowngradeNoticeKey)
+    }
+
+    /// 全局默认档（默认 exhigh；9 档全列，不探测、不设限——R3 已删，
+    /// 选什么档都直发音源，返回什么播什么）。
+    @Published var audioQuality: AudioQuality = SettingsStore.storedAudioQuality() {
+        didSet { UserDefaults.standard.set(audioQuality.rawValue, forKey: Self.audioQualityKey) }
+    }
+
+    /// 播放来源三段（默认自动；只定腿的优先顺序，不硬隔离——R7 已删，
+    /// 任一段拿不到时另一段都可兜底）。
+    @Published var playbackSourceMode: PlaybackSourceMode = SettingsStore.storedPlaybackSourceMode() {
+        didSet { UserDefaults.standard.set(playbackSourceMode.rawValue, forKey: Self.playbackSourceModeKey) }
+    }
+
+    /// 音质降级时提示（默认开；关时实际档位低于请求档只记 DiagLog，
+    /// 选择器里不弹提示文案）。
+    @Published var qualityDowngradeNotice: Bool = SettingsStore.storedQualityDowngradeNotice() {
+        didSet { UserDefaults.standard.set(qualityDowngradeNotice, forKey: Self.qualityDowngradeNoticeKey) }
+    }
 
     // MARK: - 开关（默认开的用「缺省 = 开」语义，默认关的用 bool 直读）
 
@@ -40,20 +111,56 @@ final class SettingsStore: ObservableObject {
         didSet { Lrclib.setEnabled(lrclibEnabled) }
     }
 
-    /// 平台头像（壳版）：关时大厅平台方块只显示平台图标，不显示账号头像。默认关。
-    @Published var platformAvatar: Bool = SettingsStore.boolDefaultOff(key: "lizi.hall.platAvatar") {
-        didSet { UserDefaults.standard.set(platformAvatar, forKey: "lizi.hall.platAvatar") }
+    // r31-settings-organization：平台头像 / 平台颜色铺色 / 大厅内容轨
+    // 三开关已删（只写键、原生大厅从不读，拨了无效；见文件头键表注）。
+
+    // MARK: - 显示与性能 — 120Hz 高刷（r31-settings-sections）
+    //
+    // 开关只控运行时帧率：plist 的 CADisableMinimumFrameDurationOnPhone
+    // 是编译期解锁（120Hz 工 project.yml 双写），运行时关不掉；开关控
+    // 的是两处 CADisplayLink 的 preferredFrameRateRange（HomeCoverRingView
+    // startFlatTimer + HomeView RailMarqueeDriver.start，经下面
+    // frameRateRange() 取值；开关拨动时通知回调当场重算已建好的 link）：
+    // 开 = maximum/preferred 120，关 = maximum/preferred 60。
+    // 默认开——120Hz 工落地时两处就是硬编码 120（r31-120hz.cjs §2），
+    // 开关默认开 = 既有行为不变，不擅自改默认。
+    // 60Hz 机型：maximum 120 本就是无操作（屏最高 60），拨动无影响。
+    // WKWebView 里的舞台/画廊 HTML requestAnimationFrame 仍封顶 60Hz
+    //（Apple 无公开绕法，见 r31-120hz.cjs 诚实残留），开关管不到那里；
+    // SphereGalleryView / DailyMarqueeView 的 1/120 Timer 也不是 vsync，
+    // 不跟开关走（只改步进 cadence，不改刷新上限）。
+
+    /// 120Hz 高刷开关的键（原生键；无键 = 开，与既有行为一致）。
+    static let highRefreshRateKey = "lizi.display.highRefreshRate"
+    /// 开关拨动时发的通知：两处 CADisplayLink 驱动已建好的 link
+    /// 当场重算 preferredFrameRateRange，不用等下次回首页重建。
+    static let highRefreshRateDidChangeNotification =
+        Notification.Name("lizi.display.highRefreshRateDidChange")
+
+    /// 120Hz 高刷新率静态读法（供 Home 的两个驱动用：它们不持有
+    /// SettingsStore 实例，与 HomeViewModel 只读 UserDefaults 读
+    /// localMusicShown 同款做法）。无键 = 开。
+    static var highRefreshRateEnabled: Bool {
+        boolDefaultOn(key: highRefreshRateKey)
     }
 
-    /// 用平台颜色铺色（壳版）：关时大厅铺色态取当前专辑封面颜色；开时回平台品牌色。默认关。
-    @Published var platformColor: Bool = SettingsStore.boolDefaultOff(key: "lizi.hall.platColor") {
-        didSet { UserDefaults.standard.set(platformColor, forKey: "lizi.hall.platColor") }
+    /// 两处 CADisplayLink 共用的帧率范围（唯一取值口，不在各处另算，
+    /// 免得两处 drift）：开 = 30–120/首选 120，关 = 30–60/首选 60。
+    /// minimum 30 不动（允许 ProMotion 空闲降频，不强制常驻高刷）。
+    static func frameRateRange() -> CAFrameRateRange {
+        let max: Float = highRefreshRateEnabled ? 120 : 60
+        return CAFrameRateRange(minimum: 30, maximum: max, preferred: max)
     }
 
-    /// 大厅内容轨（壳版）：开 = 精选/喜欢/收藏直接在跑马带里切换；
-    /// 关 = 恢复点卡片跳浏览页的旧交互。默认开。
-    @Published var hallRail: Bool = SettingsStore.boolDefaultOn(key: "lizi.hall.rail") {
-        didSet { UserDefaults.standard.set(hallRail, forKey: "lizi.hall.rail") }
+    /// 120Hz 高刷新率开关：开 = 两处 display link 上限 120，
+    /// 关 = 上限 60。默认开（见本区文件头注释）。
+    /// didSet：写 UserDefaults（重启保留）+ 发通知（已建好的
+    /// link 当场重算）；开关本身不碰 plist key（编译期，运行时关不掉）。
+    @Published var highRefreshRate: Bool = SettingsStore.highRefreshRateEnabled {
+        didSet {
+            UserDefaults.standard.set(highRefreshRate, forKey: Self.highRefreshRateKey)
+            NotificationCenter.default.post(name: Self.highRefreshRateDidChangeNotification, object: nil)
+        }
     }
 
     /// 本地音乐在首页显示（壳版第 11 轮）：关后首页整块消失、不留占位；
@@ -288,34 +395,139 @@ final class SettingsStore: ObservableObject {
     }
 
     // MARK: - 网易每日签到（r25 #45：只做应用内入口，后端路由已有）
+    //
+    // r31-signin：每日自动签到开关 + 每天只签一次。
+    // 现有行为（r30 基线核查）：签到是手动的——唯一调用点是设置页
+    // 「签到」按钮（SettingsView），启动/回前台没有任何自动调用；
+    // 壳版 public/api.js 也只接了调用、无界面入口。所以开关默认关，
+    // 不擅自改默认。
+    // 平台（7 个逐个核查，2026-11-21）：只有网易有可用签到接口
+    // （weapi /point/dailyTask，Server/NetEase.swift 的 daily/signin）；
+    // QQ、酷狗（主 App）、汽水、波点、酷我均未核实到可用签到接口，
+    // Apple Music 根本没有签到机制；酷狗概念版 /youth/vip 是另一套
+    // 账号/签名体系，Lizi 的酷狗登录不兼容，不接。自动签只签网易，
+    // 不编其它平台的签到。
+
+    /// 每日自动签到开关的键（原生键；无键 = 关）。
+    static let autoDailySignInKey = "lizi.dailySignin.auto"
+    /// 上次签到成功的日期键（`yyyy-MM-dd`，本地日历日；手动/自动共用
+    /// 一把键——每天签到一次就行，不分手动自动）。
+    static let lastSignedDateKey = "lizi.dailySignin.lastDate"
+    /// 最近一次签到结果文案的键（成功/失败都写，重启保留，进设置页
+    /// 就能看到，不静默）。
+    static let lastSigninStatusKey = "lizi.dailySignin.lastStatus"
+
+    /// 每日自动签到：开 = 每天自动签到一次；关 = 不自动签到。
+    /// 默认关（现有行为是手动签，见本区文件头注释）。
+    @Published var autoDailySignIn: Bool = SettingsStore.boolDefaultOff(key: SettingsStore.autoDailySignInKey) {
+        didSet { UserDefaults.standard.set(autoDailySignIn, forKey: Self.autoDailySignInKey) }
+    }
+
+    /// 最近一次签到结果文案（自动/手动共用；从 UserDefaults 读，
+    /// 重启保留；自动签在后台跑完后设置页 onAppear 时重读刷新）。
+    @Published var lastSigninStatus: String = UserDefaults.standard.string(forKey: SettingsStore.lastSigninStatusKey) ?? "" {
+        didSet { UserDefaults.standard.set(lastSigninStatus, forKey: Self.lastSigninStatusKey) }
+    }
+
+    /// 今天（本地日历日，`yyyy-MM-dd`）。
+    static func todayString() -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: Date())
+    }
+
+    /// 今天已经签过没有（上次签到成功的日期 == 今天）。
+    static func hasSignedInToday() -> Bool {
+        UserDefaults.standard.string(forKey: lastSignedDateKey) == todayString()
+    }
+
+    /// 记下今天已签到（只在服务端确认签到成功后调；失败不记，
+    /// 下次启动/回前台可再试）。
+    static func recordSignedToday() {
+        UserDefaults.standard.set(todayString(), forKey: lastSignedDateKey)
+    }
+
+    /// 设置页 onAppear 时重读最近一次签到结果（自动签可能在后台跑完，
+    /// 本实例的 @Published 值还是旧的；只读 UserDefaults，不动其它设置）。
+    func refreshSigninStatus() {
+        lastSigninStatus = UserDefaults.standard.string(forKey: Self.lastSigninStatusKey) ?? ""
+    }
 
     /// 调一次网易每日签到（`POST /api/daily/signin` → 服务端
     /// `Server/NetEase.swift` 的 `daily/signin`：weapi `/point/dailyTask`，
     /// type 0 安卓 + type 1 网页各一次；code 200 累加点数，code -2 当天已签
     /// 也算成功；两次都失败才算失败；未登录不调上游、直接回 code 301）。
-    /// 返回如实展示用的结果文案，不编点数、不编成功：
-    /// - 服务端回非 2xx（上游无响应，服务端回 502）→ `NativeBridge.call`
-    ///   回 nil，这里只报「服务端无响应」，不猜是已签还是未签。
-    /// - 回包里 `signedIn` / `alreadySigned` / `point` / `message`
-    ///   原样转述；`point` 是服务端回包字段名，文案里只叫「点」，不另起名。
-    func dailySignIn() async -> String {
+    /// 返回（结果文案，是否签到成功）：成功含「当天已签过」（服务端
+    /// code -2）——服务端已认今天签过，也记日期，不再重复调。
+    /// 结果文案写进 lastSigninStatus（成功/失败都写，不静默）；
+    /// 成功才记日期，失败不记。
+    /// 回包里 `signedIn` / `alreadySigned` / `point` / `message`
+    /// 原样转述；`point` 是服务端回包字段名，文案里只叫「点」，不另起名。
+    static func performDailySignIn() async -> (text: String, signed: Bool) {
         guard let d = await NativeBridge.call(path: "/api/daily/signin") else {
-            return "签到失败：服务端无响应（上游无响应）。"
+            let text = "签到失败：服务端无响应（上游无响应）。"
+            UserDefaults.standard.set(text, forKey: lastSigninStatusKey)
+            return (text, false)
         }
         let code = (d["code"] as? NSNumber)?.intValue ?? -1
         let signedIn = (d["signedIn"] as? NSNumber)?.boolValue ?? false
         let alreadySigned = (d["alreadySigned"] as? NSNumber)?.boolValue ?? false
         let point = (d["point"] as? NSNumber)?.intValue ?? 0
         let message = d["message"] as? String ?? ""
+        let text: String
+        let signed: Bool
         if code == 301 || !signedIn {
-            return message.isEmpty ? "签到失败：需要登录网易云音乐后才能签到。" : message
-        }
-        if alreadySigned {
-            return point > 0
+            text = message.isEmpty ? "签到失败：需要登录网易云音乐后才能签到。" : message
+            signed = false
+        } else if alreadySigned {
+            text = point > 0
                 ? "今天已签到（之前已签过），共获得 \(point) 点。"
                 : "今天已签到（之前已签过）。"
+            signed = true
+        } else {
+            text = "签到成功，本次共获得 \(point) 点。"
+            signed = true
         }
-        return "签到成功，本次共获得 \(point) 点。"
+        UserDefaults.standard.set(text, forKey: lastSigninStatusKey)
+        if signed { recordSignedToday() }
+        return (text, signed)
+    }
+
+    /// 手动签到（设置页「签到」按钮，r25 #45 原签名不动）：
+    /// 调一次，文案同步到 lastSigninStatus；成功也记日期——
+    /// 手动签过了今天就算签过，自动签不再重复签。
+    func dailySignIn() async -> String {
+        let (text, _) = await Self.performDailySignIn()
+        lastSigninStatus = text
+        return text
+    }
+
+    /// 自动签到进行中守卫（启动 .task 与回前台可能交错触发；都在
+    /// @MainActor 上下文串行跑，Bool 够用）：跑着就不再起第二趟，
+    /// 绝不一次启动签两次。
+    private static var autoSigninRunning = false
+
+    /// 每日自动签到入口（启动 + 回前台调；LiziNativeApp 接线）：
+    /// - 开关关 → 不签，直接回（用户明确选择，不打扰、不写状态）。
+    /// - 今天已签过（手动/自动任一）→ 跳过，不重复调接口。
+    /// - 未登录网易 → 不调服务端，写明「未登录」，不记日期。
+    /// - 其余 → 签一次；成功记日期，失败写明原因、不记日期。
+    /// 日期键是全局单键，与当前选中平台无关——切平台不重置；
+    /// 跨天（日期字符串变了）才再签；重启 App 读同一把键，不重复签。
+    static func runAutoDailySignInIfNeeded() async {
+        guard UserDefaults.standard.bool(forKey: autoDailySignInKey) else { return }
+        guard !hasSignedInToday() else { return }
+        guard !autoSigninRunning else { return }
+        autoSigninRunning = true
+        defer { autoSigninRunning = false }
+        guard SessionStore.shared.hasMusicU else {
+            UserDefaults.standard.set("自动签到未执行：未登录网易云音乐，请先登录后再签到。",
+                                      forKey: lastSigninStatusKey)
+            return
+        }
+        _ = await performDailySignIn()
     }
 
     // MARK: - LX 自定义源（读/写 LXSourceRegistry 已有存储，不改取链逻辑）
@@ -454,5 +666,14 @@ final class SettingsStore: ObservableObject {
             return "诊断日志读不出来。"
         }
         return text
+    }
+
+    /// r31 日志清空：真清 DiagLog（内存 + 落盘全清，见 DiagLog.clearAllLogs），
+    /// 返回清完后重读的诊断文本（空 JSON），供设置页当场刷新展开的日志区。
+    /// 不是摆样子：清完 diagnosticsText() 里 logs/requests/events/
+    /// playbackBreadcrumb 全是空数组，重启后读盘也是空的。
+    func clearDiagnostics() -> String {
+        DiagLog.shared.clearAllLogs()
+        return diagnosticsText()
     }
 }

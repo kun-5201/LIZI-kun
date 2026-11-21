@@ -397,12 +397,21 @@ final class HomeCoverRingModel: ObservableObject {
     /// 上一帧时间戳（回调算 dt 用；0 = 还没走过第一帧）。
     private var flatDisplayLink: CADisplayLink?
     private var flatLinkProxy: FlatDisplayLinkProxy?
+    /// r31-settings-sections：120Hz 开关拨动通知的订阅 token（startFlatTimer
+    /// 里注册，deinit 里注销；通知回调当场重算已建 link 的帧率上限）。
+    private var frameRateObserver: NSObjectProtocol?
     private var flatLastTimestamp: CFTimeInterval = 0
 
     /// 模型走时停掉自己的 display link（r26 补 Timer 版，r31 同款）：
     /// 不停，RunLoop 会一直强持它空转；停了，下次回首页新模型重新
     /// startFlatTimer，不影响跑马带恢复。
-    deinit { flatDisplayLink?.invalidate() }
+    /// r31-settings-sections：注销 120Hz 开关通知订阅（不注销，
+    /// NotificationCenter 的闭包一直活着，虽然只弱持模型不会漏模型，
+    /// 但每次回首页都会多攒一个空转订阅）。
+    deinit {
+        flatDisplayLink?.invalidate()
+        if let frameRateObserver { NotificationCenter.default.removeObserver(frameRateObserver) }
+    }
     /// 平面带上的按压判定（非 Published：只在手势闭包里读写，不驱动渲染）。
     var stripPress: StripPress?
 
@@ -586,10 +595,30 @@ final class HomeCoverRingModel: ObservableObject {
         guard flatDisplayLink == nil else { return }
         let proxy = FlatDisplayLinkProxy(model: self)
         let link = CADisplayLink(target: proxy, selector: #selector(FlatDisplayLinkProxy.fired(_:)))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
+        // r31-settings-sections：帧率上限跟设置页「120Hz 高刷新率」开关走
+        //（SettingsStore.frameRateRange()：开 = 30–120/首选 120，
+        // 关 = 30–60/首选 60；默认开，与 120Hz 工硬编码 120 的既有行为
+        // 一致）。plist 解锁是编译期、运行时关不掉，开关能控的就是这行。
+        link.preferredFrameRateRange = SettingsStore.frameRateRange()
         link.add(to: .main, forMode: .common)
         flatLinkProxy = proxy
         flatDisplayLink = link
+        // 开关拨动时已建好的 link 当场重算上限：设置页拨完回首页，
+        // 模型不一定重建（RootView 可能复用），只靠 start 时读一次会漏；
+        // 订阅只注册一次（本函数幂等，guard 拦住重复进），deinit 注销。
+        // 闭包只弱持模型，不循环引用；queue .main，所以回调必在主线程，
+        // MainActor.assumeIsolated 安全（与 RailMarqueeLinkProxy 同款）。
+        frameRateObserver = NotificationCenter.default.addObserver(
+            forName: SettingsStore.highRefreshRateDidChangeNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.applyFrameRateRange() }
+            }
+    }
+
+    /// r31-settings-sections：120Hz 开关拨动时重算已建 link 的帧率上限
+    ///（通知回调；link 没建好时是空操作，不重建 link、不碰 dt/步长）。
+    private func applyFrameRateRange() {
+        flatDisplayLink?.preferredFrameRateRange = SettingsStore.frameRateRange()
     }
 
     /// display link 回调（主线程）：按真实帧间隔 dt 推进跑马带。

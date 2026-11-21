@@ -226,8 +226,16 @@ struct HeroCardView: View {
         var parts: [String] = []
         if !track.artist.isEmpty { parts.append(track.artist) }
         if !track.album.isEmpty { parts.append(track.album) }
-        if let q = playback.actualQuality, playback.currentTrack?.id == track.id {
-            parts.append(q.displayName)
+        // r31：首页卡片只拼实际档位（servedQualityLabelText：实际档位名
+        // → 音源原文；未知时为 nil，不拼「未知」、不拼请求档）。
+        if playback.currentTrack?.id == track.id,
+           let text = playback.servedQualityLabelText {
+            parts.append(text)
+        }
+        // r31-clouddrive：云盘来源拼「网盘」（与官方区分开；只在正在播的
+        // 这张卡片上拼，currentVia == "cloud" 时）。
+        if playback.currentTrack?.id == track.id, playback.currentVia == "cloud" {
+            parts.append("网盘")
         }
         return parts.joined(separator: " · ")
     }

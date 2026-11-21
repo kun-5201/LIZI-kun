@@ -440,6 +440,14 @@ extension NativeBridge {
             }
             return RailResult(kind: .liked, platform: platform, entries: entries)
         case "qq":
+            // r31-qqkg：与设置页同一把尺子——登录态以本机 QQMusicSessionStore
+            // 为准；未登录不调服务端接口（服务端副本可能还留着旧凭证），
+            // 先看本地星标，没星标就诚实空态请用户扫码登录。
+            if !(await MainActor.run { QQMusicSessionStore.shared.isLoggedIn }) {
+                if let fb = await localStarredFallback(platform: platform, note: "先在卡片上扫码登录 QQ 音乐") { return fb }
+                return railEmpty(kind: .liked, platform: platform,
+                                 reason: "先在卡片上扫码登录 QQ 音乐，才能看「我喜欢」")
+            }
             // r31：喜欢曲目 + 收藏的歌单（subscribed==true）+ 收藏的专辑，
             // 三路并行取。
             // r31-starred（用户 2026-11-21 06:44：QQ 优先）：登录了但喜欢
@@ -554,6 +562,11 @@ extension NativeBridge {
             }
             return RailResult(kind: .liked, platform: platform, entries: entries)
         case "kugou":
+            // r31-qqkg：同款登录态门（本机 KugouSessionStore，与设置页同一把
+            // 尺子）；未登录直接走本地星标，不调服务端接口。
+            if !(await MainActor.run { KugouSessionStore.shared.isLoggedIn }) {
+                return await railLocalLiked(kind: .liked, platform: platform)
+            }
             // r31：酷狗以前只有本地星标——get_all_list 里其实有「我喜欢」那张
             // 表（listId "2" / 名字含「喜欢」），以前被当成普通歌单。未登录
             // 时 user/playlists 回 401，退回本地星标（旧行为），不报错。
@@ -740,6 +753,12 @@ extension NativeBridge {
             entries.append(contentsOf: sub.map { RailEntry.playlist($0) })
             return RailResult(kind: .playlists, platform: platform, entries: entries)
         case "qq":
+            // r31-qqkg：登录态门（本机 QQMusicSessionStore，与设置页同一把尺子）；
+            // 未登录报登录空态，不调服务端接口。
+            if !(await MainActor.run { QQMusicSessionStore.shared.isLoggedIn }) {
+                return railEmpty(kind: .playlists, platform: platform,
+                                 reason: "先在卡片上扫码登录 QQ 音乐，才能看「我的歌单」")
+            }
             guard let d = await call(path: "/api/qq/user/playlists") else {
                 return railFailed(kind: .playlists, platform: platform)
             }
@@ -785,6 +804,12 @@ extension NativeBridge {
                             entries: lists.map { RailEntry.playlist($0) },
                             emptyReason: "波点没有返回歌单")
         case "kugou":
+            // r31-qqkg：登录态门（本机 KugouSessionStore，与设置页同一把尺子）；
+            // 未登录报登录空态，不调服务端接口。
+            if !(await MainActor.run { KugouSessionStore.shared.isLoggedIn }) {
+                return railEmpty(kind: .playlists, platform: platform,
+                                 reason: "先在卡片上扫码登录酷狗音乐，才能看「我的歌单」")
+            }
             guard let d = await call(path: "/api/kugou/user/playlists") else {
                 return railFailed(kind: .playlists, platform: platform)
             }

@@ -1179,14 +1179,14 @@ struct PlayerView: View {
         .accessibilityHint("点按打开播放队列")
     }
 
-    /// 状态行是否真的占高（r26）：失败原因文案，或至少一个角标（试听）
+    /// 状态行是否真的占高（r26）：失败原因文案，或至少一个角标（试听/网盘）
     /// 时为真。只按可见内容判定——有曲目但角标条件不成立时角标行整行
     /// 不渲染，不计入（r29：实际音质角标已删，见 statusCapsules；r31：
     /// 提示音角标已删；该瞬态仍走旧 8/10 间距，不溢出，见文件底 r26 总账注）。
     private var hasStatusRow: Bool {
         if store.errorMessage != nil { return true }
         guard store.currentTrack != nil else { return false }
-        return store.currentTrack?.isTrial == true
+        return store.currentTrack?.isTrial == true || store.currentVia == "cloud"
     }
 
     /// r26：titleBlock 上间距。compact + 有状态行时 8 → 4（省 4pt）；
@@ -1240,12 +1240,17 @@ struct PlayerView: View {
         return track.artist.isEmpty ? track.platform : track.artist
     }
 
-    /// 状态角标：只在有内容时出现 —— 试听（r31：提示音角标已删）。
+    /// 状态角标：只在有内容时出现 —— 试听（r31：提示音角标已删）与网盘
+    /// （r31-clouddrive：via == cloud 时「网盘」胶囊，与官方区分开；和试听
+    /// 同一行）。
     /// 取链失败的原因由下面的
     /// error 行明示，不静默。r29：歌名下方中间的实际音质角标已删（用户真机
     /// 报「中间的杜比全景声显示也删除」），音质入口只剩底部第 3 排的音质
-    /// 芯片（PlayerBottomDock，点开 9 档选择器），actualQuality 取链与
-    /// 状态本身不动。
+    /// 芯片（PlayerBottomDock，点开 9 档选择器），显示
+    /// store.servedQualityText（实际档位名 → 音源原文 → 「未知」）；
+    /// r31 音质系统替换后 actualQuality 取链与状态本身走新编排
+    /// （PlaybackStore.resolveURL：播放来源三段 + 单曲覆盖），
+    /// 本页仍不显示音质角标。
     /// 无曲目时什么都不显示（空态只有「未在播放」+ 副标题）。
     /// r26：compactStyle 只由竖屏 titleTexts 在 compact 档传 true（角标行
     /// 压缩：胶囊字 11→10、纵向 padding 2→1，行上间距 4→2；角标行总增量
@@ -1277,11 +1282,15 @@ struct PlayerView: View {
                 }
         } else if store.currentTrack != nil {
             // r29：实际音质角标已删（只删显示，取链/状态不动）；r31：提示音
-            // 角标已删。角标行只剩试听；条件不成立时整行不渲染——旧代码空
-            // HStack + 上间距会留 6pt 幽灵高，删角标后这是常态（普通曲目），
-            // 必须收掉。
-            if store.currentTrack?.isTrial == true {
+            // 角标已删。角标行只剩试听 + 网盘（r31-clouddrive：currentVia ==
+            // "cloud" 时「网盘」胶囊，和试听同一行）；条件都不成立时整行不
+            // 渲染——旧代码空 HStack + 上间距会留 6pt 幽灵高，删角标后这是常态
+            // （普通曲目），必须收掉。
+            if store.currentVia == "cloud" || store.currentTrack?.isTrial == true {
                 HStack(spacing: 6) {
+                    if store.currentVia == "cloud" {
+                        statusCapsule("网盘", compactStyle: squeeze)
+                    }
                     if store.currentTrack?.isTrial == true {
                         statusCapsule("试听", compactStyle: squeeze)
                     }

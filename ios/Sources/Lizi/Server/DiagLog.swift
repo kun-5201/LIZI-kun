@@ -248,6 +248,43 @@ final class DiagLog {
         return Int(info.resident_size) / 1024 / 1024
     }
 
+    // MARK: - r31 日志清空（设置 → 关于 → 诊断日志 → 展开后底部的「清空日志」）
+
+    /// 把当前诊断日志全部清掉——内存里的 logs（100 条）/ requests（20 条）/
+    /// events（20 条）/ lastSearch / 播放面包屑 / 上次死亡快照 / 诊断 POST
+    /// 计数 + 落盘的 UserDefaults 四个键（lizi.diagLogs / lizi.diagRequests /
+    /// lizi.diagEvents / lizi.diagLastSearch）+ 面包屑 JSON 文件
+    /// （Application Support/lizi.playbackBreadcrumb.json）+ 面包屑与死亡
+    /// 快照的 UserDefaults 镜像。清完不留一条「已清空」记录（留了就不是
+    /// 空的）；调用方（设置页）用 Notice 告诉用户「日志已清空」。
+    /// 运行期旗标 hadRun/cleanExit 不动（markLaunched 的判断还靠它们），
+    /// 只是内存里的 previousRunClean 已随快照一起翻回 true。
+    func clearAllLogs() {
+        lock.lock(); defer { lock.unlock() }
+        logs = []
+        requests = []
+        events = []
+        lastSearch = [:]
+        breadcrumbSteps = []
+        diagLogReceived = 0
+        previousRunClean = true
+        lastDeathStep = ""
+        lastDeathAt = 0
+        lastDeathMemoryMB = -1
+        let ud = UserDefaults.standard
+        ud.removeObject(forKey: PersistKey.logs)
+        ud.removeObject(forKey: PersistKey.requests)
+        ud.removeObject(forKey: PersistKey.events)
+        ud.removeObject(forKey: PersistKey.lastSearch)
+        ud.removeObject(forKey: "lizi.playbackBreadcrumb")
+        ud.removeObject(forKey: RunKey.lastDeathStep)
+        ud.removeObject(forKey: RunKey.lastDeathAt)
+        ud.removeObject(forKey: RunKey.lastDeathMemoryMB)
+        if let url = Self.breadcrumbFileURL() {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
     func json() -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
         return ["lastSearch": lastSearch, "requests": requests, "events": events, "logs": logs,

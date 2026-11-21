@@ -7,6 +7,10 @@ import SwiftUI
 /// - 歌手·专辑：14pt（窄屏 13pt）、墨色弱化、单行省略。
 /// - 封面：窄屏 56pt，其余 76pt；无封面先占位（白色底 + 音符，不用金色）。
 /// - 时长：等宽字体；时长未知（durationMs <= 0）时不显示，不编假时长。
+/// - 长按菜单（r31）：`.playNextMenu(track:)`，菜单里「下一首播放」，
+///   点一下插到当前曲目之后、当前播完就播它。六处共用本行（搜索结果、
+///   歌单详情、歌手页热门/全部、专辑页、榜单详情），一处挂上六处都有入口。
+///   点行本身仍是点播（setQueue 从该位置起播），长按才出菜单，互不抢。
 ///
 /// 封面取色 wash 渐变（壳版 .track::after 的模糊渐变）P1 没做：取色链路
 /// 在播放页/封面模块，不在本文件里另起一套；如需补，由集成工人统一接。
@@ -70,6 +74,7 @@ struct TrackRowView: View {
         }
         .buttonStyle(.plain)
         .background(isCurrent ? SearchDesignTokens.rowHighlight : Color.clear)
+        .playNextMenu(track: track)
     }
 
     // MARK: - 封面

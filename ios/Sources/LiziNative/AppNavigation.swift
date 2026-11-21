@@ -29,6 +29,9 @@ enum AppView: Hashable {
     case album(platform: String, id: String)
     /// 我的专辑 3D 陈列架（P2-C）。
     case myAlbums
+    /// 听歌排行（r31-rank）：只做网易服务端排行；platform 传当前账号平台，
+    /// 非网易平台进页后给诚实空态（不编数据）。
+    case listeningRank(platform: String)
     /// 设置页（P3-C）：7 分区全做，见 Views/Settings/SettingsView.swift。
     case settings
     /// 精选/喜欢/收藏/电台 rail（P2-D）：

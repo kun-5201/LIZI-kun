@@ -291,6 +291,46 @@ final class KuwoService {
         ]
     }
 
+    /// 用户画像（r31 头像修）：酷我 status 以前把 nickname/avatar 写死成 ""，
+    /// Cookie 登录根本没有取画像的路——头像永远拿不到。现在调 www 用户接口
+    /// GET /api/v1/www/user/userInfo?uid=<uid>（www() 自带登录 Cookie +
+    /// Secret + token；匿名探针回 {"success":false,"message":"The request
+    /// is illegal!"}，说明端口真实存在、只是缺鉴权），取 nickname 与
+    /// pic/pic300/pic120（酷我图片字段惯例，http://img1.kuwo.cn/…，
+    /// https 实测通，顺手升 https）。尽力取：失败回 ("","")，登录态只认
+    /// Cookie，不因此判未登录。
+    private func userProfile() async -> (nickname: String, avatar: String) {
+        let uid = userUid()
+        guard !uid.isEmpty else { return ("", "") }
+        do {
+            let r = try await www("/api/v1/www/user/userInfo?uid=" + scURLEncode(uid), timeout: 10)
+            guard let j = scParseJSON(r.text) as? [String: Any] else { return ("", "") }
+            let data = scDict(j, "data")
+            let nick = [scStr(data, "nickname"), scStr(data, "name"), scStr(data, "username"),
+                        scStr(j, "nickname")].first(where: { !$0.isEmpty }) ?? ""
+            var av = [scStr(data, "pic300"), scStr(data, "pic"), scStr(data, "pic120"),
+                      scStr(data, "avatar"), scStr(data, "avatarUrl"), scStr(data, "img")].first(where: { !$0.isEmpty }) ?? ""
+            av = av.trimmingCharacters(in: .whitespacesAndNewlines)
+            if av.hasPrefix("//") { av = "https:" + av }
+            else if av.hasPrefix("http://") { av = "https://" + av.dropFirst("http://".count) }
+            if !av.hasPrefix("https://") { av = "" }
+            return (nick, av)
+        } catch {
+            return ("", "")
+        }
+    }
+
+    /// 带画像的 status：登录态仍只认 Cookie；已登录时尽力补昵称/头像，
+    /// 取不到就留空（LoginStore 侧显示默认头像，不转圈）。
+    private func statusWithProfile() async -> [String: Any] {
+        var body = statusBody()
+        guard (body["loggedIn"] as? Bool) == true else { return body }
+        let p = await userProfile()
+        if !p.nickname.isEmpty { body["nickname"] = p.nickname }
+        if !p.avatar.isEmpty { body["avatar"] = p.avatar }
+        return body
+    }
+
     // MARK: - 播放直链
 
     private func mobiUrl(_ id: String, _ br: String) async throws -> String {
@@ -596,9 +636,9 @@ final class KuwoService {
             case "", "health":
                 return .json(200, ["code": 200, "ok": true, "audio": true, "login": "cookie"])
             case "status", "login/status":
-                return .json(200, statusBody())
+                return .json(200, await statusWithProfile())
             case "login/cookie":
-                return loginCookie(req)
+                return await loginCookie(req)
             case "logout":
                 userCookies = [:]
                 saveUserCookies()
@@ -641,7 +681,7 @@ final class KuwoService {
         }
     }
 
-    private func loginCookie(_ req: HttpRequest) -> HttpResponse {
+    private func loginCookie(_ req: HttpRequest) async -> HttpResponse {
         guard req.method == "POST" else {
             return .json(405, ["code": 405, "error": "请用 POST 提交 Cookie"])
         }
@@ -658,7 +698,7 @@ final class KuwoService {
         }
         userCookies = parsed.filter { !$0.key.hasPrefix(Self.cookiePrefix) && !$0.key.isEmpty }
         saveUserCookies()
-        return .json(200, statusBody())
+        return .json(200, await statusWithProfile())
     }
 
     private func upstreamCode(_ j: [String: Any]) -> Int {

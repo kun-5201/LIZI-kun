@@ -186,6 +186,17 @@ import UIKit
 ///    390×844 → 164.0，402×874 → 194.0，横屏 → 50 不变。
 ///    竖屏 Hero / 面板高度、尺寸分档、取色、本地音乐、两卡拖动、
 ///    跑马带速度一律不动。驱动见 verification/r31-landscape.cjs。
+///
+/// r31-imagebg（用户 2026-11-21 07:15：静态图片背景 + 动态壁纸）：
+/// 首页/大厅背景层是 `HomeBackgroundView`（BackgroundView.swift，
+/// 状态在 `BackgroundStore`）：挂在最外层 GeometryReader 的
+/// `.background` 里，在全部内容之下；滚动区的 `.background` 改透明，
+/// 不再盖一层纸色。默认模式就是原来的纸色（视觉与 r30 一致）；
+/// 静态图片 = 沙盒图铺满 + 轻模糊 + 浅色可读性蒙版；
+/// 动态壁纸 = 沙盒视频 AVPlayer 静音循环 + 同款蒙版。
+/// 蒙版为什么是浅色不是深色压暗：全站文字是深色墨字，深色压暗会反让
+/// 顶栏品牌/齿轮/搜索看不清（见 BackgroundView.swift 文件头）。
+/// Hero/面板/本地音乐本身是不透明卡片，不受背景层影响。
 struct HomeView: View {
     @EnvironmentObject var playback: PlaybackStore
     @EnvironmentObject var nav: AppNavigation
@@ -516,7 +527,11 @@ struct HomeView: View {
                         homeBottomPad = target
                     }
                 }
-                .background(LiziTokens.paper)
+                // r31-imagebg：滚动区底色改透明——背景层在 GeometryReader
+                // 的 .background 里（HomeBackgroundView），滚动内容之上
+                // 不再盖一层纸色，图片/视频背景才能露出来；默认模式下
+                // HomeBackgroundView 自己就是纸色，视觉与原来一致。
+                .background(Color.clear)
             }
             // r21：环的纵向锚点用这个坐标空间量（平面带把自己的 frame 报到
             // "liziHome" 里，覆盖层按同一坐标系把环摆到带原来的位置）。
@@ -527,7 +542,9 @@ struct HomeView: View {
                     HomeRingOverlayView(model: ringModel)
                 }
             }
-            .background(LiziTokens.paper)
+            // r31-imagebg：首页/大厅背景层（默认 = 原来的纸色；静态图片 /
+            // 动态壁纸见 BackgroundView.swift）；在全部内容之下，不盖内容。
+            .background { HomeBackgroundView() }
         }
         // 模板 v2：顶栏整行按屏顶定位（品牌中心竖屏 63pt、横屏 32pt），
         // 不按安全区顶；忽略顶部与底部安全区后
@@ -1158,20 +1175,46 @@ struct HomeView: View {
         private var draggingSince: Date?
         private var displayLink: CADisplayLink?
         private var linkProxy: RailMarqueeLinkProxy?
+        /// r31-settings-sections：120Hz 开关拨动通知的订阅 token（start()
+        /// 里注册，deinit 里注销；通知回调当场重算已建 link 的帧率上限）。
+        private var frameRateObserver: NSObjectProtocol?
         private var lastTimestamp: CFTimeInterval = 0
 
         init() { start() }
 
-        deinit { displayLink?.invalidate() }
+        deinit {
+            displayLink?.invalidate()
+            if let frameRateObserver { NotificationCenter.default.removeObserver(frameRateObserver) }
+        }
 
         func start() {
             guard displayLink == nil else { return }
             let proxy = RailMarqueeLinkProxy(driver: self)
             let link = CADisplayLink(target: proxy, selector: #selector(RailMarqueeLinkProxy.fired(_:)))
-            link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
+            // r31-settings-sections：帧率上限跟设置页「120Hz 高刷新率」开关走
+            //（SettingsStore.frameRateRange()：开 = 30–120/首选 120，
+            // 关 = 30–60/首选 60；默认开，与 120Hz 工硬编码 120 的既有行为
+            // 一致）。plist 解锁是编译期、运行时关不掉，开关能控的就是这行。
+            link.preferredFrameRateRange = SettingsStore.frameRateRange()
             link.add(to: .main, forMode: .common)
             linkProxy = proxy
             displayLink = link
+            // 开关拨动时已建好的 link 当场重算上限：设置页拨完回首页，
+            // 驱动是 @StateObject、不一定重建，只靠 start 时读一次会漏；
+            // 订阅只注册一次（本函数幂等，guard 拦住重复进），deinit 注销。
+            // 闭包只弱持驱动，不循环引用；queue .main，所以回调必在主线程，
+            // MainActor.assumeIsolated 安全（与 RailMarqueeLinkProxy 同款）。
+            frameRateObserver = NotificationCenter.default.addObserver(
+                forName: SettingsStore.highRefreshRateDidChangeNotification,
+                object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.applyFrameRateRange() }
+                }
+        }
+
+        /// r31-settings-sections：120Hz 开关拨动时重算已建 link 的帧率上限
+        ///（通知回调；link 没建好时是空操作，不重建 link、不碰 dt/步长）。
+        private func applyFrameRateRange() {
+            displayLink?.preferredFrameRateRange = SettingsStore.frameRateRange()
         }
 
         /// 内容换了（切来源 / 该栏重拉）：只把偏移收进新宽度，不归零、

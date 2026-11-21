@@ -42,12 +42,25 @@ struct LiziNativeApp: App {
         WindowGroup {
             NativeHomeView()
                 .environmentObject(playback)
+                .task {
+                    // r31-signin：启动时跑一次每日自动签到（开关开 +
+                    // 今天没签过才真签；关/已签/未登录都在里面直接回）。
+                    await SettingsStore.runAutoDailySignInIfNeeded()
+                    // r31-qqkg：启动时跑一次 12h 静默刷新（QQ / 酷狗画像；
+                    // 未到 12h 直接回，不发请求）。
+                    await SessionRefreshCoordinator.shared.refreshIfNeeded()
+                }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
                     // 回前台：复核一次远程命令（防系统把锁屏按钮回落到 ±10 秒）。
                     // 协调器是 @MainActor（第 22 轮第 5 件），跳主线程再调。
                     // r28：灵动岛已移除，不再重读 Live Activities 授权态。
                     Task { @MainActor in
                         nowPlayingCoordinator.reassertRemoteCommands()
+                        // r31-signin：回前台复核一次自动签到（跨天后不用
+                        // 重启也签；同一天已签过时日期守卫直接跳过，不重复签）。
+                        await SettingsStore.runAutoDailySignInIfNeeded()
+                        // r31-qqkg：回前台复核一次 12h 静默刷新。
+                        await SessionRefreshCoordinator.shared.refreshIfNeeded()
                     }
                 }
         }

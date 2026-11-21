@@ -10,19 +10,30 @@ import Foundation
 
 // MARK: - 音质（9 档，顺序即优先级：高 → 低）
 
-/// 九档音质（MEMORY：九档音质，极高/较高同为 320k；显示音质 = 实际返回档位）。
+/// 九档音质（r31 音质系统替换：Moumusic 的档位结构，只学流程和结构、
+///
+/// 按 Lizi 结构原生实现，不抄 Moumusic 代码；Moumusic 是 GPL-3.0，
+/// 这里只取它的档位名 / 网易 level 映射 / 选档流程这些公开结构）。
+/// 档位名与 Moumusic SettingsManager.AudioQuality 一致：
+/// master 超清母带、atmos 高清环绕声、dolby 杜比全景声、
+/// surround 沉浸环绕声、hires Hi-Res（FLAC 24-bit）、lossless 无损、
+/// exhigh/higher 极高/较高（同档 320k）、standard 标准 128k。
+/// 旧版的 `spatial`（臻品全景声 3.0）已删：它就是 Moumusic 的
+/// surround（网易 sky / QQ atmos20），不是独立档位；旧存档里
+/// "spatial" 由 SettingsStore.storedAudioQuality() 迁成 .surround。
+/// 显示音质 = 实际返回档位（servedQuality），绝不显示请求的档位。
 enum AudioQuality: String, Codable, Hashable, CaseIterable {
-    case standard   // 128k / 标准
-    case higher     // 较高（320k）
-    case exhigh     // 极高（320k）
+    case master     // 超清母带（jymaster）
+    case atmos      // 高清环绕声（jyeffect）
+    case dolby      // 杜比全景声（dolby）
+    case surround   // 沉浸环绕声（sky）
+    case hires      // Hi-Res / FLAC 24-bit
     case lossless   // FLAC / 无损
-    case hires      // Hi-Res / FLAC 24-bit（臻品音质 2.0）
-    case surround   // 环绕声（jyeffect）
-    case dolby      // Dolby Atmos / 杜比全景声
-    case spatial    // Spatial / 臻品全景声 3.0
-    case master     // Master / 臻品母带 4.0
+    case exhigh     // 极高（320k）
+    case higher     // 较高（320k，与极高同档）
+    case standard   // 标准（128k）
 
-    /// 优先级（越大越好），与 player.js QUALITY_MAP / canonQuality 的档位顺序一致。
+    /// 优先级（越大越好），与 Moumusic allCases 高 → 低的顺序一致。
     var rank: Int {
         switch self {
         case .standard: return 1
@@ -32,50 +43,120 @@ enum AudioQuality: String, Codable, Hashable, CaseIterable {
         case .hires: return 5
         case .surround: return 6
         case .dolby: return 7
-        case .spatial: return 8
+        case .atmos: return 8
         case .master: return 9
         }
     }
 
-    /// UI 显示名（player.js QUALITY_LABEL 的中文名）。
+    /// UI 显示名（Moumusic displayName）。
     var displayName: String {
         switch self {
-        case .standard: return "标准"
-        case .higher: return "较高"
-        case .exhigh: return "极高"
-        case .lossless: return "无损"
-        case .hires: return "臻品音质 2.0"
-        case .surround: return "环绕声"
+        case .master: return "超清母带"
+        case .atmos: return "高清环绕声"
         case .dolby: return "杜比全景声"
-        case .spatial: return "臻品全景声 3.0"
-        case .master: return "臻品母带 4.0"
+        case .surround: return "沉浸环绕声"
+        case .hires: return "Hi-Res"
+        case .lossless: return "无损"
+        case .exhigh: return "极高"
+        case .higher: return "较高"
+        case .standard: return "标准"
         }
     }
 
-    /// 请求档位 → 各平台上游的真实参数（照抄 player.js QUALITY_MAP；平台没有该档时
-    /// 取该平台不高于请求档的最高档）。
+    /// 技术标注（Moumusic sourceDisplayName：档位名 + 英文/码率，
+    /// 绝不宣称音源没给过的档位；只在选择器里作补充说明）。
+    var sourceDisplayName: String {
+        switch self {
+        case .master: return "超清母带 / Master"
+        case .atmos: return "高清环绕声 / Spatial"
+        case .dolby: return "杜比全景声 / Dolby Atmos"
+        case .surround: return "沉浸环绕声 / Surround"
+        case .hires: return "Hi-Res / FLAC 24-bit"
+        case .lossless: return "无损 FLAC"
+        case .exhigh, .higher: return "320 kbps"
+        case .standard: return "128 kbps"
+        }
+    }
+
+    /// LX 协议里的档位名（Moumusic lxType；Lizi 的 LX 腿只认这套：
+    /// master=jymaster、atmos=atmos、dolby=dolby、surround=surround、
+    /// hires=flac24bit、lossless=flac、exhigh/higher=320k、standard=128k）。
+    var lxType: String {
+        switch self {
+        case .master: return "jymaster"
+        case .atmos: return "atmos"
+        case .dolby: return "dolby"
+        case .surround: return "surround"
+        case .hires: return "flac24bit"
+        case .lossless: return "flac"
+        case .exhigh, .higher: return "320k"
+        case .standard: return "128k"
+        }
+    }
+
+    /// LX/音源回的档位字符串 → 统一档位（Moumusic init?(lxType:) 的
+    /// 映射；对不上的字符串回 nil——调用方原样显示原文，不压档）。
+    init?(lxType raw: String) {
+        switch raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "master", "jymaster", "master_quality", "master-quality": self = .master
+        case "atmos", "immersive": self = .atmos
+        case "dolby", "dolby-atmos", "dolbyatmos": self = .dolby
+        case "surround", "spatial", "spatial-audio": self = .surround
+        case "128", "128k", "m4a", "mp3": self = .standard
+        case "320", "320k": self = .exhigh
+        case "flac", "lossless", "ape": self = .lossless
+        case "flac24bit", "flac24", "hires", "highres": self = .hires
+        default: return nil
+        }
+    }
+
+    /// 网易官方取链的 level 参数（Moumusic neteaseLevel）：
+    /// master=jymaster、atmos=jyeffect、dolby=dolby、surround=sky、
+    /// hires=hires、lossless=lossless、exhigh/higher=exhigh、
+    /// standard=standard。
+    var neteaseLevel: String {
+        switch self {
+        case .master: return "jymaster"
+        case .atmos: return "jyeffect"
+        case .dolby: return "dolby"
+        case .surround: return "sky"
+        case .hires: return "hires"
+        case .lossless: return "lossless"
+        case .exhigh, .higher: return "exhigh"
+        case .standard: return "standard"
+        }
+    }
+
+    /// 网易 level → 统一档位（Moumusic init?(neteaseLevel:) 的映射）。
+    init?(neteaseLevel raw: String) {
+        switch raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "jymaster", "master": self = .master
+        case "jyeffect", "atmos", "immersive": self = .atmos
+        case "dolby", "dolby_atmos": self = .dolby
+        case "sky", "surround", "spatial": self = .surround
+        case "hires", "highres": self = .hires
+        case "lossless", "flac": self = .lossless
+        case "exhigh", "higher": self = .exhigh
+        case "standard", "128k": self = .standard
+        default: return nil
+        }
+    }
+
+    /// 请求档位 → 各平台上游的真实参数（r31：网易直接走 neteaseLevel；
+    /// 其它平台按各平台自己的取链参数；平台没有该档时取链端按实际返回
+    /// 为准，不在这里降档——降档阶梯（R4）已删，请求档直发音源）。
     func requestParam(platform: String) -> String {
         switch platform {
         case "netease":
-            switch self {
-            case .standard: return "standard"
-            case .higher: return "higher"
-            case .exhigh: return "exhigh"
-            case .lossless: return "lossless"
-            case .hires: return "hires"
-            case .surround: return "jyeffect"
-            case .dolby: return "dolby"
-            case .spatial: return "sky"
-            case .master: return "jymaster"
-            }
+            return neteaseLevel
         case "qq":
             switch self {
             case .standard, .higher: return "128"
             case .exhigh: return "320"
             case .lossless: return "flac"
             case .hires: return "hires"
-            case .surround, .dolby: return "atmos51"
-            case .spatial: return "atmos20"
+            case .atmos, .dolby: return "atmos51"
+            case .surround: return "atmos20"
             case .master: return "master"
             }
         case "kuwo":
@@ -112,12 +193,16 @@ enum AudioQuality: String, Codable, Hashable, CaseIterable {
             default: return "flac"
             }
         case "lx":
+            // Lizi LX 腿的协议值（LXResolver.normalizeQuality / scriptTiers：
+            // master / atmos / hires / flac24bit / 320k / 128k；服务端
+            // normalizeQuality 把 atmos/dolby/surround/jyeffect 都归一成
+            // atmos，所以 atmos/dolby/surround 三档发同一个值）。
             switch self {
             case .standard, .higher: return "128k"
             case .exhigh: return "320k"
             case .lossless: return "flac24bit"
             case .hires: return "hires"
-            case .surround, .dolby, .spatial: return "atmos"
+            case .atmos, .dolby, .surround: return "atmos"
             case .master: return "master"
             }
         default:
@@ -125,18 +210,23 @@ enum AudioQuality: String, Codable, Hashable, CaseIterable {
         }
     }
 
-    /// 上游实际回的档位值 → 统一档位（照抄 player.js canonQuality；br 为码率 bps，
-    /// 只在 served 对不上表时作后备判断）。
-    static func canon(platform: String, served: String, bitrate: Int = 0) -> AudioQuality? {
+    /// 上游实际回的档位值 → 统一档位（只认档位表；对不上的字符串回 nil，
+    /// 调用方原样显示原文，绝不按码率猜档位）。
+    /// r31（R6 已删）：旧版 canon 末尾的 br 分段（bitrate ≥ 800k →
+    /// 无损、≥ 300k → 极高……）与「192k 等非标码率压 standard」已全删。
+    /// 码率不是档位证据——192k 的流就是 192k，显示原文，不压成标准；
+    /// 真实档位由实测链（StreamQualityMeasurer：AVFoundation 流实测 →
+    /// 文件头 → URL 文件名）定，canon 只翻译音源给的档位名。
+    static func canon(platform: String, served: String) -> AudioQuality? {
         switch platform {
         case "netease":
             let table: [String: AudioQuality] = ["standard": .standard, "higher": .higher,
                 "exhigh": .exhigh, "lossless": .lossless, "hires": .hires, "dolby": .dolby,
-                "jyeffect": .surround, "sky": .spatial, "jymaster": .master]
+                "jyeffect": .atmos, "sky": .surround, "jymaster": .master]
             if let q = table[served] { return q }
         case "qq":
             let table: [String: AudioQuality] = ["master": .master, "atmos51": .dolby,
-                "atmos20": .spatial, "hires": .hires, "flac": .lossless, "ape": .lossless,
+                "atmos20": .surround, "hires": .hires, "flac": .lossless, "ape": .lossless,
                 "320": .exhigh, "128": .standard, "m4a": .standard]
             if let q = table[served] { return q }
         case "kuwo":
@@ -157,16 +247,16 @@ enum AudioQuality: String, Codable, Hashable, CaseIterable {
                 "320": .exhigh, "128": .standard]
             if let q = table[served] { return q }
         case "lx":
-            let table: [String: AudioQuality] = ["master": .master, "atmos": .dolby,
-                "hires": .hires, "flac24bit": .lossless, "320k": .exhigh, "128k": .standard]
+            // LX 腿回的是脚本 tier（scriptTiers：master / atmos / hires /
+            // flac24bit / 320k / 128k）+ 归一化别名（jymaster / flac）。
+            let table: [String: AudioQuality] = ["master": .master, "jymaster": .master,
+                "atmos": .atmos, "dolby": .dolby, "surround": .surround,
+                "hires": .hires, "flac24bit": .lossless, "flac": .lossless,
+                "320k": .exhigh, "320": .exhigh, "128k": .standard, "128": .standard]
             if let q = table[served] { return q }
         default:
             break
         }
-        if bitrate >= 800_000 { return .lossless }
-        if bitrate >= 300_000 { return .exhigh }
-        if bitrate >= 180_000 { return .higher }
-        if bitrate > 0 { return .standard }
         return nil
     }
 
@@ -181,24 +271,26 @@ enum AudioQuality: String, Codable, Hashable, CaseIterable {
         case "A000", "F000": return .lossless
         case "RS01": return .hires
         case "Q001": return .dolby
-        case "Q000": return .spatial
+        case "Q000": return .surround
         case "AI00": return .master
         default: return nil
         }
     }
 
-    /// 流实证校验（r31 真实音质）：上游宣称的档位（`claimed`，来自 canon）
-    /// 绝不能高于返回流本身能证明的上限；宣称高于上限时往下压，实证与
-    /// 宣称都给不出档位时回 nil（UI 不挂徽章，绝不拿请求档位顶）。
+    /// 流实证校验（r31 真实音质 + r31 音质系统替换）：上游宣称的档位
+    /// （`claimed`，来自 canon）绝不能高于返回流本身能证明的上限；
+    /// 宣称高于上限时往下压，实证与宣称都给不出档位时回 nil
+    /// （UI 不挂徽章，绝不拿请求档位顶）。
     /// - `url`：实际要播的地址（代理前的上游原址）。QQ 直链的文件名含
     ///   档位前缀时，前缀就是地面真相，直接定档、覆盖宣称。
     /// - `format`：上游给的容器名（网易 `type`、酷我 `format`；没有时
     ///   看 URL 后缀）。有损容器（mp3/m4a/aac/ogg）上限 320k（.exhigh）；
     ///   无损容器（flac/ape/wav）不设上限——容器本身不矛盾时宣称原样。
-    /// - `bitrate`（bps）：≤ 400k 时证明不是无损及以上，按码率定档
-    ///   （无损容器除外：稀疏音频的 FLAC 也能到 400k 上下，不靠码率
-    ///   否定它）；> 400k 时不靠码率抬高或压低（Hi-Res/杜比/母带的
-    ///   码率都在 800k 以上，旧表按码率定档会把真 Hi-Res 压成无损）。
+    /// - `bitrate`（bps）：r31（R6 已删）不再参与判定——码率分段
+    ///   （≤400k 压档 / 192k 压 standard）已全删，参数只保留调用点
+    ///   稳定，值被忽略；流的真实码率由实测链
+    ///   （StreamQualityMeasurer：AVFoundation 读实际解码轨道）定，
+    ///   不在这里按宣称的 br 猜档位。
     /// - 无实证（未知后缀、无码率、无前缀）时宣称原样——没有反证不
     ///   否定上游；LX 不透明地址就是这一档（残留风险见 NativeBridge
     ///   lxSongURL 的注释）。
@@ -224,27 +316,56 @@ enum AudioQuality: String, Codable, Hashable, CaseIterable {
         // 后缀常是 .mp3（type=flac 才是真的），以后缀否定它会把真无损
         // 压成 320k；只有 format 没给/不认时才看后缀。
         let lossy: Bool
-        let lossless: Bool
         if lossyExts.contains(fmt) || losslessExts.contains(fmt) {
             lossy = lossyExts.contains(fmt)
-            lossless = losslessExts.contains(fmt)
         } else {
             lossy = lossyExts.contains(ext)
-            lossless = losslessExts.contains(ext)
         }
+        _ = bitrate // R6 已删：码率不参与判定（见本函数文件头）。
         func capped(_ cap: AudioQuality) -> AudioQuality {
             claimed.rank <= cap.rank ? claimed : cap
         }
-        // 3）码率 ≤ 400k 证明不是无损及以上（无损容器除外）。
-        if bitrate > 0, bitrate <= 400_000, !lossless {
-            if bitrate >= 300_000 { return capped(.exhigh) }
-            if bitrate >= 180_000 { return capped(.higher) }
-            return capped(.standard)
-        }
-        // 4）有损容器：上限 320k。
+        // 3）有损容器：上限 320k（容器实证，不是码率分段：mp3 文件
+        // 物理上装不下无损/母带，宣称再高也只能是 320k）。
         if lossy { return capped(.exhigh) }
-        // 5）无损容器 / 无实证：宣称原样。
+        // 4）无损容器 / 无实证：宣称原样。
         return claimed
+    }
+}
+
+// MARK: - 播放来源（三段，Moumusic PlaybackSourceMode 的结构、Lizi 的语义）
+
+/// 选哪条腿先取链（r31 音质系统替换）。
+/// R7 已删：三段只是优先顺序，不再是硬隔离——任何一段取不到时都可
+/// 以另一段兜底，绝不因模式把能播的地址拒在门外：
+/// - automatic（自动）：LX 优先取请求档、账号只兜底；先拿到的一腿
+///   档位低于请求档时，先记下它，再向另一腿要高档，留档高者。
+/// - official（账号优先）：账号腿先，拿不到 / 档位不够时走 LX。
+/// - thirdParty（第三方优先）：LX 腿先，拿不到时走账号。
+enum PlaybackSourceMode: String, Codable, Hashable, CaseIterable {
+    case automatic
+    case official
+    case thirdParty
+
+    /// 设置页三段控件里的短名。
+    var shortDisplayName: String {
+        switch self {
+        case .automatic: return "自动"
+        case .official: return "账号优先"
+        case .thirdParty: return "第三方优先"
+        }
+    }
+
+    /// 设置页三段控件下的说明（每段到底先走哪条腿、兜底是谁）。
+    var explanation: String {
+        switch self {
+        case .automatic:
+            return "LX 音源优先取请求档位；LX 拿不到或档位不够时用账号音源兜底，档高者胜。"
+        case .official:
+            return "先用已登录账号的官方音源；账号拿不到或档位不够时用 LX 音源兜底。"
+        case .thirdParty:
+            return "先用 LX 第三方音源；LX 拿不到时用账号音源兜底。"
+        }
     }
 }
 

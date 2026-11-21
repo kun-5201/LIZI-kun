@@ -21,6 +21,9 @@ struct AccountDetailView: View {
     let platform: String
 
     @ObservedObject private var loginStore = LoginStore.shared
+    /// r31-videoreward：免费播放资格校验结果（只读展示；本页不加任何领取引导与按钮）。
+    @ObservedObject private var videoRewardStore = VideoRewardStore.shared
+    @EnvironmentObject private var nav: AppNavigation
     @Environment(\.dismiss) private var dismiss
     @State private var showLogoutConfirm = false
     @State private var loginTarget: LoginSheetTarget?
@@ -53,6 +56,7 @@ struct AccountDetailView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 detailCard
+                shortcutSection
                 if loggedIn {
                     logoutButton
                 } else {
@@ -70,6 +74,8 @@ struct AccountDetailView: View {
         .navigationTitle(platformName)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { loginStore.refresh() }
+        // r31-videoreward：进页再核验一次资格（只刷登录态 + 读本地记录，不编接口）。
+        .task { await videoRewardStore.verify(platform: platform) }
         .alert("退出登录", isPresented: $showLogoutConfirm) {
             Button("退出登录", role: .destructive) {
                 loginStore.logout(platform: platform)
@@ -154,13 +160,21 @@ struct AccountDetailView: View {
             Divider()
             detailRow(label: "VIP 状态",
                       value: loggedIn
-                        ? (loginStore.isVip(platform: platform) ? "VIP" : "非 VIP")
+                        ? loginStore.vipLabel(platform: platform)
                         : "未登录")
             if loggedIn {
-                Text("VIP 状态来自登录时平台返回的信息，未返回时显示为非 VIP。")
+                Text("VIP / SVIP 状态来自登录时平台返回的会员校验，未返回时显示为未知；酷我、Apple Music、汽水、波点没有会员校验接口。")
                     .font(.liziBody(size: LiziTokens.size13))
                     .foregroundColor(LiziTokens.ink3)
             }
+            // r31-videoreward：免费播放资格校验结果（只读一行 + 一句口径说明；
+            // 不加按钮、不写怎么领——只校验用户是不是已经在官方 App 里拿到了资格）。
+            Divider()
+            detailRow(label: "免费播放资格",
+                      value: videoRewardStore.statusText(platform: platform))
+            Text(videoRewardStore.statusFootnote(platform: platform))
+                .font(.liziBody(size: LiziTokens.size13))
+                .foregroundColor(LiziTokens.ink3)
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -178,6 +192,50 @@ struct AccountDetailView: View {
                 .font(.liziBody(size: LiziTokens.size13))
                 .foregroundColor(LiziTokens.ink2)
                 .lineLimit(1)
+        }
+    }
+
+    /// r31-rank：快捷入口行（「我的」页的快捷行）。
+    /// 网易云：进听歌排行（服务端排行，最近一周 / 所有时间可切）；
+    /// 其余 6 台没有等价服务端接口，行照常给、副标题写清没有，
+    /// 点进去是诚实空态，不编数据、不摆假入口。
+    /// 本页是 sheet 里打开的：先切导航、再关 sheet，关完正好落在排行页。
+    private var shortcutSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("快捷入口")
+                .font(.liziDisplay(size: LiziTokens.size20))
+                .foregroundColor(LiziTokens.ink)
+            Button(action: {
+                nav.show(.listeningRank(platform: platform))
+                dismiss()
+            }) {
+                HStack(spacing: 10) {
+                    Image(systemName: "chart.bar.fill")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(LiziTokens.accent)
+                        .frame(width: 26, height: 26)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("听歌排行")
+                            .font(.liziBody(size: LiziTokens.size14, weight: .medium))
+                            .foregroundColor(LiziTokens.ink)
+                        Text(platform == "netease"
+                             ? "最近一周 / 所有时间 · 来自网易云账号"
+                             : "该平台没有服务端听歌排行接口")
+                            .font(.liziBody(size: LiziTokens.size13))
+                            .foregroundColor(LiziTokens.ink3)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(LiziTokens.ink3)
+                }
+                .padding(12)
+                .background(LiziTokens.paper2)
+                .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius14))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("听歌排行")
         }
     }
 

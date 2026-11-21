@@ -70,6 +70,13 @@ struct NetEaseLoginView: View {
     @State private var avatarURL: URL?
     @State private var avatarBroken = false
     @State private var logoutBusy = false
+    /// r31-cookie：粘贴 Cookie 登录（后端 `POST /api/session/import` 早有，
+    /// 原生登录页一直只有扫码、没有贴的入口——用户报 Cookie 登录拉不到
+    /// 数据时，网易这边连贴的地方都没有）。成功后同样 refresh +
+    /// `/api/session` 确认再进已登录态；Cookie 只进 POST body，成功就清掉。
+    @State private var cookieText = ""
+    @State private var cookieBusy = false
+    @State private var cookieMessage = ""
 
     private var isFailed: Bool {
         if case .failed = phase { return true }
@@ -102,6 +109,8 @@ struct NetEaseLoginView: View {
                         Button("重新获取二维码") { startLogin() }
                             .buttonStyle(.borderedProminent)
                     }
+
+                    cookieImportSection
                 }
 
                 if phase == .loggedIn {
@@ -152,6 +161,83 @@ struct NetEaseLoginView: View {
                 resumePolling()
             }
         }
+    }
+
+    /// 粘贴 Cookie 登录（r31-cookie）：浏览器里登好 music.163.com 后从
+    /// 开发者工具 → Application → Cookies 复制整段 Cookie（要含 MUSIC_U）
+    /// 贴进来；后端口 `POST /api/session/import`（粘贴后先校验、失败回滚，
+    /// 见 `NetEase.handleSessionImport`），成功后同样 refresh +
+    /// `/api/session` 确认再进已登录态。
+    private var cookieImportSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("或粘贴 Cookie 登录")
+                .font(.subheadline.weight(.semibold))
+            Text("在浏览器打开 music.163.com 登录后，复制整段 Cookie 贴进来（要含 MUSIC_U）。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $cookieText)
+                    .frame(height: 64)
+                    .font(.footnote.monospaced())
+                    .autocorrectionDisabled(true)
+                    .textInputAutocapitalization(.never)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.3)))
+                if cookieText.isEmpty {
+                    Text("MUSIC_U=…;（或整段 Cookie）")
+                        .font(.footnote)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 8)
+                        .allowsHitTesting(false)
+                }
+            }
+            HStack(spacing: 12) {
+                Button(cookieBusy ? "导入中…" : "导入登录") { Task { @MainActor in await importCookie() } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(cookieBusy || cookieText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if let paste = UIPasteboard.general.string, !paste.isEmpty {
+                    Button("粘贴") { cookieText = paste }
+                        .buttonStyle(.bordered)
+                        .disabled(cookieBusy)
+                }
+            }
+            if !cookieMessage.isEmpty {
+                Text(cookieMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 24)
+    }
+
+    private func importCookie() async {
+        let raw = cookieText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else {
+            cookieMessage = "先把 Cookie 粘进来"
+            return
+        }
+        guard raw.contains("MUSIC_U") else {
+            cookieMessage = "这段内容里没有 MUSIC_U（F12 → Application → Cookies → music.163.com 里那一项）"
+            return
+        }
+        cookieBusy = true
+        defer { cookieBusy = false }
+        guard let resp = await NativeBridge.call(path: "/api/session/import",
+                                                 method: "POST", body: ["cookie": raw]) else {
+            cookieMessage = "服务端无响应，请检查网络后重试。"
+            return
+        }
+        guard (resp["ok"] as? NSNumber)?.boolValue == true else {
+            cookieMessage = (resp["message"] as? String) ?? "导入失败，请检查 Cookie 是否完整或已过期。"
+            return
+        }
+        cookieText = ""
+        cancelPolling()
+        await LoginStore.refresh(platform: "netease")
+        if await enterLoggedInState() { return }
+        phase = .failed("登录已导入，但登录态没写进来（/api/session 未登录），点「重新获取二维码」再试")
     }
 
     /// 已登录态：昵称 + 头像（status 接口 profile 里取，没有就不显示，不编）。

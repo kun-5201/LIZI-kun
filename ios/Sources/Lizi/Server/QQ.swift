@@ -1949,6 +1949,22 @@ extension QQService {
         return false
     }
 
+    /// r31-cookie：空结果时的凭证存活复核（只在取数已通、但回空时调）。
+    /// 背景（VM 实测，真上游）：`CgiGetDiss`（喜欢，dirid 201）、
+    /// `GetPlaylistByUin`（歌单）、`uniform_get_Dissinfo`（每日，dirid 202）
+    /// 对坏凭证都不报错——假 `uin` + 假 `musickey` 也回 `code 0`，只是
+    /// 数据为空；`1000 / 104401 / 104400` 的拒码表只在 `GetLoginUserInfo`
+    /// 上出现。所以喜欢/歌单/每日三路的空结果不能直接当「没内容」：
+    /// 这里再问一次 `GetLoginUserInfo`（`getLoginProfile`，与 `status()`
+    /// 同一个校验口），拿不到画像 = 凭证已死，调用方回 401 让 UI 提示
+    /// 重登；拿得到 = 账号是真的空，放行诚实空态。
+    /// 只在「musicu 刚成功返回」后调：网络本身是通的，画像失败只剩
+    /// 凭证原因，不会把断网误判成登录失效。
+    private func credentialDead() async -> Bool {
+        guard loadCredential() != nil else { return false }
+        return await getLoginProfile() == nil
+    }
+
     /// 到期前 6h 且有 refresh_key 时静默刷新；失败 5 分钟内不再试；凭证被拒时清凭证返回 nil。
     private func ensureCredential() async -> [String: Any]? {
         guard var cred = loadCredential() else { return nil }
@@ -1997,19 +2013,56 @@ extension QQService {
             if nickname.isEmpty { nickname = scStr(info, "nick") }
             if nickname.isEmpty { nickname = "QQ 音乐用户" }
             var avatar = qqProfileAvatar(cred, info: info)
-            if avatar.isEmpty { avatar = scStr(cred, "avatarUrl") }
+            if avatar.isEmpty { avatar = qqNormalizeAvatar(scStr(cred, "avatarUrl")) }
+            if avatar.isEmpty, let fb = await baseUserInfoAvatar(uin: credentialMusicId(cred)) { avatar = fb }
             return ["loggedIn": true, "nickname": nickname, "avatar": avatar, "uin": credentialMusicId(cred)]
         } catch {
             return nil
         }
     }
 
-    /// headpic → avatarUrl → avatar → info.logo，第一个 http(s) 且不含 t_user_default 的。
+    /// 头像 URL 归一（r31 头像修）：上游给的 logo 常是 http://thirdqq.qlogo.cn/…
+    /// 或 //thirdqq.qlogo.cn/…（协议相对）；真机 ATS 只放行 https + 本地联网，
+    /// http 原样进 AsyncImage 必 -1022（旧 UI 一直转圈），// 开头连
+    /// URL(string:) 都是 nil。统一升成 https 再往外给；qlogo.cn 的 https
+    /// 实测 200（VM curl：http/https 双双 200 image/jpeg）。
+    /// t_user_default 是 QQ 默认头像占位图（无真头像），不要。
+    private func qqNormalizeAvatar(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, !s.contains("t_user_default") else { return "" }
+        if s.hasPrefix("//") { s = "https:" + s }
+        else if s.hasPrefix("http://") { s = "https://" + s.dropFirst("http://".count) }
+        guard s.hasPrefix("https://") else { return "" }
+        return s
+    }
+
+    /// headpic → avatarUrl → avatar → info.logo，第一个归一后可用的。
     private func qqProfileAvatar(_ cred: [String: Any], info: [String: Any]) -> String {
         for c in [scStr(cred, "headpic"), scStr(cred, "avatarUrl"), scStr(cred, "avatar"), scStr(info, "logo")] {
-            if c.hasPrefix("http") && !c.contains("t_user_default") { return c }
+            let n = qqNormalizeAvatar(c)
+            if !n.isEmpty { return n }
         }
         return ""
+    }
+
+    /// GetLoginUserInfo 没给头像时的兜底（r31 头像修；Moumusic QQMusicAPI
+    /// baseUserInfo 同款取法，字段与接口照参考实现，不搬代码）：
+    /// userInfo.BaseUserInfoServer.get_user_baseinfo_v2，vec_uin=[uin]，
+    /// map_userinfo[uin].headurl / logo，http 升 https。尽力取，失败回 nil，
+    /// 绝不因此判未登录。
+    private func baseUserInfoAvatar(uin: String) async -> String? {
+        guard !uin.isEmpty else { return nil }
+        do {
+            let d = try await musicuAuth(module: "userInfo.BaseUserInfoServer", method: "get_user_baseinfo_v2",
+                                         param: ["vec_uin": [uin]], timeout: 8)
+            guard let map = d["map_userinfo"] as? [String: Any],
+                  let info = (map[uin] as? [String: Any]) ?? map.values.first as? [String: Any] else { return nil }
+            for k in ["headurl", "logo"] {
+                let n = qqNormalizeAvatar(scStr(info, k))
+                if !n.isEmpty { return n }
+            }
+        } catch { /* 兜底失败就没头像，不影响登录态 */ }
+        return nil
     }
 
     private func publicAvatarByUin(_ uid: String) async -> String? {
@@ -2041,8 +2094,8 @@ extension QQService {
         let uid = credentialMusicId(cred)
         var nickname = scStr(cred, "nick")
         if nickname.isEmpty { nickname = scStr(cred, "nickname") }
-        var avatar = scStr(cred, "avatarUrl")
-        if avatar.isEmpty { avatar = scStr(cred, "logo") }
+        var avatar = qqNormalizeAvatar(scStr(cred, "avatarUrl"))
+        if avatar.isEmpty { avatar = qqNormalizeAvatar(scStr(cred, "logo")) }
         if (avatar.isEmpty || avatar.contains("t_user_default")),
            uid.range(of: "^[1-9]\\d{0,19}$", options: .regularExpression) != nil,
            let pub = await publicAvatarByUin(uid), !pub.isEmpty {
@@ -2274,6 +2327,100 @@ extension QQService {
         .json(200, ["code": 200, "ok": true, "port": 0, "channels": qqChannels, "sessionMode": "stored"])
     }
 
+    /// 会员查询（r31-membership，服务端 /api/qq/status 用；本机直连版
+    /// QQMusicAPI.vipStatus 同款流程）：POST musicu.fcg
+    /// {comm: {g_tk, uin, format, ct, cv},
+    ///  req: {module: userInfo.VipQueryServer, method: SRFVipQuery_V2,
+    ///        param: {uin_list: [uin]}}}。
+    /// g_tk = hash5381(凭证)，凭证取 cookie 的 qqmusic_key / qm_keyst /
+    /// p_skey / skey（p_skey 优先）；uin 取 credentialMusicId，缺了取
+    /// webCookie 里的 wxuin。code == 0 后扫含 vip/green 且不含
+    /// time/end/start/expire/pay/url/icon/desc 的键，数值 > 0 即会员；
+    /// iSuperVip > 0 即 SVIP。查不到 / 不通 / code 非 0 回 (nil, false)
+    /// = 未知，不当非会员（登录态照保，只把会员态标未知）。
+    private func vipQuery() async -> (vip: Bool?, isSuperVIP: Bool) {
+        guard let cred = loadCredential() else { return (nil, false) }
+        let cookie = credentialCookieHeader(cred)
+        let fields = Self.qqCookieFields(cookie)
+        var uin = credentialMusicId(cred)
+        if uin.isEmpty { uin = fields["wxuin"] ?? "" }
+        guard !uin.isEmpty else { return (nil, false) }
+        let credential = fields["p_skey"] ?? fields["skey"] ?? fields["qqmusic_key"] ?? fields["qm_keyst"] ?? ""
+        guard !credential.isEmpty else { return (nil, false) }
+        let body: [String: Any] = [
+            "comm": ["g_tk": qqPtHash5381(credential), "uin": uin, "format": "json", "ct": 24, "cv": 0],
+            "req": ["module": "userInfo.VipQueryServer", "method": "SRFVipQuery_V2",
+                    "param": ["uin_list": [uin]]],
+        ]
+        guard let bodyData = qqJSONData(body), let url = URL(string: qqMusicuURL) else { return (nil, false) }
+        do {
+            let (data, resp) = try await Upstream.fetch(url, headers: [
+                "Content-Type": "application/json", "Cookie": cookie,
+                "Referer": "https://y.qq.com/", "User-Agent": qqUA,
+            ], timeout: 15, method: "POST", body: bodyData)
+            guard resp.statusCode == 200, let obj = Upstream.jsonObject(data),
+                  let reqObj = obj["req"] as? [String: Any], scInt(reqObj, "code") == 0 else {
+                return (nil, false)
+            }
+            let payload = reqObj["data"] ?? reqObj
+            return (Self.qqContainsVIPFlag(payload), Self.qqContainsSuperVIPFlag(payload))
+        } catch {
+            return (nil, false)
+        }
+    }
+
+    /// "k=v; k=v" 形 Cookie 串 → 字段字典（vipQuery 用）。
+    private static func qqCookieFields(_ cookie: String) -> [String: String] {
+        var out: [String: String] = [:]
+        for seg in cookie.split(separator: ";") {
+            let kv = seg.split(separator: "=", maxSplits: 1)
+            guard kv.count == 2 else { continue }
+            let k = kv[0].trimmingCharacters(in: .whitespaces)
+            let v = kv[1].trimmingCharacters(in: .whitespaces)
+            guard !k.isEmpty, !v.isEmpty else { continue }
+            out[k] = v
+        }
+        return out
+    }
+
+    /// 含 vip/green 的会员标志键（排除时间/链接/描述类键），递归扫字典与数组。
+    private static func qqContainsVIPFlag(_ value: Any) -> Bool {
+        func isFlagKey(_ key: String) -> Bool {
+            let k = key.lowercased()
+            guard k.contains("vip") || k.contains("green") else { return false }
+            return !(k.contains("time") || k.contains("end") || k.contains("start") || k.contains("expire")
+                     || k.contains("pay") || k.contains("url") || k.contains("icon") || k.contains("desc"))
+        }
+        if let dict = value as? [String: Any] {
+            for (key, item) in dict {
+                if isFlagKey(key) {
+                    if let n = item as? NSNumber, n.intValue > 0 { return true }
+                    if let t = item as? String, let n = Int(t), n > 0 { return true }
+                }
+                if qqContainsVIPFlag(item) { return true }
+            }
+        } else if let arr = value as? [Any] {
+            return arr.contains { qqContainsVIPFlag($0) }
+        }
+        return false
+    }
+
+    /// iSuperVip / 其它含 supervip 的键数值 > 0 即 SVIP，递归扫。
+    private static func qqContainsSuperVIPFlag(_ value: Any) -> Bool {
+        if let dict = value as? [String: Any] {
+            for (key, item) in dict {
+                if key.lowercased().contains("supervip") {
+                    if let n = item as? NSNumber, n.intValue > 0 { return true }
+                    if let t = item as? String, let n = Int(t), n > 0 { return true }
+                }
+                if qqContainsSuperVIPFlag(item) { return true }
+            }
+        } else if let arr = value as? [Any] {
+            return arr.contains { qqContainsSuperVIPFlag($0) }
+        }
+        return false
+    }
+
     private func status() async -> HttpResponse {
         guard await ensureCredential() != nil else {
             return .json(200, ["code": 200, "loggedIn": false])
@@ -2287,9 +2434,15 @@ extension QQService {
             if nickname.isEmpty { nickname = scStr(info, "nick") }
             if nickname.isEmpty { nickname = "QQ 音乐用户" }
             var avatar = qqProfileAvatar(cred, info: info)
-            if avatar.isEmpty { avatar = scStr(cred, "avatarUrl") }
+            if avatar.isEmpty { avatar = qqNormalizeAvatar(scStr(cred, "avatarUrl")) }
+            if avatar.isEmpty, let fb = await baseUserInfoAvatar(uin: credentialMusicId(cred)) { avatar = fb }
+            // r31-membership：登录成功 / 每次 status 刷新都验一次会员；
+            // vipQuery 失败时 vip 记 null = 未知（登录态照保，不踢下线）。
+            let vip = await vipQuery()
             return .json(200, ["code": 200, "loggedIn": true, "nickname": nickname,
-                                "avatar": avatar, "uin": credentialMusicId(cred)])
+                                "avatar": avatar, "uin": credentialMusicId(cred),
+                                "vip": vip.vip.map { NSNumber(value: $0) } ?? NSNull(),
+                                "isSuperVIP": vip.isSuperVIP, "vipKnown": vip.vip != nil])
         } catch {
             // 上游 401：未登录，另带失效会话的头像（stale），不删登录态文件。
             var out: [String: Any] = ["code": 200, "loggedIn": false]
@@ -2361,6 +2514,32 @@ extension QQService {
     ///  - 整罐 cookie 随凭证一起存（webCookie）：musicu 调用时整罐发，
     ///    p_skey 之类的票据才不会在半路丢掉（Lulumusic02 教训）；
     ///  - 画像只尽力取（signInFromWeb 同款：不把它当登录前提，取不到也算登录成功）。
+    /// r31-qqkg：本机直连登录的服务端同步副本。原生 QQMusicSessionStore
+    /// 把钥匙串 Cookie 翻成凭证字典 POST 到这里，写进服务端 QQService
+    /// （saveCredential 同时换掉内存里旧凭证的缓存——只写文件不够，
+    /// loadCredential 有缓存），供已落地的服务端取数链路（歌单 / 喜欢 /
+    /// 取链 / 搜索）继续用。同步失败不影响本次登录态本身——钥匙串才是
+    /// 真源，取数时 401 会明说。字段形状与 webLoginImport 存的一致。
+    private func loginSync(req: HttpRequest) -> HttpResponse {
+        let body = req.jsonBody()
+        let uin = scStr(body, "str_musicid").isEmpty ? scStr(body, "musicid") : scStr(body, "str_musicid")
+        let key = scStr(body, "musickey")
+        guard !uin.isEmpty, uin != "0", !key.isEmpty else {
+            return .json(200, ["code": 400, "loggedIn": false, "error": "login/sync 缺少 musicid / musickey"])
+        }
+        var cred: [String: Any] = [
+            "musicid": uin, "str_musicid": uin, "musickey": key,
+            "loginType": (body["loginType"] as? NSNumber)?.intValue ?? 6,
+            "musickeyCreateTime": (body["musickeyCreateTime"] as? NSNumber)?.doubleValue ?? Date().timeIntervalSince1970,
+            "keyExpiresIn": (body["keyExpiresIn"] as? NSNumber)?.intValue ?? 259200,
+            "webCookie": scStr(body, "webCookie"),
+        ]
+        if let nick = body["nickname"] as? String, !nick.isEmpty { cred["nickname"] = nick }
+        if let av = body["avatarUrl"] as? String, !av.isEmpty { cred["avatarUrl"] = av }
+        saveCredential(cred)
+        return .json(200, ["code": 200, "loggedIn": true])
+    }
+
     private func webLoginImport(req: HttpRequest) async -> HttpResponse {
         let raw = req.string("cookie").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else {
@@ -2690,6 +2869,14 @@ extension QQService {
             let songs = d["songlist"] as? [[String: Any]] ?? []
             let tracks = songs.compactMap { qqTrack($0) }
             if !tracks.isEmpty || !encryptUin.isEmpty {
+                // r31-cookie：空结果先复核凭证存活（见 `credentialDead()`）——
+                // CgiGetDiss 对坏凭证不报错、只回 code 0 + 空歌单，401 通道
+                // 走不到；死了就报 401 让 UI 提示重登，别拿空列表冒充
+                // 「这个账号没有喜欢的歌」。
+                if tracks.isEmpty, await credentialDead() {
+                    return .json(200, ["code": 401, "source": "qq", "tracks": [],
+                                       "error": "登录态已失效，请重新登录 QQ 音乐"])
+                }
                 return .json(200, ["code": 200, "source": "qq", "tracks": Array(tracks.prefix(limit)),
                                     "total": scInt(d, "total_song_num")])
             }
@@ -2813,6 +3000,14 @@ extension QQService {
                     if total > 0 && offset >= min(total, 1000) { break }
                 }
             }
+            // r31-cookie：空结果先复核凭证存活（见 `credentialDead()`）——
+            // GetPlaylistByUin 对坏凭证不报错、只回 code 0 + 空列表（VM
+            // 实测：假凭证也回 0），死了就报 401 让 UI 提示重登，别拿
+            // 空列表冒充「这个账号没有歌单」。
+            if playlists.isEmpty, await credentialDead() {
+                return .json(200, ["code": 401, "source": "qq", "playlists": [],
+                                   "error": "登录态已失效，请重新登录 QQ 音乐"])
+            }
             return .json(200, ["code": 200, "source": "qq", "playlists": playlists])
         } catch {
             if isCredentialRejection(error) {
@@ -2822,8 +3017,6 @@ extension QQService {
                                 "playlists": [], "error": (error as? QQUpstreamError)?.message ?? "取我的歌单失败"])
         }
     }
-
-    private func userAlbums(req: HttpRequest) async -> HttpResponse {
         let limit = min(100, max(1, req.int("limit", 100)))
         let offset = max(0, req.int("offset", 0))
         guard let cred = await ensureCredential() else {
@@ -2859,7 +3052,15 @@ extension QQService {
             let d = try await musicuAuth(module: "music.srfDissInfo.aiDissInfo", method: "uniform_get_Dissinfo",
                                          param: ["dirid": 202, "optype": 3, "tag": 1, "userinfo": 0, "pic_dpi": 300])
             let songs = d["songlist"] as? [[String: Any]] ?? []
-            return .json(200, ["code": 200, "source": "qq", "tracks": songs.compactMap { qqTrack($0) }])
+            let tracks = songs.compactMap { qqTrack($0) }
+            // r31-cookie：空结果先复核凭证存活（见 `credentialDead()`）——
+            // uniform_get_Dissinfo 对坏凭证不报错、只回 code 0 + 空歌单
+            // （VM 实测：假凭证也回 0），死了就报 401 让 UI 提示重登。
+            if tracks.isEmpty, await credentialDead() {
+                return .json(200, ["code": 401, "source": "qq", "tracks": [],
+                                   "error": "登录态已失效，请重新登录 QQ 音乐"])
+            }
+            return .json(200, ["code": 200, "source": "qq", "tracks": tracks])
         } catch {
             if isCredentialRejection(error) {
                 return .json(200, ["code": 401, "source": "qq", "tracks": [], "error": "登录 QQ 音乐后才有每日推荐"])
@@ -3099,17 +3300,15 @@ extension QQService {
                 return await status()
             case "cached-profile":
                 return .json(200, await cachedProfile())
-            case "login/qr/key":
-                return await loginQrKey(req: req)
-            case "login/qr/create":
-                return await loginQrCreate(req: req)
-            case "login/qr/check":
-                return await loginQrCheck(req: req)
+            case "login/qr/key", "login/qr/create", "login/qr/check", "login/qr/cancel":
+                // r31-qqkg：QQ 扫码登录已改为本机直连（QQMusicAPI），服务端
+                // 桥接已废弃——410 明说，不再静默走旧路。旧客户端请升级。
+                return .json(410, ["code": 410, "loggedIn": false,
+                                   "error": "QQ 扫码登录已改为本机直连（QQMusicAPI），服务端桥接已废弃"])
+            case "login/sync":
+                return loginSync(req: req)
             case "login/web":
                 return await webLoginImport(req: req)
-            case "login/qr/cancel":
-                cancelQrSession(key: req.string("key"))
-                return .json(200, ["code": 200])
             case "logout":
                 saveCredential(nil)
                 for s in qrSessions.values { s.wsTask?.cancel(); s.driverTask?.cancel() }

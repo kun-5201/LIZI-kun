@@ -171,6 +171,11 @@ final class NetEaseService {
         "login/qr/check": Route(path: "/login/qrcode/client/login", channel: "eapi"),
         "login/cellphone": Route(path: "/login/cellphone", channel: "weapi"),
         "login/status": Route(path: "/w/nuser/account/get", channel: "weapi"),
+        // 会员信息（r31-membership）：weapi /music-vip-membership/client/vip/info，
+        // /api/vip/info 直通（normalize 默认原样回 {code, data}，客户端
+        // LoginStore.ensureVIPInfo 懒补时调它；/api/session 里 sessionVerify
+        // 也连调它，见 vipInfo()）。
+        "vip/info": Route(path: "/music-vip-membership/client/vip/info", channel: "weapi"),
         "logout": Route(path: "/logout", channel: "weapi"),
         "user/playlist": Route(path: "/user/playlist", channel: "weapi"),
         "user/detail": Route(path: "/v1/user/detail/:uid", channel: "weapi"),
@@ -849,6 +854,9 @@ extension NetEaseService {
             return await passthroughWeapi("/api/album/sublist", [
                 "limit": req.int("limit", 100), "offset": req.int("offset"), "total": true,
             ])
+        case "play/record":
+            // r31-rank：听歌排行（只做网易服务端排行）。
+            return await neteasePlayRecord(req)
         default:
             return .json(404, ["error": "unknown netease api"])
         }
@@ -858,6 +866,38 @@ extension NetEaseService {
     private func passthroughWeapi(_ apiPath: String, _ payload: [String: Any]) async -> HttpResponse {
         do {
             let r = try await weapiRequest(apiPath, payload)
+            return .json(r.status == 200 ? 200 : r.status, r.json)
+        } catch {
+            return .json(502, ["code": 502, "error": error.localizedDescription])
+        }
+    }
+
+    /// 听歌排行（r31-rank）：weapi POST `/v1/play/record`，`{uid, type, limit}`，
+    /// type 1 = 最近一周、0 = 所有时间；回包原样返回（`weekData` / `allData`，
+    /// 单条 `{playCount, score, song}`，另有 `weekDataSize` / `allDataSize`）。
+    ///
+    /// uid 不由客户端传：`LoginStore.LoginState` 里没有 uid 字段（只有昵称 /
+    /// 头像 / vip），这里用本次登录会话的 `sessionVerify()` 取
+    /// `profile.userId`（与 `/api/session` 同源）；没登录 / 会话已死回
+    /// code 401（HTTP 200 壳，`NativeBridge.call` 只认 2xx，见其注释），
+    /// 客户端按未登录处理（显示登录按钮），不编空榜。
+    /// 上游未登录时回 code -2「无权限访问」（VM 实测，见
+    /// verification/r31-rank.cjs §8 探针）——那支只有没 MUSIC_U 才走到，
+    /// 这里 hasMusicU 已先拦住，探针只是证明端点本身存在且要登录。
+    private func neteasePlayRecord(_ req: HttpRequest) async -> HttpResponse {
+        guard session.hasMusicU else {
+            return .json(200, ["code": 401, "error": "未登录网易云"])
+        }
+        let type = req.int("type", 1) == 0 ? 0 : 1
+        let limit = min(max(req.int("limit", 100), 1), 1000)
+        do {
+            guard let v = try await sessionVerify(),
+                  let profile = v["profile"] as? [String: Any],
+                  int(profile, "userId") != 0 else {
+                return .json(200, ["code": 401, "error": "未登录网易云"])
+            }
+            let r = try await weapiRequest("/v1/play/record",
+                                           ["uid": int(profile, "userId"), "type": type, "limit": limit])
             return .json(r.status == 200 ? 200 : r.status, r.json)
         } catch {
             return .json(502, ["code": 502, "error": error.localizedDescription])
@@ -1163,7 +1203,12 @@ extension NetEaseService {
         let pairs = parseCookieInput(raw)
         let keys = Array(pairs.keys)
         guard pairs["MUSIC_U"] != nil else {
-            return .json(400, [
+            // r31-cookie：失败也回 HTTP 200 + ok:false（QQ `webLoginImport` /
+            // 酷我 `loginCookie` 同款）：原生 `NativeBridge.call` 碰到非 2xx
+            // 直接回 nil，body 里的 `message` 到不了 UI；200 才能把「缺
+            // MUSIC_U / 已过期」的具体原因原样显示出来。壳版 Node 服务的
+            // 400 约定（`public/api.js:129`）不在这改，那是另一份服务。
+            return .json(200, [
                 "ok": false, "reason": "no-music-u", "keys": keys, "cookieKeys": keys,
                 "message": "这段内容里没有 MUSIC_U（F12 → Application → Cookies → music.163.com 里那一项）",
             ])
@@ -1175,13 +1220,13 @@ extension NetEaseService {
                 return .json(200, ["ok": true, "profile": profile, "cookieKeys": keys])
             }
             session.restore(snap)
-            return .json(400, [
+            return .json(200, [
                 "ok": false, "reason": "invalid", "keys": keys, "cookieKeys": keys,
                 "message": "这段 cookie 无效或已过期（MUSIC_U 不是当前账号的，或已经登出过）",
             ])
         } catch {
             session.restore(snap)
-            return .json(400, [
+            return .json(200, [
                 "ok": false, "reason": "error", "keys": keys, "cookieKeys": keys,
                 "message": "校验登录态失败：\(error.localizedDescription)",
             ])
@@ -1190,12 +1235,60 @@ extension NetEaseService {
 
     // MARK: - sessionVerify（只走自家 weapi；iOS 上没有边车进程）
 
-    /// 有 profile 时返回 { loggedIn: true, profile }，否则 nil；传输失败时抛出。
+    /// 有 profile 时返回 { loggedIn: true, profile, vipInfo? }，否则 nil；
+    /// 传输失败时抛出。vipInfo 是启动 / 登录成功后 bootstrap 的第二步
+    /// （先取 profile 再取 vipInfo，r31-membership）：vip 接口那一步失败
+    /// 时不推翻登录态，只是不带 vipInfo（客户端 ensureVIPInfo 再懒补一次）。
     func sessionVerify() async throws -> [String: Any]? {
         let r = try await weapiRequest("/w/nuser/account/get", [:])
         if let p = profileOf(dict(r.json, "profile")) {
-            return ["loggedIn": true, "profile": p]
+            var out: [String: Any] = ["loggedIn": true, "profile": p]
+            if let vi = await vipInfo() { out["vipInfo"] = vi }
+            return out
         }
         return nil
+    }
+
+    /// 会员信息（r31-membership）：weapi POST
+    /// `/music-vip-membership/client/vip/info`，看
+    /// data.{redplus, associator, musicPackage}.expireTime 是否 > 现在
+    /// （redplus = 黑胶 SVIP、associator = 黑胶 VIP、musicPackage = 音乐包）。
+    /// 只信 profile.vipType 会误判——部分 SVIP 账号 vipType 回 0，
+    /// 最终判定 hasActiveVIP = (vipType > 0) || vipInfo.isActive
+    /// （客户端 LoginStore.isVip() 同款）。失败回 nil（未知，不当非会员）。
+    func vipInfo() async -> [String: Any]? {
+        guard session.hasMusicU else { return nil }
+        do {
+            let r = try await weapiRequest("/music-vip-membership/client/vip/info", [:])
+            guard let data = r.json["data"] as? [String: Any] else { return nil }
+            let nowMs = Int(Date().timeIntervalSince1970 * 1000)
+            var isActive = false
+            var isSuperVIP = false
+            var expireTime = 0
+            for (key, isSuper) in [("redplus", true), ("associator", false), ("musicPackage", false)] {
+                let sub = data[key] as? [String: Any] ?? [:]
+                let expire = Self.vipExpireMs(sub["expireTime"])
+                guard expire > nowMs else { continue }
+                isActive = true
+                expireTime = max(expireTime, expire)
+                if isSuper { isSuperVIP = true }
+            }
+            return ["isActive": isActive, "isSuperVIP": isSuperVIP,
+                    "label": isSuperVIP ? "SVIP" : (isActive ? "VIP" : ""),
+                    "expireTime": expireTime]
+        } catch {
+            return nil
+        }
+    }
+
+    /// 到期时间归一（毫秒 epoch）：NSNumber / 数字字符串都认；
+    /// 秒级（< 1e12）按秒 ×1000 换算；缺失/非法回 0。
+    static func vipExpireMs(_ value: Any?) -> Int {
+        let raw: Int
+        if let n = value as? NSNumber { raw = n.intValue }
+        else if let s = value as? String, let n = Int(s) { raw = n }
+        else { return 0 }
+        guard raw > 0 else { return 0 }
+        return raw < 1_000_000_000_000 ? raw * 1000 : raw
     }
 }

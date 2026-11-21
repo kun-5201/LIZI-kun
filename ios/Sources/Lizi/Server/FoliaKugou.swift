@@ -20,8 +20,12 @@ import UIKit
 ///   `krcToLrc` / `krcToYrc` 转 LRC / YRC（与汽水共用同一份转换）。
 ///
 /// 登录态：`SessionStore.sidecarAuth("kugou")` 只收 token / userid /
-/// vip_type / vip_token / dfid；设备身份走 `sidecarAuth("kugou-device")`
+/// vip_type / vip_token / dfid / webCookie；设备身份走 `sidecarAuth("kugou-device")`
 ///（guid / mid；GUID 32 位 hex 持久化，删了等于换设备）。
+/// r31-cookie：`webCookie` 是扫码确认 / Cookie 导入时收割的整罐 web 会话
+/// Cookie（不含 token/userid——发请求时 `webCookieHeader()` 再并进去，
+/// Folia `getWebSessionCookie` 同款；KuGouMusicApi 各模块的 `cookie:`
+/// 就是这罐，不带它用户歌单那路回 error_code 152）。
 /// 二维码官方图记内存 Map（key → qrimg，最多 64 张；create 优先回官方图）。
 ///
 /// 关键结论（Folia 流程 + 2026-11-20 VM 实测）：
@@ -97,9 +101,6 @@ actor FoliaKugouService {
 
     private let store = SessionStore.shared
 
-    /// 二维码官方图缓存：login_qr_key 回的 qrcode_img（key → data URL），
-    /// login_qr_create 优先回它；最多 64 张，超了清掉最旧的一批。
-    private var qrImages: [String: String] = [:]
     /// 匿名搜索回退过的关键词（Folia `kugouAnonymousSearchFallbackKeywords`
     /// 同款：登录态搜索首页回空后退回匿名并记住，后续页直接匿名）。
     private var anonFallbackKeywords: Set<String> = []
@@ -109,39 +110,82 @@ actor FoliaKugouService {
     /// 设备身份：guid（UUID v4，去横线后 32 位 hex，持久化）与
     /// mid（`util/util.js` calculateMid：MD5(guid) 按 16 进制大整数
     /// 转十进制字符串）。dfid 来自登录态（register_dev 回填），没有为 "-"。
+    /// r31-qqkg：本机 KugouSessionStore 同步的 deviceMid（毫秒时间戳，
+    /// 存在 sidecar "kugou-device" 的 mid 字段里）优先用——本机与服务端
+    /// 必须是同一台设备；没有才按旧法由 guid 算（向后兼容）。
     private func deviceIdentity() -> (guid: String, mid: String, dfid: String) {
         var guid = ""
-        if let dev = store.sidecarAuth("kugou-device"), let g = dev["guid"] as? String, !g.isEmpty {
-            guid = g
-        } else {
-            guid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-            store.saveSidecarAuth("kugou-device", ["guid": guid])
+        var mid = ""
+        if let dev = store.sidecarAuth("kugou-device") {
+            if let g = dev["guid"] as? String, !g.isEmpty { guid = g }
+            if let m = dev["mid"] as? String, !m.isEmpty { mid = m }
+            else if let m = dev["mid"] as? NSNumber { mid = m.stringValue }
         }
-        let mid = Self.hexToDecimal(Crypto.md5Hex(guid))
+        if guid.isEmpty {
+            guid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+            var dev: [String: Any] = ["guid": guid]
+            if !mid.isEmpty { dev["mid"] = mid }
+            store.saveSidecarAuth("kugou-device", dev)
+        }
+        if mid.isEmpty { mid = Self.hexToDecimal(Crypto.md5Hex(guid)) }
         let dfid = (store.sidecarAuth("kugou")?["dfid"] as? String) ?? "-"
         return (guid, mid, dfid.isEmpty ? "-" : dfid)
     }
 
     /// 登录态（只读已存的 token / userid / vip_type / vip_token）。
-    private func loginState() -> (token: String, userid: String, vipType: String, vipToken: String) {
+    /// r31-cookie：多读 `webCookie`（扫码确认 / Cookie 导入时收割的整罐
+    /// web 会话 Cookie，不含 token/userid 那两项——发请求时
+    /// `webCookieHeader()` 再把 token/userid/dfid 并进去，Folia
+    /// `getWebSessionCookie` 同款拼法）。
+    private func loginState() -> (token: String, userid: String, vipType: String, vipToken: String, webCookie: String) {
         let a = store.sidecarAuth("kugou") ?? [:]
         let token = a["token"] as? String ?? ""
         let userid: String
         if let u = a["userid"] as? String { userid = u }
         else if let u = a["userid"] as? NSNumber { userid = u.stringValue }
         else { userid = "" }
-        return (token, userid, a["vip_type"] as? String ?? "", a["vip_token"] as? String ?? "")
+        return (token, userid, a["vip_type"] as? String ?? "", a["vip_token"] as? String ?? "",
+                a["webCookie"] as? String ?? "")
+    }
+
+    /// r31-cookie：发往上游的整罐 Cookie（Folia `kugouTransport.ts`
+    /// `getWebSessionCookie` 同款）：先放存下来的 web 会话 Cookie 各条，
+    /// 再用 dfid / token / userid 覆盖同名项（KuGouMusicApi
+    /// `login_qr_check.js` 在 status 4 时就是往 cookie 数组里追加
+    /// `token=` / `userid=` 两条；这里发请求时现拼，等价）。
+    /// 空串 = 没登录过 / 没收割到，`gateway()` 不发 Cookie 头。
+    private func webCookieHeader() -> String? {
+        let login = loginState()
+        var jar: [String: String] = [:]
+        var order: [String] = []
+        for seg in login.webCookie.split(separator: ";") {
+            let kv = seg.split(separator: "=", maxSplits: 1)
+            guard kv.count == 2 else { continue }
+            let k = kv[0].trimmingCharacters(in: .whitespaces)
+            let v = kv[1].trimmingCharacters(in: .whitespaces)
+            guard !k.isEmpty, !v.isEmpty else { continue }
+            if jar[k] == nil { order.append(k) }
+            jar[k] = v
+        }
+        let dev = deviceIdentity()
+        if !dev.dfid.isEmpty, dev.dfid != "-" { jar["dfid"] = dev.dfid; if !order.contains("dfid") { order.append("dfid") } }
+        if !login.token.isEmpty { jar["token"] = login.token; if !order.contains("token") { order.append("token") } }
+        if !login.userid.isEmpty { jar["userid"] = login.userid; if !order.contains("userid") { order.append("userid") } }
+        guard !order.isEmpty else { return nil }
+        return order.map { "\($0)=\(jar[$0]!)" }.joined(separator: "; ")
     }
 
     /// 保存登录态：只并入新给的字段，旧字段（dfid 等）保留。
     private func saveLoginState(token: String? = nil, userid: String? = nil,
-                                vipType: String? = nil, vipToken: String? = nil, dfid: String? = nil) {
+                                vipType: String? = nil, vipToken: String? = nil, dfid: String? = nil,
+                                webCookie: String? = nil) {
         var a = store.sidecarAuth("kugou") ?? [:]
         if let token { a["token"] = token }
         if let userid { a["userid"] = userid }
         if let vipType { a["vip_type"] = vipType }
         if let vipToken { a["vip_token"] = vipToken }
         if let dfid { a["dfid"] = dfid }
+        if let webCookie { a["webCookie"] = webCookie }
         store.saveSidecarAuth("kugou", a)
     }
 
@@ -401,29 +445,16 @@ actor FoliaKugouService {
         return nil
     }
 
-    /// 二维码 data URL（CoreImage CIQRCodeGenerator；NetEase.swift 的
-    /// qrDataURL 同款做法）：上游 login_qr_key 没给官方图时，用登录链接
-    /// 现画一张，不编链接。
-    private static func qrDataURL(for urlString: String) -> String {
-        guard let data = urlString.data(using: .utf8),
-              let filter = CIFilter(name: "CIQRCodeGenerator") else { return "" }
-        filter.setValue(data, forKey: "inputMessage")
-        filter.setValue("M", forKey: "inputCorrectionLevel")
-        guard let output = filter.outputImage else { return "" }
-        let scale = 512.0 / output.extent.width
-        let scaled = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        let context = CIContext()
-        guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return "" }
-        guard let png = UIImage(cgImage: cgImage).pngData() else { return "" }
-        return "data:image/png;base64,\(png.base64EncodedString())"
-    }
-
     // MARK: - 网关传输（util/request.js 的 createRequest 同款）
 
     private struct KGResponse {
         let httpStatus: Int
         let json: [String: Any]?
         let raw: Data
+        /// r31-cookie：本次响应上游下发的 Set-Cookie（已按 `k=v` 拆干净，
+        /// 属性段不要；扫码确认收割进登录态、`gateway` 不再丢）。
+        /// 空数组 = 上游这次没下发。
+        let setCookies: [String]
     }
 
     private enum KGEncrypt {
@@ -489,6 +520,17 @@ actor FoliaKugouService {
         ]
         if let xRouter { headers["x-router"] = xRouter }
         for (k, v) in extraHeaders { headers[k] = v }
+        // r31-cookie：取数请求必须带上登录 Cookie（Folia `kugouTransport.ts`
+        // `getWebSessionCookie` + KuGouMusicApi 各模块的 `cookie:` 同款：每
+        // 次请求都带整罐 web 会话 Cookie；以前这里只发 token/userid 参数，
+        // Cookie 头一次没发过——登录态接口（user_detail）认 token，但用户
+        // 歌单 / 每日推荐那路只认 Cookie（无有效 Cookie 回 error_code 152），
+        // 登录成功、歌单却永远拉不到，就是断在这里）。
+        // 注意 `gateway()` 的默认参数已含 token/userid（见上面 allParams），
+        // Cookie 头是另一路，两边都要，不互相代替。
+        if let cookie = webCookieHeader(), !cookie.isEmpty {
+            headers["Cookie"] = cookie
+        }
         // axios 发对象 body 时默认 Content-Type: application/json；只有
         // 显式传了其它 Content-Type（fm_songs / audio）时才不盖。
         if method.uppercased() != "GET", body != nil, headers["Content-Type"] == nil {
@@ -496,7 +538,16 @@ actor FoliaKugouService {
         }
         let (data, http) = try await Upstream.fetch(url, headers: headers, timeout: 20,
                                                     method: method, body: bodyData)
-        return KGResponse(httpStatus: http.statusCode, json: Upstream.jsonObject(data), raw: data)
+        // r31-cookie：收割本次响应的 Set-Cookie（登录确认时用；响应头可能
+        // 把多条拼成一条，用逗号感知的 `parseSetCookieStrings` 拆）。
+        var setCookies: [String] = []
+        for (k, v) in http.allHeaderFields {
+            guard let ks = k as? String, ks.lowercased() == "set-cookie",
+                  let vs = v as? String else { continue }
+            setCookies.append(contentsOf: SessionStore.parseSetCookieStrings([vs]).map { "\($0.key)=\($0.value)" })
+        }
+        return KGResponse(httpStatus: http.statusCode, json: Upstream.jsonObject(data), raw: data,
+                          setCookies: setCookies)
     }
 
     /// 上游状态：`status` 为 0 或 `error_code`/`errcode` 非 0 即失败
@@ -683,6 +734,44 @@ actor FoliaKugouService {
         return scNum(v)
     }
 
+    /// 多键取最大值（r31-membership：会员字段不能只取第一个在场的键——
+    /// is_vip = 0 时 vip_type 可能 = 1，全扫取最大才不会把会员判成非会员）。
+    private static func maxIntField(_ d: [String: Any], _ keys: String...) -> Int {
+        var best = 0
+        for k in keys {
+            if let n = d[k] as? NSNumber { best = max(best, n.intValue) }
+            else if let s = d[k] as? String, let n = Int(s) { best = max(best, n) }
+        }
+        return best
+    }
+
+    /// 酷狗资料接口的会员值：任一会员字段 > 0 即会员（is_vip / vip_type /
+    /// svip_level / vip / m_type / su_vip / svip）。
+    private static func kugouVIPValue(from profile: [String: Any]) -> Int {
+        maxIntField(profile, "is_vip", "vip_type", "vipType", "vip", "m_type", "su_vip", "svip")
+    }
+
+    /// 酷狗 SVIP 值：svip_level / svip / su_vip 任一 > 0 即 SVIP。
+    private static func kugouSuperVIPValue(from profile: [String: Any]) -> Int {
+        maxIntField(profile, "svip_level", "svip", "su_vip")
+    }
+
+    /// union_vip 兜底（r31-membership）：GET kugouvip.kugou.com/v1/get_union_vip，
+    /// vip_type 或 busi_vip 里任一 is_vip > 0 即会员。抛错 = 查不到。
+    private func unionVIPBool() async throws -> Bool {
+        let res = try await gateway(path: "/v1/get_union_vip",
+                                    baseURL: "https://kugouvip.kugou.com",
+                                    method: "GET", params: ["busi_type": "concept"])
+        let data = Self.dataDict(res.json)
+        var vipType = Self.maxIntField(data, "vip_type", "vipType", "is_vip")
+        if vipType == 0,
+           let busi = data["busi_vip"] as? [[String: Any]],
+           busi.contains(where: { Self.maxIntField($0, "is_vip", "vip_type") > 0 }) {
+            vipType = 1
+        }
+        return vipType > 0
+    }
+
     /// 封面（Folia coverOf）：album_info / trans_param 的 union_cover
     /// 优先；`{size}` 换成 1024；纯数字文件名（8 位以上 + 图片后缀）
     /// 拼 `https://c1.kgimg.com/stdmusic/1024/<前8位>/<文件名>`；
@@ -724,6 +813,19 @@ actor FoliaKugouService {
         if cover.hasPrefix("//") { return "https:" + cover }
         if cover.hasPrefix("http://") { return "https://" + cover.dropFirst("http://".count) }
         return cover
+    }
+
+    /// 头像 URL 归一（r31 头像修；coverOf 尾部同款逻辑，给 status 的回落字段
+    /// 用）：{size} → 1024、// 补 https、http 升 https；imge.kugou.com
+    /// 的 https 实测 200。非 https 回 ""。
+    private static func upgradeAvatarURL(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "{size}", with: String(coverSize))
+        guard !s.isEmpty else { return "" }
+        if s.hasPrefix("//") { s = "https:" + s }
+        else if s.hasPrefix("http://") { s = "https://" + s.dropFirst("http://".count) }
+        guard s.hasPrefix("https://") else { return "" }
+        return s
     }
 
     /// 歌手（Folia normalizeArtists）：Singers / singerinfo / authors /
@@ -896,15 +998,16 @@ actor FoliaKugouService {
         do {
             switch part {
             case "", "health":
-                return .json(200, ["code": 200, "ok": true, "audio": true, "login": "qr"])
+                return .json(200, ["code": 200, "ok": true, "audio": true, "login": "qr,cookie"])
             case "status", "login/status":
                 return try await status()
-            case "login/qr/key":
-                return try await loginQrKey()
-            case "login/qr/create":
-                return loginQrCreate(req)
-            case "login/qr/check":
-                return try await loginQrCheck(req)
+            case "login/qr/key", "login/qr/create", "login/qr/check":
+                // r31-qqkg：酷狗扫码登录已改为本机直连（KugouAPI），服务端
+                // 桥接已废弃——410 明说，不再静默走旧路。旧客户端请升级。
+                return .json(410, ["code": 410, "loggedIn": false,
+                                   "error": "酷狗扫码登录已改为本机直连（KugouAPI），服务端桥接已废弃"])
+            case "login/cookie":
+                return await loginCookie(req)
             case "logout":
                 clearLoginState()
                 return .json(200, ["code": 200, "loggedIn": false])
@@ -982,15 +1085,19 @@ actor FoliaKugouService {
     /// 登录态：有 token 时调 user_detail（`module/user_detail.js`）
     /// 验一次；拿不到昵称也以 token 为准（loggedIn 只认 token 在不在，
     /// 不认 user_detail 通不通——弱网下不把已登录判成未登录）。
+    /// r31-membership：会员从资料接口实算（任一会员字段 > 0 即会员，
+    /// svip_level / svip / su_vip > 0 即 SVIP；全 0 再补查 union_vip；
+    /// 查不到时 vip 记 null = 未知，不当非会员）。
     private func status() async throws -> HttpResponse {
         let login = loginState()
         guard !login.token.isEmpty else {
             return .json(200, ["code": 200, "loggedIn": false, "nickname": "",
-                               "avatar": "", "uid": "", "vip": false])
+                               "avatar": "", "uid": "", "vip": false, "vipKnown": false])
         }
         var nickname = ""
         var avatar = ""
-        var vip = false
+        var vip: Bool? = nil
+        var isSuperVIP = false
         do {
             let clienttime = Int(Date().timeIntervalSince1970)
             let pJSON = Self.jsonString(.o([
@@ -1018,7 +1125,8 @@ actor FoliaKugouService {
             // catch 仍认登录（断网 ≠ 登出），与本函数原有注释一致。
             guard Self.upstreamStatus(res.json) == 1 else {
                 return .json(200, ["code": 200, "loggedIn": false, "stale": true,
-                                   "nickname": "", "avatar": "", "uid": login.userid, "vip": false])
+                                   "nickname": "", "avatar": "", "uid": login.userid,
+                                   "vip": NSNull(), "isSuperVIP": false, "vipKnown": false])
             }
             let data = Self.dataDict(res.json)
             // Folia normalizeUser：user_info / userinfo / profile / data 本体。
@@ -1027,113 +1135,117 @@ actor FoliaKugouService {
                 ?? (data["profile"] as? [String: Any]) ?? data
             nickname = Self.strField(profile, "nickname", "nick_name", "username", "name")
             avatar = Self.coverOf(profile)
-            if avatar.isEmpty { avatar = Self.strField(profile, "avatar", "pic") }
-            let vipType = Self.intField(profile, "vip_type", "vipType", "is_vip")
-            vip = vipType > 0
-            if vipType > 0 { saveLoginState(vipType: String(vipType)) }
+            if avatar.isEmpty {
+                // r31 头像修：coverOf 之外的回落字段（avatar / pic / user_pic /
+                // sizable_avatar）以前原样返回，http://imge.kugou.com/… 直接进
+                // AsyncImage 会被真机 ATS -1022 拦掉（登录后头像拿不到）。
+                // user_pic 是 Folia 注释里确认的酷狗头像字段（coverOf 故意不收它，
+                // 那是给歌曲封面用的；这里是用户画像，收）。与 coverOf 同款升级。
+                avatar = Self.upgradeAvatarURL(Self.strField(profile, "avatar", "pic", "user_pic", "sizable_avatar"))
+            }
+            let vipValue = Self.kugouVIPValue(from: profile)
+            isSuperVIP = Self.kugouSuperVIPValue(from: profile) > 0
+            if vipValue > 0 {
+                vip = true
+                saveLoginState(vipType: String(vipValue))
+            } else if let union = try? await unionVIPBool() {
+                vip = union
+            } else {
+                vip = nil
+            }
         } catch {
-            // user_detail 失败不推翻登录态：token 还在就认登录。
+            // user_detail 失败不推翻登录态：token 还在就认登录；
+            // 会员态记未知（vip 仍是 nil），不拿 false 冒充非会员。
         }
         return .json(200, ["code": 200, "loggedIn": true, "nickname": nickname,
-                           "avatar": avatar, "uid": login.userid, "vip": vip])
+                           "avatar": avatar, "uid": login.userid,
+                           "vip": vip.map { NSNumber(value: $0) } ?? NSNull(),
+                           "isSuperVIP": isSuperVIP, "vipKnown": vip != nil])
     }
 
-    /// 取码（`module/login_qr_key.js`）：GET login-user.kugou.com
-    /// /v2/qrcode，appid 1001（Folia 不传 type 时的默认；web 签名）。
-    /// 官方给 qrcode_img 时记进内存 Map（create 优先回它）。
-    private func loginQrKey() async throws -> HttpResponse {
-        let res = try await gateway(path: "/v2/qrcode",
-                                    baseURL: "https://login-user.kugou.com",
-                                    method: "GET",
-                                    params: ["appid": "1001", "type": "1", "plat": "4",
-                                             "qrcode_txt": "https://h5.kugou.com/apps/loginQRCode/html/index.html?appid=\(Self.stdAppid)&",
-                                             "srcappid": Self.srcappid],
-                                    encrypt: .web)
-        let data = Self.dataDict(res.json)
-        let key = Self.strField(data, "qrcode", "qrkey", "key", "ticket")
-        guard !key.isEmpty else {
-            return .json(200, ["code": 502, "error": "酷狗没有返回二维码 key"])
+    /// 粘贴 Cookie 登录（r31-cookie：以前酷狗只有扫码，没有任何 Cookie
+    /// 登录口——用户报「酷狗 Cookie 登录拉不到数据」时连贴的地方都没有）。
+    /// 接受酷狗网页登录的整段 Cookie（`token` + `userid` 两项是账号对，
+    /// 其余项是 web 会话罐；只贴裸 token 也认，userid 随后用 status 补）。
+    /// 解析与酷我 `parseCookieInput` 同规则（`;` / 换行切、去 `cookie:`
+    /// 前缀、JSON 对象 form、键小写、值 percent-decode）。
+    /// 存法与网易 `session/import` 同款：快照 → 写进登录态 → `status()`
+    /// 校验 → 不通过回滚，不留死 token。
+    private func loginCookie(_ req: HttpRequest) async -> HttpResponse {
+        guard req.method == "POST" else {
+            return .json(405, ["code": 405, "error": "请用 POST 提交 Cookie"])
         }
-        if let img = data["qrcode_img"] as? String, !img.isEmpty {
-            qrImages[key] = img
-            if qrImages.count > 64 { qrImages.removeValue(forKey: qrImages.keys.first ?? "") }
+        let raw = req.string("cookie").isEmpty ? req.string("value") : req.string("cookie")
+        let pairs = Self.parseCookieInput(raw)
+        // 裸值（没有 `=` 也没有 `;`）当 token。
+        let token = pairs["token"] ?? (raw.contains("=") || raw.contains(";") ? "" : raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard !token.isEmpty else {
+            return .json(200, ["code": 400, "loggedIn": false,
+                               "error": "Cookie 里没有 token：请在浏览器登录 www.kugou.com 后复制整段 Cookie"])
         }
-        var out: [String: Any] = ["code": 200, "key": key]
-        if let img = qrImages[key] { out["qrimg"] = img }
-        return .json(200, out)
-    }
-
-    /// 成码（`module/login_qr_create.js`，本地拼串、不发网）：
-    /// 有官方图回官方图；没有时按登录链接现画一张二维码。
-    /// Folia 的 createQr 读 base64 / qrimg / qrcode / url。
-    private func loginQrCreate(_ req: HttpRequest) -> HttpResponse {
-        let key = req.string("key")
-        guard !key.isEmpty else {
-            return .json(200, ["code": 400, "error": "缺少 key"])
-        }
-        let url = "https://h5.kugou.com/apps/loginQRCode/html/index.html?qrcode=\(key)"
-        let img = qrImages[key] ?? Self.qrDataURL(for: url)
-        guard !img.isEmpty else {
-            return .json(200, ["code": 502, "error": "画不出二维码"])
-        }
-        return .json(200, ["code": 200, "key": key, "qrimg": img, "url": url])
-    }
-
-    /// 轮询（`module/login_qr_check.js`）：GET login-user.kugou.com
-    /// /v2/get_userinfo_qrcode，web 签名；data.status 0/1/2,3/4 映射成
-    /// 800 过期 / 801 等待 / 802 已扫码 / 803 成功（QrLoginView 的
-    /// QrStatusMapping.standard800 同款）。确认时才把 token + userid
-    /// 成对写进登录态（Folia：确认后才写，不成对不写）。
-    private func loginQrCheck(_ req: HttpRequest) async throws -> HttpResponse {
-        let key = req.string("key")
-        guard !key.isEmpty else {
-            return .json(200, ["code": 800, "status": 0, "message": "缺少 key"])
-        }
-        let res = try await gateway(path: "/v2/get_userinfo_qrcode",
-                                    baseURL: "https://login-user.kugou.com",
-                                    method: "GET",
-                                    params: ["plat": "4", "appid": Self.stdAppid,
-                                             "srcappid": Self.srcappid, "qrcode": key],
-                                    encrypt: .web)
-        let data = Self.dataDict(res.json)
-        // r24 构建修（run 44656645107）：局部量叫 `status` 会遮住同名
-        // 方法 `status()`，下面 `try? await status()` 被当成调 Int，
-        // 编译器报 "cannot call value of non-function type 'Int'"。
-        // 改名 qrStatus，方法调用恢复。
-        let qrStatus = Self.intField(data, "status", "code")
-        let token = Self.strField(data, "token")
-        let userid = Self.strField(data, "userid", "user_id", "uid")
-        switch qrStatus {
-        case 0:
-            return .json(200, ["code": 800, "status": 0, "message": "二维码已过期"])
-        case 1:
-            return .json(200, ["code": 801, "status": 1, "message": "等待扫码"])
-        case 2, 3:
-            return .json(200, ["code": 802, "status": qrStatus, "message": "已扫码，请在手机上确认"])
-        default:
-            if qrStatus == 4 || !token.isEmpty {
-                guard !token.isEmpty, !userid.isEmpty else {
-                    return .json(200, ["code": 801, "status": 1, "message": "等待扫码"])
-                }
-                saveLoginState(token: token, userid: userid,
-                               vipType: Self.strField(data, "vip_type", "vipType"),
-                               vipToken: Self.strField(data, "vip_token", "vipToken"))
-                // 确认后顺手拿昵称头像（拿不到也不影响 803，视图自己会
-                // 再调 /api/kugou/status）。
-                var nickname = ""
-                var avatar = ""
-                if let st = try? await status(), st.status == 200,
-                   let obj = try? JSONSerialization.jsonObject(with: st.body) as? [String: Any] {
-                    nickname = obj["nickname"] as? String ?? ""
-                    avatar = obj["avatar"] as? String ?? ""
-                }
-                return .json(200, ["code": 803, "status": 4, "message": "登录成功",
-                                   "nickname": nickname, "avatar": avatar])
+        let userid = pairs["userid"] ?? pairs["user_id"] ?? ""
+        let accountKeys: Set<String> = ["token", "userid", "user_id"]
+        let jar = pairs.filter { !accountKeys.contains($0.key) }
+            .map { "\($0.key)=\($0.value)" }.joined(separator: "; ")
+        let prev = store.sidecarAuth("kugou")
+        // 成对写：userid / webCookie 缺了就写空串清掉旧账号的残值，不留
+        // 「新 token + 旧 userid」这种半对（Folia「不成对不写」同款）。
+        // 校验失败时下面整份回滚旧态。
+        saveLoginState(token: token, userid: userid, webCookie: jar)
+        do {
+            let st = try await status()
+            guard st.status == 200,
+                  let obj = try? JSONSerialization.jsonObject(with: st.body) as? [String: Any],
+                  (obj["loggedIn"] as? NSNumber)?.boolValue == true else {
+                // 校验没通过：恢复旧登录态（没有旧态就清掉刚写的）。
+                if let prev { store.saveSidecarAuth("kugou", prev) } else { store.clearSidecarAuth("kugou") }
+                return .json(200, ["code": 400, "loggedIn": false,
+                                   "error": "这段 Cookie 无效或已过期（token 不是当前账号的，或已经登出过）"])
             }
-            let message = Self.strField(data, "message", "msg", "error")
-            return .json(200, ["code": 800, "status": qrStatus,
-                               "message": message.isEmpty ? "扫码登录失败" : message])
+            // status 补 userid：只贴了裸 token 时这里才有号。
+            let uid = (obj["uid"] as? String) ?? ""
+            if userid.isEmpty, !uid.isEmpty { saveLoginState(userid: uid) }
+            return .json(200, ["code": 200, "loggedIn": true,
+                               "nickname": (obj["nickname"] as? String) ?? "",
+                               "avatar": (obj["avatar"] as? String) ?? "",
+                               "uid": userid.isEmpty ? uid : userid])
+        } catch {
+            if let prev { store.saveSidecarAuth("kugou", prev) } else { store.clearSidecarAuth("kugou") }
+            return .json(200, ["code": 400, "loggedIn": false,
+                               "error": "校验登录态失败：\(error.localizedDescription)"])
         }
+    }
+
+    /// 粘贴 Cookie 的宽容解析（酷我 `KuwoService.parseCookieInput` 同规则，
+    /// 不另起一套：`cookie:` 前缀、JSON 对象、`;` / 换行分隔、键小写归一化、
+    /// 值 percent-decode、去首尾引号）。
+    private static func parseCookieInput(_ raw: String) -> [String: String] {
+        var out: [String: String] = [:]
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty { return out }
+        if let r = text.range(of: #"^cookie\s*:\s*"#, options: .regularExpression) { text = String(text[r.upperBound...]) }
+        if text.hasPrefix("{") {
+            if let data = text.data(using: .utf8),
+               let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                for (k, v) in j where !k.isEmpty {
+                    if let s = v as? String { out[k.lowercased()] = s.removingPercentEncoding ?? s }
+                    else if let n = v as? NSNumber { out[k.lowercased()] = n.stringValue }
+                }
+                return out
+            }
+        }
+        let seps = CharacterSet(charactersIn: ";\n\r")
+        for part in text.components(separatedBy: seps) {
+            guard let i = part.firstIndex(of: "="), i != part.startIndex else { continue }
+            let k = part[..<i].trimmingCharacters(in: .whitespaces).lowercased()
+            var v = part[part.index(after: i)...].trimmingCharacters(in: .whitespaces)
+            if (v.hasPrefix("\"") && v.hasSuffix("\"")) || (v.hasPrefix("'") && v.hasSuffix("'")) {
+                v = String(v.dropFirst().dropLast())
+            }
+            v = v.removingPercentEncoding ?? v
+            if !k.isEmpty { out[k] = v }
+        }
+        return out
     }
 
     // MARK: - 搜索（Folia search：登录态走网关 /v3/search/song，
@@ -2111,16 +2223,18 @@ actor FoliaKugouService {
     /// 会员详情（`module/user_vip_detail.js`）：GET
     /// kugouvip.kugou.com/v1/get_union_vip，params {busi_type: concept}。
     /// vip 判定（Folia normalizeKugouVipType）：直读 vip_type / is_vip，
-    /// 没有时看 busi_vip 里有没有 is_vip。
+    /// 没有时看 busi_vip 里有没有 is_vip。r31-membership：多键全扫取最大
+    /// （intField 只取第一个在场的键会漏），与 status() 同款。
+    /// union 接口不报 SVIP 等级，这里不编 isSuperVIP 字段。
     private func userVip() async throws -> HttpResponse {
         let res = try await gateway(path: "/v1/get_union_vip",
                                     baseURL: "https://kugouvip.kugou.com",
                                     method: "GET", params: ["busi_type": "concept"])
         let data = Self.dataDict(res.json)
-        var vipType = Self.intField(data, "vip_type", "vipType", "is_vip")
+        var vipType = Self.maxIntField(data, "vip_type", "vipType", "is_vip")
         if vipType == 0,
            let busi = data["busi_vip"] as? [[String: Any]],
-           busi.contains(where: { Self.intField($0, "is_vip", "vip_type") > 0 }) {
+           busi.contains(where: { Self.maxIntField($0, "is_vip", "vip_type") > 0 }) {
             vipType = 1
         }
         return .json(200, ["code": 200, "source": "kugou", "vip": vipType > 0,

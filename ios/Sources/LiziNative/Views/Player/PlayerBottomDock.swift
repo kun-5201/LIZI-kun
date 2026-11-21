@@ -31,10 +31,15 @@ import SwiftUI
 /// - 播放列表：调用方传的 onOpenQueue（PlayerView 的 showQueue，
 ///   队列面板仍只盖住歌词区，见 lyricsZone）。
 /// - 喜欢：store.toggleLike()（已喜欢 heart.fill 红色实心）。
-/// - 下载：DownloadStore（取链复用播放编排，落盘进 LocalMusic 清单）。
+/// - 下载：DownloadStore（取链复用播放编排，落盘进下载清单
+///   ApplicationSupport/Lizi/Downloads/ + downloads.json，不混进本地音乐；
+///   点按弹选音质 sheet，已下载态进下载管理页）。
 /// - 评论区：CommentsPanelView（只读；网易云真实评论，其它平台老实写清没有）。
-/// - 选择音质：点开 9 档选择器，选了调 setPreferredQuality 并重播当前曲
-///   （从原进度继续，见 switchQuality；显示的永远是实际返回档位）。
+/// - 选择音质：点开 9 档选择器（r31：9 档全列，探到的档打「可播」标记，
+///   只作提示、不过滤——R3 已删，没探到的档照样能选），选了调
+///   setTrackQualityOverride（单曲覆盖，切歌清掉）并重播当前曲
+///   （从原进度继续，见 switchQuality；显示的永远是实际返回档位，
+///   未知显示「未知」，见 store.servedQualityText）。
 /// - 音量不在三排里：r28 已删第二行，App 内无音量按钮，音量走机身键/控制中心。
 /// - 无曲目时整排 disabled（与 PlayerControlRow 同款）。
 /// - 禁缩放：本文件没有任何 MagnificationGesture / 捏合手势。
@@ -51,6 +56,13 @@ struct PlayerBottomDock: View {
 
     @State private var showComments = false
     @State private var showQualityPicker = false
+    /// r31-download：下载键点按后的 sheet 开关（未下载/失败 → 选音质；
+    /// 已下载 → 下载管理页）。
+    @State private var showDownloadOptions = false
+    @State private var showDownloads = false
+    /// 选择器里探到的档（r31 探档位：打开选择器时现探，60 秒缓存；
+    /// 只打「可播」标记，不过滤——R3 已删，没探到的档照样能选）。
+    @State private var probedTiers: Set<AudioQuality> = []
 
     // MARK: - 分档尺寸（v4 图实测，见文件头）
 
@@ -126,6 +138,20 @@ struct PlayerBottomDock: View {
         .sheet(isPresented: $showQualityPicker) {
             qualityPickerSheet
         }
+        // r31-download：下载键不再直接开下——未下载/失败态弹选音质 sheet
+        //（默认档 + 探可用档 + 不支持自动降级），已下载态进下载管理页。
+        .sheet(isPresented: $showDownloadOptions) {
+            Group {
+                if let track = store.currentTrack {
+                    DownloadOptionsSheet(tracks: [track])
+                } else {
+                    Color.black.ignoresSafeArea()
+                }
+            }
+        }
+        .sheet(isPresented: $showDownloads) {
+            DownloadsView()
+        }
     }
 
     // MARK: - 第 3 排：下载 / 喜欢 / 评论区 / 选择音质（4 等分）
@@ -147,6 +173,9 @@ struct PlayerBottomDock: View {
     /// 下载键（DownloadStore.shared；图标按状态换：空闲箭头 / 下载中环形
     /// 进度 / 下完勾 / 失败红三角点按重试；试听片段不下载，
     /// 见 DownloadStore；本地歌直接显示勾）。
+    /// r31-download：点按不再直接开下——未下载/失败态弹选音质 sheet
+    ///（DownloadOptionsSheet：默认档 + 探可用档 + 不支持自动降级）；
+    /// 已下载态进下载管理页；下载中点按无动作。
     private var downloadCell: some View {
         let track = store.currentTrack
         let key = track.map { DownloadStore.key(for: $0) }
@@ -155,8 +184,15 @@ struct PlayerBottomDock: View {
             return downloads.state(forKey: key, track: track)
         }()
         return Button(action: {
-            guard let track else { return }
-            Task { @MainActor in await downloads.start(track: track, store: store) }
+            guard track != nil else { return }
+            switch state {
+            case .downloaded:
+                showDownloads = true
+            case .downloading:
+                break
+            case .idle, .failed:
+                showDownloadOptions = true
+            }
         }) {
             downloadIcon(state: state)
         }
@@ -222,13 +258,14 @@ struct PlayerBottomDock: View {
         .accessibilityLabel("评论区")
     }
 
-    /// 选择音质芯片（显示当前音质：实际返回档位；r31 真实音质：取不到
-    /// 实际档位时显示中性「音质」，绝不默认「标准」——「标准」是 128k
-    /// 的断言，没取到链/档位未知时挂它就是假徽章；点开 9 档选择器，
-    /// 选了真换音质，见 switchQuality）。
+    /// 选择音质芯片（显示当前音质：实际返回档位，见
+    /// store.servedQualityText——实际档位名 → 音源原文 → 「未知」；
+    /// r31 真实音质：取不到实际档位时显示「未知」，绝不默认「标准」——
+    /// 「标准」是 128k 的断言，没取到链/档位未知时挂它就是假徽章；
+    /// 点开 9 档选择器，选了真换音质，见 switchQuality）。
     private var qualityCell: some View {
         Button(action: { showQualityPicker = true }) {
-            Text(store.actualQuality?.displayName ?? "音质")
+            Text(store.servedQualityText)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(PlayerTokens.playerForeground)
                 .padding(.horizontal, 12)
@@ -238,7 +275,7 @@ struct PlayerBottomDock: View {
                         .stroke(Color.white.opacity(0.6), lineWidth: 1)
                 )
         }
-        .accessibilityLabel("选择音质，当前\(store.actualQuality?.displayName ?? "音质")")
+        .accessibilityLabel("选择音质，当前\(store.servedQualityText)")
     }
 
     // MARK: - 第 2 排：进度条（复用）+ 两端时间
@@ -383,8 +420,9 @@ struct PlayerBottomDock: View {
 
     // MARK: - 音质选择器（sheet）
 
-    /// 9 档音质选择器（复用 SettingsView 音效页同一套档位 + 同一个写口
-    /// setPreferredQuality；显示的永远是实际返回档位，见芯片）。
+    /// 9 档音质选择器（与设置页「音乐与音质」默认档同一套档位；
+    /// 这里选的是单曲覆盖，写口 setTrackQualityOverride，切歌清掉，
+    /// 不碰全局默认档；显示的永远是实际返回档位，见芯片）。
     private var qualityPickerSheet: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -411,11 +449,19 @@ struct PlayerBottomDock: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
                 .padding(.bottom, 8)
-                Text("当前实际：\(store.actualQuality?.displayName ?? "—")")
+                Text("当前实际：\(store.servedQualityText)")
                     .font(.system(size: 12))
                     .foregroundStyle(Color.white.opacity(0.6))
                     .padding(.horizontal, 16)
                     .padding(.bottom, 8)
+                // r31：降级提示（开关开时才有文案；关时只记日志，这里不显示）。
+                if let notice = store.downgradeNotice {
+                    Text(notice)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.yellow.opacity(0.9))
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 8)
+                }
                 List {
                     ForEach(AudioQuality.allCases, id: \.self) { quality in
                         Button(action: { switchQuality(to: quality) }) {
@@ -424,6 +470,13 @@ struct PlayerBottomDock: View {
                                     .font(.system(size: 15))
                                     .foregroundStyle(.white)
                                 Spacer()
+                                // r31 探档位：探到的档打「可播」标记（只作提示，
+                                // 不过滤——没探到的档照样能选，R3 已删）。
+                                if probedTiers.contains(quality) {
+                                    Text("可播")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(Color.green.opacity(0.9))
+                                }
                                 if store.preferredQuality == quality {
                                     Image(systemName: "checkmark")
                                         .font(.system(size: 13, weight: .semibold))
@@ -440,15 +493,24 @@ struct PlayerBottomDock: View {
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
             }
+            // r31 探档位：打开选择器时现探当前这首歌的 9 档（并发、8 秒
+            // 总上限、60 秒缓存，见 PlaybackStore.probeAvailableQualities）。
+            .onAppear {
+                guard let track = store.currentTrack else { return }
+                Task { @MainActor in
+                    probedTiers = await store.probeAvailableQualities(for: track)
+                }
+            }
         }
     }
 
-    /// 换音质真生效：先写请求档位，再重播当前曲（队列位置不变，
-    /// 取链走新档位），等起播后回到原进度；原来是暂停的播完仍暂停。
+    /// 换音质真生效：先写单曲覆盖（只对当前这首歌有效，切歌清掉，
+    /// 不碰全局默认档），再重播当前曲（队列位置不变，取链走新档位），
+    /// 等起播后回到原进度；原来是暂停的播完仍暂停。
     /// 等起播最多 3 秒（startedTrackId 对上才 seek；中途切歌就放弃，
     /// 不把旧进度 seek 到新歌头上）。
     private func switchQuality(to quality: AudioQuality) {
-        store.setPreferredQuality(quality)
+        store.setTrackQualityOverride(quality)
         showQualityPicker = false
         guard let track = store.currentTrack else { return }
         guard store.isPlaying || store.progress > 1 else { return }

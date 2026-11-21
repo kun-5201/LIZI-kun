@@ -27,17 +27,9 @@ enum NativeBridge {
     /// 底下的 URLSession 取数不停（链路里没有取消检查点），它自己
     /// 到腿超时就停，不泄漏。
     static let dailyTimeout: TimeInterval = 25
-    /// 会员态查询超时（player.js MEMBER_TIMEOUT_MS = 2000；超时按「没会员」走 LX，
-    /// LX 失败还会回落官方，不会把歌播死）。
-    static let membershipTimeout: TimeInterval = 2
     /// 搜索上游请求失败时回给 UI 的文案（P1 集成补的轻量错误通道：call 回 nil
     /// = 请求本身没通，不是「搜不到」；上游正常回空列表不走这里）。
     static let searchErrorText = "接口请求失败，请检查网络后重试"
-    /// 会员态缓存（player.js：每家 5 分钟）。
-    static let membershipTTL: TimeInterval = 300
-
-    private static var membershipCache: [String: (at: Date, member: Bool)] = [:]
-    private static let membershipLock = NSLock()
 
     // MARK: - 取链结果
 
@@ -48,8 +40,14 @@ enum NativeBridge {
         /// r31：canon 的结果再过 AudioQuality.verified，按实际地址的
         /// 实证（QQ 文件名前缀 / 容器 / 码率）校验，宣称高于实证上限
         /// 时往下压、给不出时为 nil，UI 不挂徽章）。
+        /// r31（R6 已删）：canon 不再按 br 猜档位；served 对不上档位
+        /// 表时 actualQuality 为 nil，原文进 servedLabel，UI 原样显示。
         var actualQuality: AudioQuality?
+        /// 音源回的档位原文（canon 翻译不出时才有值，如 "192k"；
+        /// 翻译得出时为 nil，显示档位名就够了）。
+        var servedLabel: String?
         /// 是否试听片段（官方只给了 freeTrialInfo / preview）。
+        /// r31（R5 已删）：这只是标记，不再据此丢弃——30 秒试听照播。
         var isTrial: Bool
         /// 是否 30 秒试听（Apple Music 公开 API 只出这个）。
         var isPreview: Bool
@@ -57,14 +55,20 @@ enum NativeBridge {
         var reason: String
         /// 这条地址从哪来（platform / cloud / lx / local）。
         var via: String
-        /// 实际码率 bps（上游给了才有）。
+        /// 实际码率 bps（上游给了才有；只作信息，不参与档位判定）。
         var bitrate: Int
         /// 试听片段的起始毫秒（汽水等平台有）。
         var clipStartMs: Int
+        /// 云盘命中时云盘那首歌的元数据（歌名/歌手/专辑/封面/时长；网易的由
+        /// /api/song/detail 补，酷狗的由云盘列表直接给）。PlaybackStore 只拿它
+        /// 补当前曲目缺失的字段（封面/时长/歌手/专辑），不覆盖已有的标题/歌手，
+        /// 非云盘腿为 nil。
+        var resolvedTrack: Track?
 
         init(url: URL? = nil, actualQuality: AudioQuality? = nil, isTrial: Bool = false,
              isPreview: Bool = false, reason: String = "", via: String = "",
-             bitrate: Int = 0, clipStartMs: Int = 0) {
+             bitrate: Int = 0, clipStartMs: Int = 0, servedLabel: String? = nil,
+             resolvedTrack: Track? = nil) {
             self.url = url
             self.actualQuality = actualQuality
             self.isTrial = isTrial
@@ -73,6 +77,8 @@ enum NativeBridge {
             self.via = via
             self.bitrate = bitrate
             self.clipStartMs = clipStartMs
+            self.servedLabel = servedLabel
+            self.resolvedTrack = resolvedTrack
         }
     }
 
@@ -199,8 +205,13 @@ return SongURLResult(reason: code == -110 ? "vip" : "unavailable", via: "platfor
 }
 let streamURL = Upstream.url(from: urlString).map { Upstream.upgradedAudioURL($0) }
 let streamType = (item["type"] as? String) ?? ""
+// r31（R6 已删）：canon 只翻译档位名，不按 br 猜档；翻译不出时
+// actualQuality 为 nil、原文进 servedLabel，UI 原样显示 "192k" 之类，
+// 不压成标准。verified 的 bitrate 参数已忽略（见 Models.swift）。
+let neteaseClaimed = AudioQuality.canon(platform: "netease", served: served)
 return SongURLResult(url: streamURL,
-actualQuality: AudioQuality.verified(claimed: AudioQuality.canon(platform: "netease", served: served, bitrate: br), url: streamURL, bitrate: br, format: streamType),
+actualQuality: AudioQuality.verified(claimed: neteaseClaimed, url: streamURL, bitrate: br, format: streamType),
+servedLabel: neteaseClaimed == nil && !served.isEmpty ? served : nil,
 isTrial: isTrial, reason: "", via: "platform", bitrate: br)
 case "qq":
 let d = await call(path: "/api/qq/song/url",
@@ -263,85 +274,236 @@ return SongURLResult(reason: reason.isEmpty ? "unavailable" : reason, via: "plat
 }
 let streamURL = Upstream.url(from: urlString).map { Upstream.upgradedAudioURL($0) }
 let streamFormat = (d["format"] as? String) ?? ""
+// r31（R6 已删）：canon 只翻译档位名；翻译不出时原文进 servedLabel。
+let sidecarClaimed = AudioQuality.canon(platform: platform, served: served)
 return SongURLResult(url: streamURL,
-actualQuality: AudioQuality.verified(claimed: AudioQuality.canon(platform: platform, served: served), url: streamURL, format: streamFormat.isEmpty ? nil : streamFormat),
+actualQuality: AudioQuality.verified(claimed: sidecarClaimed, url: streamURL, format: streamFormat.isEmpty ? nil : streamFormat),
+servedLabel: sidecarClaimed == nil && !served.isEmpty ? served : nil,
 isTrial: preview, isPreview: preview,
 reason: "", via: "platform", clipStartMs: clipStartMs)
 }
 
-// MARK: - 取链：个人云盘（只接网易「我的云盘」）
+// MARK: - 取链：个人云盘（网易「我的云盘」+ 酷狗「我的云盘」）
 
-/// 网易个人云盘取链（照抄 player.js fetchCloudUrl：按 id 精确匹配，
-/// 再按「歌名 + 歌手」归一化匹配；列表按会话缓存 10 分钟，最多 5 页）。
-/// QQ / 酷我没有同等的个人云盘取链口；酷狗云盘取链在服务端
-/// /api/kugou/user/cloud_url（songURL 的 cloud=1 走它），原生编排的
-/// 云盘腿只接网易，其它平台直接返回 nil。
-static func cloudSongURL(track: Track) async -> SongURLResult? {
-guard track.platform == "netease" else { return nil}
-guard SessionStore.shared.hasMusicU else { return nil}
+/// 个人云盘取链（r31-clouddrive：网易 + 酷狗；其余 5 台没有可用的网盘接口，见下表）。
+///
+/// 7 平台核查（2026-11-21，证据见 verification/r31-clouddrive.cjs §1）：
+/// - 网易：有。POST weapi /v1/cloud/get（/api/user/cloud），MUSIC_U 登录；
+///   行只有 songId/songName/artist/album/fileSize/fileName，没有封面/时长，
+///   封面/时长靠命中后调 /api/song/detail（/v3/song/detail）补。
+/// - 酷狗：有。服务端 FoliaKugou 已有 user/cloud（POST mcloudservice.kugou.com
+///   /v1/get_list，token 登录；回 tracks，含封面/时长/hash）+ user/cloud_url
+///   （GET gateway /bsstrackercdngz/v2/query_musicclound_url，key=signCloudKey）；
+///   本轮之前原生编排没接线（cloudSongURL 只认 netease），本轮接上。
+/// - QQ：产品上有「音乐云盘」（微云音乐网盘；Folia 前端 qqLists.ts 有
+///   /user/cloud 路由，只列对上曲库且 playable 的歌），但 Lizi 的 QQ 服务端
+///   是按 jsososo QQMusicApi / Moumusic 接口移植的，那套接口里没有云盘
+///   列出/取链的上游 CGI，本轮未核实到可直接用的上游模块——不编接口、不留
+///   空壳，cloudSongURL 对 qq 回 nil。
+/// - 酷我：没有。客户端只有本地下载/离线缓存，没有个人云盘上传/列表/取链
+///   的可用接口；Folia 里也没有 kuwo 的 user_cloud。
+/// - 汽水：没有。只有「本地音乐」扫描（本机文件），没有云端网盘与可用接口。
+/// - 波点：没有。同汽水，只有本机/歌单，没有云盘接口。
+/// - Apple Music：没有可取链的网盘接口。iCloud 音乐资料库（iTunes Match /
+///   订阅上传）里的歌没有可供取链的流地址，播要走 MusicKit/系统音乐资料库，
+///   不是一条 URL；本轮不接。
+///
+/// 匹配规则（两台共用同一套 findCloudSong，规则写死在这里）：
+/// 1) id 精确匹配优先：网易 cloudSongId == track.id；酷狗 hash == track.id /
+///    platformKey（大小写不敏感）。上传的就是这首歌时 id 一致，直接命中。
+/// 2) 否则歌名 + 歌手/专辑打分：歌名归一化相等是硬门槛；歌手双方都有且互含
+///    得 2 分，专辑双方都有且相等得 1 分；总分 >= 1 才命中，取最高分（并列取
+///    先出现的）。歌手/专辑两边都对不上、只有歌名相同——不播，宁可不播也不
+///    播错一首（同名不同歌手是最常见的错播）。
+/// 3) 「未知歌手」按缺失算（两边都是）：网易云盘行 artist 为空、酷狗
+///    kugouTrack 兜底填的「未知歌手」都不算歌手证据。
+/// 归一化（normCloudKey）：去大小写；整段删掉 (...) / （...） / [...] /
+/// 【...】 / {...} 里的后缀（Live/翻唱/feat. 之类不参与匹配——旧实现只删
+/// 括号字符、留下了里面的字，「夜曲 (Live版)」对不上「夜曲」）；再去空白/
+/// 标点/连字符。歌手只比第一位（按 / 切）。
+/// 缓存：列表按登录态 + 10 分钟缓存；网易每次最多 10 页 x 200（旧 5 页，
+/// 1000 首以上云盘的歌翻不到）；酷狗每次最多 10 页 x 50（pagesize 上限
+/// 50）。未登录不拉列表。
+static func cloudSongURL(track: Track, quality: AudioQuality) async -> SongURLResult? {
+switch track.platform {
+case "netease": return await neteaseCloudSongURL(track: track, quality: quality)
+case "kugou": return await kugouCloudSongURL(track: track, quality: quality)
+default: return nil
+}
+}
+
+/// 网易云盘腿：列表 -> 匹配 -> /api/song/url 取链 -> /api/song/detail 补封面/时长。
+/// hasMusicU 只在这一段里出现（r31-mquality §6d：全仓 hasMusicU 检查都在
+/// cloudSongURL 这一段里；酷狗腿不认 MUSIC_U，401 靠服务端回包认）。
+static func neteaseCloudSongURL(track: Track, quality: AudioQuality) async -> SongURLResult? {
+guard SessionStore.shared.hasMusicU else { return nil }
 let now = Date()
 if now.timeIntervalSince(cloudCacheAt) > 600 || !cloudCacheLoggedIn {
 var songs: [[String: Any]] = []
 var loggedIn = false
 if SessionStore.shared.hasMusicU {
 loggedIn = true
-for page in 0..<5 {
+for page in 0..<10 {
 guard let d = await call(path: "/api/user/cloud",
 query: ["limit": "200", "offset": "\(page * 200)"]),
-let rows = cloudRows(d) else { break}
+let rows = cloudRows(d) else { break }
 songs.append(contentsOf: rows)
-if rows.count < 200 { break}
+if rows.count < 200 { break }
 }
 }
 cloudCache = songs
 cloudCacheAt = now
 cloudCacheLoggedIn = loggedIn
 }
-guard cloudCacheLoggedIn,!cloudCache.isEmpty else { return nil}
-guard let hit = findCloudSong(track, in: cloudCache) else { return nil}
-let cloudId = cloudSongId(hit)
-guard !cloudId.isEmpty else { return nil}
+guard cloudCacheLoggedIn, !cloudCache.isEmpty else { return nil }
+let candidates = cloudCache.compactMap { cloudCandidate(from: $0) }
+guard let hit = findCloudSong(track, in: candidates) else { return nil }
+let cloudId = hit.platformKey
+guard !cloudId.isEmpty else { return nil }
 var r = await songURL(track: Track(id: cloudId, platform: "netease",
-platformKey: cloudId), quality:.lossless)
-if r.url != nil { r.via = "cloud"}
-return r.url == nil ? nil : r
+platformKey: cloudId), quality: quality)
+guard r.url != nil else { return nil }
+r.via = "cloud"
+// 云盘行没有封面/时长：命中后调 /api/song/detail（ids 用裸数字串，不带
+// 括号——NetEase.idList 按逗号切，"[123]" 解析不出）补一次；detail 空
+// 时用云盘行自己的歌名/歌手/专辑顶（至少不丢元数据）。
+r.resolvedTrack = await neteaseCloudDetail(id: cloudId) ?? hit
+return r
 }
 
 private static var cloudCache: [[String: Any]] = []
 private static var cloudCacheAt: Date = .distantPast
 private static var cloudCacheLoggedIn: Bool = false
 
+/// 网易云盘行 -> 候选曲目（songId/name/artists/album；行里没有封面/时长，
+/// resolvedTrack 的封面/时长由 neteaseCloudDetail 另补）。
+private static func cloudCandidate(from c: [String: Any]) -> Track? {
+let id = cloudSongId(c)
+guard !id.isEmpty else { return nil }
+let name = (c["songName"] as? String) ?? (c["name"] as? String) ?? ""
+guard !name.isEmpty else { return nil }
+let artist = (c["artist"] as? String) ?? (c["artists"] as? String) ?? ""
+let album = (c["album"] as? String) ?? ""
+return Track(id: id, platform: "netease", title: name, artist: artist, album: album, platformKey: id)
+}
+
+/// 网易云盘命中后补元数据：/api/song/detail（/v3/song/detail）按 cloudId
+/// 取一首歌的归一化行（toTrack：封面 al.picUrl、时长 dt）；拿不到回 nil，
+/// 调用方用云盘行自己顶。
+private static func neteaseCloudDetail(id: String) async -> Track? {
+guard let n = Int(id) else { return nil }
+guard let d = await call(path: "/api/song/detail", query: ["ids": "\(n)"]),
+let rows = d["tracks"] as? [[String: Any]],
+let first = rows.first else { return nil }
+return Track.from(dict: first, platform: "netease")
+}
+
+private static var kugouCloudCache: [Track] = []
+private static var kugouCloudCacheAt: Date = .distantPast
+private static var kugouCloudCacheLoggedIn: Bool = false
+
+/// 酷狗云盘腿：列表（/api/kugou/user/cloud，token 登录；未登录服务端回
+/// code 401，这里按 401 认未登录、不另查登录态）-> 匹配 -> 取链
+/// （/api/kugou/user/cloud_url，hash + albumAudioId + name；回的 quality
+/// 是空串——云盘文件实际档位未知，绝不硬编 flac，actualQuality 保持 nil，
+/// UI 不挂徽章）。登录态不认 MUSIC_U（那是网易的），只认 401。
+static func kugouCloudSongURL(track: Track, quality: AudioQuality) async -> SongURLResult? {
+let now = Date()
+if now.timeIntervalSince(kugouCloudCacheAt) > 600 || !kugouCloudCacheLoggedIn {
+var songs: [Track] = []
+var loggedIn = false
+for page in 1...10 {
+guard let d = await call(path: "/api/kugou/user/cloud",
+query: ["page": "\(page)", "limit": "50"]) else { break }
+let code = (d["code"] as? NSNumber)?.intValue ?? 0
+if code == 401 { break }
+guard code == 200 else { break }
+loggedIn = true
+let rows = (d["tracks"] as? [[String: Any]]) ?? []
+let tracks = rows.compactMap { Track.from(dict: $0, platform: "kugou") }
+songs.append(contentsOf: tracks)
+if tracks.count < 50 { break }
+}
+kugouCloudCache = songs
+kugouCloudCacheAt = now
+kugouCloudCacheLoggedIn = loggedIn
+}
+guard kugouCloudCacheLoggedIn, !kugouCloudCache.isEmpty else { return nil }
+guard let hit = findCloudSong(track, in: kugouCloudCache) else { return nil }
+let hash = hit.platformKey.uppercased()
+guard !hash.isEmpty else { return nil }
+guard let d = await call(path: "/api/kugou/user/cloud_url",
+query: ["hash": hash, "albumAudioId": "\(hit.albumAudioId)", "name": hit.title]),
+(d["code"] as? NSNumber)?.intValue == 0,
+let urlString = d["url"] as? String, !urlString.isEmpty,
+let url = Upstream.url(from: urlString).map({ Upstream.upgradedAudioURL($0) }) else { return nil }
+// r31 真实音质：云盘文件实际档位未知（服务端 quality 回空串），actualQuality
+// 保持 nil、servedLabel 不填，UI 显示「未知」不挂假徽章；resolvedTrack 带
+// 云盘行的歌名/歌手/专辑/封面/时长，播放页补显示用（只补缺失项，见
+// PlaybackStore.applyCloudTrack）。
+return SongURLResult(url: url, via: "cloud", resolvedTrack: hit)
+}
+
 /// /api/user/cloud 的行解析（normalize 的形状：data 数组或 songs 数组，字段 songId/songName/artist/album）。
 private static func cloudRows(_ d: [String: Any]) -> [[String: Any]]? {
-if let rows = d["songs"] as? [[String: Any]] { return rows}
-if let data = d["data"] as? [[String: Any]] { return data}
-if let data = d["data"] as? [String: Any], let rows = data["songs"] as? [[String: Any]] { return rows}
+if let rows = d["songs"] as? [[String: Any]] { return rows }
+if let data = d["data"] as? [[String: Any]] { return data }
+if let data = d["data"] as? [String: Any], let rows = data["songs"] as? [[String: Any]] { return rows }
 return nil
 }
 
 private static func cloudSongId(_ c: [String: Any]) -> String {
-if let s = c["songId"] as? String { return s}
-if let n = c["songId"] as? NSNumber { return n.stringValue}
-if let n = c["id"] as? NSNumber { return n.stringValue}
+if let s = c["songId"] as? String { return s }
+if let n = c["songId"] as? NSNumber { return n.stringValue }
+if let n = c["id"] as? NSNumber { return n.stringValue }
 return (c["id"] as? String) ?? ""
 }
 
+/// 云盘匹配归一化：去大小写；整段删掉括号里的后缀（Live/翻唱/feat. 等不
+/// 参与匹配）；再去空白/标点/连字符。旧实现只删括号字符、留下里面的字，
+/// 「夜曲 (Live版)」归一化成「夜曲live版」，对不上「夜曲」。
 private static func normCloudKey(_ s: String) -> String {
-s.lowercased().components(separatedBy: CharacterSet(charactersIn: " \n-_·•()（）[]{}'\"“”‘’.,，。、!！?？:：;；|/\\")).joined()
+var t = s.lowercased()
+let pairs: [(Character, Character)] = [("(", ")"), ("（", "）"), ("[", "]"), ("【", "】"), ("{", "}")]
+for (open, close) in pairs {
+while let o = t.firstIndex(of: open), let c = t[o...].firstIndex(of: close), c > o {
+t.removeSubrange(o...c)
+}
+}
+return t.components(separatedBy: CharacterSet(charactersIn: " \n-_·•'\"“”‘’.,，。、!！?？:：;；|/\\")).joined()
 }
 
-private static func findCloudSong(_ track: Track, in songs: [[String: Any]]) -> [String: Any]? {
-if let byId = songs.first(where: { cloudSongId($0) == track.id}) { return byId}
-let nameKey = normCloudKey(track.title)
-guard !nameKey.isEmpty else { return nil}
-let artistKey = normCloudKey(track.artist.components(separatedBy: "/").first ?? "")
-return songs.first { c in
-let cname = normCloudKey((c["songName"] as? String) ?? (c["name"] as? String) ?? "")
-guard cname == nameKey else { return false}
-guard !artistKey.isEmpty else { return true}
-let ca = normCloudKey((c["artist"] as? String) ?? (c["artists"] as? String) ?? "")
-return ca.isEmpty || ca.contains(artistKey) || artistKey.contains(ca)
+/// 歌手归一化键：只比第一位（按 / 切）；空、「未知歌手」按缺失（空串）。
+private static func cloudArtistKey(_ s: String) -> String {
+let first = (s.components(separatedBy: "/").first ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+if first.isEmpty || first == "未知歌手" { return "" }
+return normCloudKey(first)
 }
+
+/// 云盘匹配（网易 + 酷狗共用；规则见 cloudSongURL 头注）。
+/// - id 精确匹配优先（大小写不敏感；酷狗 hash 全大写，网易 id 是数字串）。
+/// - 否则歌名归一化相等 + 歌手/专辑打分（歌手互含 2 分，专辑相等 1 分），
+///   >= 1 分才命中，取最高分；只有歌名对上不播。
+/// - 「未知歌手」按缺失算。
+private static func findCloudSong(_ track: Track, in candidates: [Track]) -> Track? {
+let trackIdKey = track.platformKey.isEmpty ? track.id : track.platformKey
+if let byId = candidates.first(where: { $0.platformKey.uppercased() == trackIdKey.uppercased() }) { return byId }
+let nameKey = normCloudKey(track.title)
+guard !nameKey.isEmpty else { return nil }
+let artistKey = cloudArtistKey(track.artist)
+let albumKey = normCloudKey(track.album)
+var best: Track?
+var bestScore = 0
+for c in candidates {
+guard normCloudKey(c.title) == nameKey else { continue }
+var score = 0
+let ca = cloudArtistKey(c.artist)
+if !artistKey.isEmpty, !ca.isEmpty, (ca.contains(artistKey) || artistKey.contains(ca)) { score += 2 }
+let calbum = normCloudKey(c.album)
+if !albumKey.isEmpty, !calbum.isEmpty, calbum == albumKey { score += 1 }
+if score > bestScore { bestScore = score; best = c }
+}
+return bestScore >= 1 ? best : nil
 }
 
 // MARK: - 取链：LX（只做取链 fallback，绝不做搜索）
@@ -404,62 +566,29 @@ DiagLog.shared.recordPlaybackStep("lx song/url return source=\(track.platform) i
 // 在这一档调用里成功了」，不是「这条流真是这一档」——脚本要 atmos
 // 档时只消返回任意一条能播的地址（常是 320k mp3 / QQ M800 直链），
 // 引擎就原样报 atmos，canon 直译成 .dolby，芯片就挂了假杜比。
-// 没会员时 LX 先跑（PlaybackStore.resolveURL 的 lxFirst），QQ 匿名
+// 自动模式下 LX 先跑（PlaybackStore.resolveURL），QQ 匿名
 // vkey 对这首歌根本不给 purl、官方腿走不到，所以用户实际听到的就
 // 是 LX 这条 mp3，却顶着杜比徽章。这里按实际地址的实证校验：
 // QQ 文件名前缀（M800/Q001…）定档，.mp3 上限 320k，
 // 不透明地址才保留脚本宣称（残留风险：脚本 tier 是唯一证据时仍
 // 可能虚高，见 AudioQuality.verified 的注释——不编更多证据）。
+// r31 音质系统替换：起播后实测链（StreamQualityMeasurer）还会按
+// 实际解码轨道再定一次档，宣称档位只是初值。
 let streamURL = Upstream.url(from: urlString).map { Upstream.upgradedAudioURL($0) }
+// r31（R6 已删）：canon 只翻译脚本 tier；翻译不出时原文进 servedLabel。
+let lxClaimed = AudioQuality.canon(platform: "lx", served: served)
 return SongURLResult(url: streamURL,
-actualQuality: AudioQuality.verified(claimed: AudioQuality.canon(platform: "lx", served: served), url: streamURL),
+actualQuality: AudioQuality.verified(claimed: lxClaimed, url: streamURL),
+servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil,
 reason: "", via: "lx")
 }
 
-// MARK: - 会员态（决定 LX 排第几）
-
-/// 该平台是否已登录且有会员（player.js fetchMembership + membershipFromStatus；
-/// 5 分钟缓存，2 秒超时按「没会员」处理）。Apple Music / 本地无会员概念，返回 false。
-static func isMember(platform: String) async -> Bool {
-membershipLock.lock()
-if let hit = membershipCache[platform], Date().timeIntervalSince(hit.at) < membershipTTL {
-membershipLock.unlock()
-return hit.member
-}
-membershipLock.unlock()
-let member: Bool
-do {
-member = try await withTimeout(seconds: membershipTimeout) {
-await memberStatus(platform: platform)
-}
-} catch {
-member = false
-}
-membershipLock.lock()
-membershipCache[platform] = (at: Date(), member: member)
-membershipLock.unlock()
-return member
-}
-
-private static func memberStatus(platform: String) async -> Bool {
-let d: [String: Any]?
-switch platform {
-case "netease":
-d = await call(path: "/api/session")
-guard let d, (d["loggedIn"] as? NSNumber)?.boolValue == true else { return false}
-if let profile = d["profile"] as? [String: Any] {
-if let vipType = profile["vipType"] as? NSNumber, vipType.intValue > 0 { return true}
-if (profile["vipType"] as? NSNumber)?.boolValue == true { return true}
-}
-return (d["vip"] as? NSNumber)?.boolValue == true
-case "qq", "kuwo", "qishui", "bodian", "kugou":
-d = await call(path: "/api/\(platform)/status")
-guard let d, (d["loggedIn"] as? NSNumber)?.boolValue == true else { return false}
-return (d["vip"] as? NSNumber)?.boolValue == true
-default:
-return false
-}
-}
+// MARK: - 会员态（r31 已删：R1/R2）
+//
+// 取链编排不再问会员/登录：isMember / memberStatus / 会员缓存已全删。
+// 腿的顺序只由「播放来源」三段定（PlaybackStore.resolveURL），请求档
+// 直发音源，返回什么播什么。登录态本身还在（各平台登录流程、云盘
+// 读取照旧），只是不再拿它决定档位与腿的顺序。
 
     // MARK: - 歌词（官方 → LRCLIB 兜底）
 

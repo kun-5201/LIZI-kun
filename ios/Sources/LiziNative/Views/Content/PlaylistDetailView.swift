@@ -71,8 +71,8 @@ struct PlaylistDetailView: View {
 
     @ViewBuilder
     private func contentView(_ playlist: Playlist) -> some View {
-        // r38-fix ⑧/⑨-3：外层 GeometryReader 实测宽（HomeView 外层同款），
-        // 传给环的 screenWidth，让详情页平面卡与 3D 环走第 ⑧/⑨ 件新尺寸，
+        // r39-5：第 5 件——外层 GeometryReader 实测宽（HomeView 外层同款），
+        // 传给环的 screenWidth，让详情页 3D 环走第 5 件新几何，
         // 不再以 screenWidth=0 回落旧 tier 分档。
         GeometryReader { geo in
             ScrollView {
@@ -85,40 +85,40 @@ struct PlaylistDetailView: View {
                         .padding(.horizontal, 16)
                         .padding(.top, 12)
                     if isRank && !playlist.tracks.isEmpty {
-                        // r36（用户 21:27 + 21:41 + 21:43 + 21:44 + v4）：
-                        // 排行榜详情里的歌按首页那样一张一张卡片显示——首页封面
-                        // 轮播（真封面、横向轮播、当前大张居中、左右露出相邻封面、
-                        // 封面下歌名 + 歌手），不是普通列表、不是网格。
-                        // 不带排名数字（21:43 作废 r35-10 的行首排名数字）、
-                        // 不显示多少首（21:44）、不加任何提示文字（21:44，
-                        // hideEntryHint）。全量曲目（100/1000 首）都进轮播，
-                        // 取数走 playlistDetail isRank 全量（见 NativeBridge）。
-                        // 点卡播歌走环自带的 playTrack（setQueue 整队从该下标
-                        // 起播）；「播放全部」按钮保留，点行播放逻辑不动。
-                        // 只改排行榜详情这支，普通歌单详情保持原样（下面的
-                        // ForEach 列表行）。
-                        HomeCoverRingView(
-                            model: rankRingModel,
-                            dailyTracks: playlist.tracks,
-                            marqueeSpeed: 24,
-                            tier: PlayerTokens.sizeTier(for: UIScreen.main.bounds.size, topInset: 0),
-                            screenWidth: geo.size.width, // r38-fix ⑧/⑨-3：实测宽，不回落旧分档
-                            panelIsDark: false,
-                            hideEntryHint: true
-                        )
-                        .padding(.horizontal, 16)
-                        .padding(.top, 12)
-                    } else {
-                        ForEach(Array(playlist.tracks.enumerated()), id: \.offset) { index, track in
-                            trackRow(track, in: playlist.tracks, at: index)
-                        }
+                    // r36（用户 21:27 + 21:41 + 21:43 + 21:44 + v4）：
+                    // 排行榜详情里的歌按首页那样一张一张卡片显示——首页封面
+                    // 轮播（真封面、横向轮播、当前大张居中、左右露出相邻封面、
+                    // 封面下歌名 + 歌手），不是普通列表、不是网格。
+                    // 不带排名数字（21:43 作废 r35-10 的行首排名数字）、
+                    // 不显示多少首（21:44）、不加任何提示文字（21:44，
+                    // hideEntryHint）。全量曲目（100/1000 首）都进轮播，
+                    // 取数走 playlistDetail isRank 全量（见 NativeBridge）。
+                    // 点卡播歌走环自带的 playTrack（setQueue 整队从该下标
+                    // 起播）；「播放全部」按钮保留，点行播放逻辑不动。
+                    // 只改排行榜详情这支，普通歌单详情保持原样（下面的
+                    // ForEach 列表行）。
+                    HomeCoverRingView(
+                        model: rankRingModel,
+                        dailyTracks: playlist.tracks,
+                        marqueeSpeed: 24,
+                        tier: PlayerTokens.sizeTier(for: UIScreen.main.bounds.size, topInset: 0),
+                        screenWidth: geo.size.width, // r39-5：第 5 件——实测宽，不回落旧分档
+                        panelIsDark: false,
+                        hideEntryHint: true
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                } else {
+                    ForEach(Array(playlist.tracks.enumerated()), id: \.offset) { index, track in
+                        trackRow(track, in: playlist.tracks, at: index)
                     }
                 }
-                .padding(.bottom, 24)
             }
-            // 环的 3D 展开态要这个坐标空间锚点（HomeView 同款，见 HomeView.swift）。
-            .coordinateSpace(name: "liziHome")
+            .padding(.bottom, 24)
+            }
         }
+        // 环的 3D 展开态要这个坐标空间锚点（HomeView 同款，见 HomeView.swift）。
+        .coordinateSpace(name: "liziHome")
     }
 
     /// 头部：封面大图 + 标题 + 创建者 + 曲目数 + 简介。

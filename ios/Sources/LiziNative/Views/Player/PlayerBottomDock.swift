@@ -53,17 +53,14 @@ struct PlayerBottomDock: View {
     var width: CGFloat = 370
     /// 播放列表键的回调（调用方一般传 `{ showQueue.toggle() }`）。
     var onOpenQueue: (() -> Void)? = nil
-    /// r38-4：专辑 tone（调用方 PlayerView 传 playerTone；默认 fallback，
+    /// r39-2：专辑 tone（调用方 PlayerView 传 playerTone；默认 fallback，
     /// 没封面 / 取色失败时就是 fallback，不编假色）。只改颜色，不动排版。
     var albumTone: AlbumTone = .fallback
-    /// r38-5：图标换算基准 = 短边（调用方 PlayerView 传 min(宽, 高)；
-    /// 默认 402）。图标大小按参考图比例（相对短边），不换样式。
-    var shortSide: CGFloat = 402
 
-    /// r38-4：专辑强调色——a/b/c 三档中按深浅场取最易读的一档：深场取
+    /// r39-2：专辑强调色——a/b/c 三档中按深浅场取最易读的一档：深场取
     /// 最亮的 c，浅场取最深的 a；只取 AlbumTone 已有的三档，不编新色。
     private var albumAccent: Color { albumTone.isDark ? albumTone.c : albumTone.a }
-    /// r38-4：专辑文字色 / 次要文字色（AlbumTone.text / secondaryText 原样）。
+    /// r39-2：专辑文字色 / 次要文字色（AlbumTone.text / secondaryText 原样）。
     private var albumText: Color { albumTone.text }
     private var albumSecondaryText: Color { albumTone.secondaryText }
 
@@ -101,10 +98,14 @@ struct PlayerBottomDock: View {
         }
     }
 
-    /// 第 3 排图标字号（r38-5：小图标 6.2% 短边，参考图比例；r27 的
-    /// 18/22/24 分档作废，只改大小，不换样式）。
+    /// 第 3 排图标字号（v4 图标约 16–17pt 字形高；SF 字形高约 0.8em）。
+    /// r27 压缩：compact 20 → 18（配 26pt 行高，字形约 14.4pt）。
     private var actionIconFont: CGFloat {
-        0.062 * shortSide
+        switch tier {
+        case .compact: return 18
+        case .standard: return 22
+        case .large: return 24
+        }
     }
 
     /// 排间距（r27 压缩：compact 4 → 2，两排共省 4pt，见 PlayerView
@@ -115,9 +116,8 @@ struct PlayerBottomDock: View {
     /// 其余档 4。时间字号 compact 仍是 10pt，不动。
     private var progressSpacing: CGFloat { tier == .compact ? 2 : 4 }
 
-    /// 传输行小图标字号（r38-5：小图标 6.2% 短边，参考图比例；
-    /// 原 PlayerTokens.controlIconSize 22/24/26 分档作废，只改大小）。
-    private var transportIconFont: CGFloat { 0.062 * shortSide }
+    /// 传输行小图标字号（与控制行同款分档）。
+    private var transportIconFont: CGFloat { PlayerTokens.controlIconSize(tier) }
 
     /// 第 2 排时间字号。
     private var timeFont: CGFloat {
@@ -217,16 +217,16 @@ struct PlayerBottomDock: View {
         case .idle:
             Image(systemName: "arrow.down.to.line")
                 .font(.system(size: actionIconFont, weight: .medium))
-                .foregroundStyle(albumText) // r38-4：下载键走专辑文字色
+                .foregroundStyle(albumText) // r39-2：下载键走专辑文字色
         case .downloading(let progress):
             ProgressView(value: progress)
                 .progressViewStyle(.circular)
-                .tint(albumText) // r38-4：下载中圆环走专辑文字色
+                .tint(albumText) // r39-2：下载中圆环走专辑文字色
                 .frame(width: actionIconFont, height: actionIconFont)
         case .downloaded:
             Image(systemName: "checkmark")
                 .font(.system(size: actionIconFont, weight: .semibold))
-                .foregroundStyle(albumAccent) // r38-4：已下载勾走专辑强调色
+                .foregroundStyle(albumAccent) // r39-2：已下载勾走专辑强调色
         case .failed:
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: actionIconFont, weight: .medium))
@@ -253,7 +253,7 @@ struct PlayerBottomDock: View {
         Button(action: { store.toggleLike() }) {
             Image(systemName: store.isLiked ? "heart.fill" : "heart")
                 .font(.system(size: actionIconFont, weight: .medium))
-                .foregroundStyle(store.isLiked ? albumAccent : albumText) // r38-4：已喜欢走专辑强调色，未喜欢走专辑文字色
+                .foregroundStyle(store.isLiked ? albumAccent : albumText) // r39-2：已喜欢走专辑强调色，未喜欢走专辑文字色
         }
         .accessibilityLabel(store.isLiked ? "取消喜欢" : "喜欢")
     }
@@ -263,7 +263,7 @@ struct PlayerBottomDock: View {
         Button(action: { showComments = true }) {
             Image(systemName: "bubble.left")
                 .font(.system(size: actionIconFont, weight: .medium))
-                .foregroundStyle(albumText) // r38-4：评论键走专辑文字色
+                .foregroundStyle(albumText) // r39-2：评论键走专辑文字色
         }
         .accessibilityLabel("评论区")
     }
@@ -277,12 +277,12 @@ struct PlayerBottomDock: View {
         Button(action: { showQualityPicker = true }) {
             Text(store.servedQualityText)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(albumText) // r38-4：音质芯片文字走专辑文字色
+                .foregroundStyle(albumText) // r39-2：音质芯片文字走专辑文字色
                 .padding(.horizontal, 12)
                 .padding(.vertical, 5)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(albumText.opacity(0.6), lineWidth: 1) // r38-4：芯片描边同色
+                        .stroke(albumText.opacity(0.6), lineWidth: 1) // r39-2：芯片描边同色
                 )
         }
         .accessibilityLabel("选择音质，当前\(store.servedQualityText)")
@@ -292,19 +292,19 @@ struct PlayerBottomDock: View {
 
     private var progressRow: some View {
         VStack(spacing: progressSpacing) {
-            // r38-4：竖屏进度条走专辑强调色（填充/圆点），轨道走专辑文字色
+            // r39-2：竖屏进度条走专辑强调色（填充/圆点），轨道走专辑文字色
             // （不透明度 0.08 与改前淡白轨道一致）；改前是蓝紫渐变填充。
             PlayerProgressBar(tier: tier, fillColor: albumAccent, trackColor: albumText.opacity(0.08), dotColor: albumAccent)
                 .frame(width: width)
             HStack {
                 Text(PlayerTokens.formatDuration(store.progress))
                     .font(.system(size: timeFont))
-                    .foregroundStyle(albumSecondaryText) // r38-4：时间走专辑次要文字色
+                    .foregroundStyle(albumSecondaryText) // r39-2：时间走专辑次要文字色
                     .monospacedDigit()
                 Spacer()
                 Text(PlayerTokens.formatDuration(store.duration))
                     .font(.system(size: timeFont))
-                    .foregroundStyle(albumSecondaryText) // r38-4：时间走专辑次要文字色
+                    .foregroundStyle(albumSecondaryText) // r39-2：时间走专辑次要文字色
                     .monospacedDigit()
             }
         }
@@ -319,7 +319,7 @@ struct PlayerBottomDock: View {
             Button(action: { store.previous() }) {
                 Image(systemName: "backward.end.fill")
                     .font(.system(size: transportIconFont))
-                    .foregroundStyle(albumText) // r38-4：上一首走专辑文字色
+                    .foregroundStyle(albumText) // r39-2：上一首走专辑文字色
             }
             .frame(width: width * 0.20)
             .accessibilityLabel("上一首")
@@ -328,14 +328,14 @@ struct PlayerBottomDock: View {
             Button(action: { store.next() }) {
                 Image(systemName: "forward.end.fill")
                     .font(.system(size: transportIconFont))
-                    .foregroundStyle(albumText) // r38-4：下一首走专辑文字色
+                    .foregroundStyle(albumText) // r39-2：下一首走专辑文字色
             }
             .frame(width: width * 0.20)
             .accessibilityLabel("下一首")
             Button(action: { onOpenQueue?() }) {
                 Image(systemName: "list.bullet")
                     .font(.system(size: transportIconFont, weight: .medium))
-                    .foregroundStyle(albumText) // r38-4：队列键走专辑文字色
+                    .foregroundStyle(albumText) // r39-2：队列键走专辑文字色
             }
             .frame(width: width * 0.17)
             .accessibilityLabel("打开播放队列")
@@ -353,11 +353,11 @@ struct PlayerBottomDock: View {
                     .shadow(color: .black.opacity(0.35), radius: 10, x: 0, y: 4)
                 if store.isLoading {
                     ProgressView()
-                        .tint(albumAccent) // r38-4：加载圈走专辑强调色（圆仍是白色，字形改色）
+                        .tint(albumAccent) // r39-2：加载圈走专辑强调色（圆仍是白色，字形改色）
                 } else {
                     Image(systemName: store.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 0.078 * shortSide, weight: .semibold)) // r38-5：播放/暂停字形 7.8% 短边（参考图暂停键占屏高 7.8%）；白圆直径不动，只改字形大小，不换样式
-                        .foregroundStyle(albumAccent) // r38-4：播放/暂停字形走专辑强调色（白圆底不动）
+                        .font(.system(size: playDiameter * 0.44, weight: .semibold))
+                        .foregroundStyle(albumAccent) // r39-2：播放/暂停字形走专辑强调色（白圆底不动）
                         .offset(x: store.isPlaying ? 0 : 2)
                 }
             }
@@ -400,7 +400,7 @@ struct PlayerBottomDock: View {
         Button(action: { cycleDockMode() }) {
             Image(systemName: modeIconName)
                 .font(.system(size: transportIconFont, weight: .medium))
-                .foregroundStyle(dockMode == .off ? albumText : albumAccent) // r38-4：模式键激活态走专辑强调色，顺序态走专辑文字色
+                .foregroundStyle(dockMode == .off ? albumText : albumAccent) // r39-2：模式键激活态走专辑强调色，顺序态走专辑文字色
         }
         .accessibilityLabel("播放模式：\(modeTitle)，点按切换")
     }

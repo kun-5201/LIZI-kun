@@ -36,7 +36,7 @@ struct LyricsZoneView: View {
     /// 调用方注入的分档（PlayerView 的 GeometryReader 已有全屏尺寸时可传进来）；
     /// 不传时组件按屏幕尺寸 + 顶栏安全区自己取档。两种写法结果一致，不打架。
     var injectedTier: PlayerTokens.PlayerSizeTier?
-    /// r38-4：专辑 tone（调用方 PlayerView 传 playerTone；默认 fallback）。
+    /// r39-2：专辑 tone（调用方 PlayerView 传 playerTone；默认 fallback）。
     /// 只改歌词颜色，不动排版/滚动/手势。
     var albumTone: AlbumTone = .fallback
 
@@ -45,7 +45,7 @@ struct LyricsZoneView: View {
         self.albumTone = albumTone
     }
 
-    /// r38-4：专辑强调色 / 文字色 / 次要文字色（与 PlayerView 同一套取法：
+    /// r39-2：专辑强调色 / 文字色 / 次要文字色（与 PlayerView 同一套取法：
     /// 强调色深场取 c、浅场取 a；文字走 AlbumTone.text / secondaryText）。
     private var albumAccent: Color { albumTone.isDark ? albumTone.c : albumTone.a }
     private var albumText: Color { albumTone.text }
@@ -112,7 +112,7 @@ struct LyricsZoneView: View {
     private var emptyState: some View {
         Text("这首歌没有歌词")
             .font(.system(size: PlayerTokens.textMd))
-            .foregroundStyle(albumSecondaryText) // r38-4：无歌词提示走专辑次要文字色
+            .foregroundStyle(albumSecondaryText) // r39-2：无歌词提示走专辑次要文字色
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 
@@ -132,7 +132,7 @@ struct LyricsZoneView: View {
                                 distance: effectiveCurrent - index,
                                 currentSize: currentSize,
                                 otherSize: otherSize,
-                                albumTone: albumTone // r38-4：行接专辑 tone
+                                albumTone: albumTone // r39-2：行接专辑 tone
                             )
                             .id(index)
                             // 行点按只跳转（点行是跳转，见行上的高优先级手势）。
@@ -215,10 +215,10 @@ private struct LyricsZoneRowView: View {
     let distance: Int
     let currentSize: CGFloat
     let otherSize: CGFloat
-    /// r38-4：专辑 tone（调用方 LyricsZoneView 传下来）。
+    /// r39-2：专辑 tone（调用方 LyricsZoneView 传下来）。
     let albumTone: AlbumTone
 
-    /// r38-4：专辑强调色 / 次要文字色（与 LyricsZoneView 同一套取法）。
+    /// r39-2：专辑强调色 / 次要文字色（与 LyricsZoneView 同一套取法）。
     private var albumAccent: Color { albumTone.isDark ? albumTone.c : albumTone.a }
     private var albumSecondaryText: Color { albumTone.secondaryText }
 
@@ -247,7 +247,7 @@ private struct LyricsZoneRowView: View {
             if !line.translation.isEmpty {
                 Text(line.translation)
                     .font(.system(size: PlayerTokens.textXs))
-                    .foregroundStyle(albumSecondaryText) // r38-4：翻译行走专辑次要文字色
+                    .foregroundStyle(albumSecondaryText) // r39-2：翻译行走专辑次要文字色
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
             }
@@ -270,12 +270,12 @@ private struct LyricsZoneRowView: View {
         } else if isCurrent {
             Text(line.text)
                 .font(.system(size: currentSize, weight: .semibold))
-                .foregroundStyle(albumAccent) // r38-4：竖屏当前行走专辑强调色
+                .foregroundStyle(albumAccent) // r39-2：竖屏当前行走专辑强调色
                 .lineLimit(1)
         } else {
             Text(line.text)
                 .font(.system(size: otherSize))
-                .foregroundStyle(albumSecondaryText) // r38-4：非当前行走专辑次要文字色
+                .foregroundStyle(albumSecondaryText) // r39-2：非当前行走专辑次要文字色
                 .lineLimit(1)
         }
     }
@@ -284,7 +284,7 @@ private struct LyricsZoneRowView: View {
         line.words.reduce(Text("")) { partial, word in
             let sung = word.startMs <= nowMs
             let piece = Text(word.text)
-                .foregroundColor(sung ? albumAccent : albumSecondaryText) // r38-4：逐字唱到走专辑强调色，未唱到走专辑次要文字色
+                .foregroundColor(sung ? albumAccent : albumSecondaryText) // r39-2：逐字唱到走专辑强调色，未唱到走专辑次要文字色
                 .fontWeight(sung ? .semibold : .regular)
             return partial + piece
         }

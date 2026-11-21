@@ -8,8 +8,9 @@ import UIKit
 ///   r30：19pt 粗体——逐帧规格（verification/shell-video-39s-home-3d.md）
 ///   与 v4 图（~/workspace/lizi-home-daily-v4.png）量：约 36px ≈ 19pt；
 ///   旧模板 v2 的 24pt 已作废）→ 7 个平台图标（r30：26pt、间距 5，
-///   逐帧规格每枚约 48px ≈ 26pt；旧 28pt 已作废）→ 搜索
-///   （r30：字形 19pt，逐帧规格约 35px ≈ 19pt；旧 18pt 已作废）。
+///   逐帧规格每枚约 48px ≈ 26pt；旧 28pt 已作废）→ 返回键
+///   （r39-6：第 6 件——右端搜索放大镜改成返回键 `chevron.left`，点按回到上一层，
+///   见 `onBackTap`；字形 19pt、触摸框 28×28，与旧搜索钮同尺寸同位置）。
 ///   r30：标题是来源切换入口——点标题弹来源小菜单（壳版
 ///   `#hall-src-menu` 思路，浮层由 HomeView 挂），标题文案跟当前来源走
 ///   （`viewModel.sourceTitle`，默认「每日推荐」）；标题后挂一枚小
@@ -18,7 +19,7 @@ import UIKit
 ///   6 个栏目）。
 /// - 图标 26pt、圆角 28%（≈7pt），选中描 2pt 圈（壳版
 ///   `0 0 0 2px currentColor`；浅场 currentColor 就是墨色）。
-///   r28 tone-aware：面板跟专辑取色后深场时标题、搜索图标、选中圈
+///   r28 tone-aware：面板跟专辑取色后深场时标题、返回键图标、选中圈
 ///   都改白色（`isDark` 由调用方 HomeView 的 panelTone 传入），
 ///   浅场保持墨色；图标 26pt、条高 48pt 不动。
 ///   图标下不再挂名字（名字只在左列出现一次——现在是「每日推荐」标题）。
@@ -48,21 +49,23 @@ struct PlatformStripView: View {
     /// 切台时传给 selectPlatform 做 advanceGeneration()（取消在飞取链）。
     /// 本文件是 selectPlatform 的唯一调用点，所以接线只放这里。
     @EnvironmentObject private var playback: PlaybackStore
-    /// 右端搜索钮用（模板 v2 + 壳版 `.pstrip__search`）。
-    @EnvironmentObject private var nav: AppNavigation
 
     /// 标题实测宽（PreferenceKey 回写；初值 100 = 「每日推荐」4 字 × 19pt
     /// 预估 + chevron；最长来源「我的歌单」约 100pt，实测后自纠）。
     @State private var nameWidth: CGFloat = 100
 
     /// r28 tone-aware：调用方（HomeView）按在播专辑取色 `panelTone.isDark`
-    /// 传入——深场时标题、搜索图标、选中圈都用白色，浅场保持墨色。
+    /// 传入——深场时标题、返回键图标、选中圈都用白色，浅场保持墨色。
     /// 默认 false（浅场），与改前行为一致。
     var isDark: Bool = false
 
     /// r30：点标题弹来源小菜单（调用方 HomeView 挂浮层；不传则标题不可点，
     /// 只显示当前来源名）。本条全仓只在 HomeView 用，调用方必传。
     var onSourceMenuTap: (() -> Void)? = nil
+
+    /// r39-6：第 6 件——点右端返回键回到上一层（调用方 HomeView 传现有返回逻辑；
+    /// 不传则返回键不可点，只显示箭头）。本条全仓只在 HomeView 用，调用方必传。
+    var onBackTap: (() -> Void)? = nil
 
     /// 面板标题：当前来源名（`viewModel.sourceTitle`，默认「每日推荐」；
     /// r26「固定每日推荐」已作废，r30 起跟来源切换走）。
@@ -81,8 +84,8 @@ struct PlatformStripView: View {
         return n * 26 + (n - 1) * 5
     }
 
-    /// 图标缩放（壳版 fitPlatBar：只收图标，下限 0.55；标题、搜索不动）。
-    /// 可用宽 = 总宽 − 标题宽 − 搜索钮 28 − 三处间距 8×3。
+    /// 图标缩放（壳版 fitPlatBar：只收图标，下限 0.55；标题、返回键不动）。
+    /// 可用宽 = 总宽 − 标题宽 − 返回钮 28 − 三处间距 8×3。
     private func barScale(totalWidth: CGFloat) -> CGFloat {
         let avail = totalWidth - nameWidth - 28 - 24
         guard avail > 0 else { return 0.55 }
@@ -128,15 +131,20 @@ struct PlatformStripView: View {
                 .scaleEffect(scale, anchor: .leading)
                 .frame(width: iconsNaturalWidth * scale, height: 26, alignment: .leading)
                 Spacer()
-                // 模板 v2 + 壳版 `.pstrip__search`：长条右端放大镜，点进搜索页。
-                // r30：字形 19pt（逐帧规格约 35px ≈ 19pt），触摸框 28×28。
-                Button(action: { nav.show(.search) }) {
-                    Image(systemName: "magnifyingglass")
+                // r39-6：第 6 件——右端搜索放大镜改成返回键（`<` 形 chevron.left，
+                // 点按回到上一层，逻辑由调用方 HomeView 的 onBackTap 传进来，
+                // 只用现有返回逻辑）；字形 19pt、触摸框 28×28，与旧搜索钮同尺寸
+                // 同位置，顶栏左边的设置 + 搜索（topBar）不动，榜单详情自己的
+                // 顶行（「‹ 榜单」+ 搜索）也不动，只改这一处。
+                Button(action: { onBackTap?() }) {
+                    Image(systemName: "chevron.left")
                         .font(.system(size: 19, weight: .semibold))
                         .foregroundColor(isDark ? .white : LiziTokens.ink2)
                         .frame(width: 28, height: 28)
                 }
-                .accessibilityLabel("搜索")
+                .buttonStyle(.plain)
+                .disabled(onBackTap == nil)
+                .accessibilityLabel("返回")
             }
             .frame(height: 48) // 壳版 `.hall-plat__bar` 原高 42px；原生图标放大到 26 后条高 48，图标垂直居中，上下各留 11pt。
         }

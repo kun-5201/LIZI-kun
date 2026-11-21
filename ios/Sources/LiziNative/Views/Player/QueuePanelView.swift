@@ -25,17 +25,17 @@ struct QueuePanelView: View {
     /// 关闭回调（`PlayerView` 的 showQueue；不传时不显示关闭按钮）。
     var onClose: (() -> Void)? = nil
 
-    /// r38-fix ④-1：专辑 tone（PlayerView 的 playerTone 直传，见 PlayerView
+    /// r39-2：专辑 tone（PlayerView 的 playerTone 直传，见 PlayerView
     /// lyricsZone 的 albumTone 传法；没封面 / 取色失败时 playerTone 已是
     /// AlbumTone.fallback 深场）。面板只换颜色，不动排版和位置。
     var albumTone: AlbumTone = .fallback
 
-    /// r38-fix ④-1：专辑强调色——PlayerView albumAccent 同款走法：
+    /// r39-2：专辑强调色——PlayerView albumAccent 同款走法：
     /// 深场取最亮的 c，浅场取最深的 a；只取 AlbumTone 已有的三档，不编新色。
     private var albumAccent: Color { albumTone.isDark ? albumTone.c : albumTone.a }
-    /// r38-fix ④-1：专辑文字色（AlbumTone.text 原样：深场白字、浅场墨字）。
+    /// r39-2：专辑文字色（AlbumTone.text 原样：深场白字、浅场墨字）。
     private var albumText: Color { albumTone.text }
-    /// r38-fix ④-1：专辑次要文字色（AlbumTone.secondaryText 原样）。
+    /// r39-2：专辑次要文字色（AlbumTone.secondaryText 原样）。
     private var albumSecondaryText: Color { albumTone.secondaryText }
 
     /// 清空队列二次确认弹窗。
@@ -49,7 +49,7 @@ struct QueuePanelView: View {
                     Spacer()
                     Text("队列是空的")
                         .font(.system(size: PlayerTokens.textMd))
-                        .foregroundStyle(albumSecondaryText) // r38-fix ④-1：接专辑 tone
+                        .foregroundStyle(albumSecondaryText) // r39-2：接专辑 tone
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -59,7 +59,7 @@ struct QueuePanelView: View {
                         VStack(spacing: 0) {
                             QueueRowView(item: item, isCurrent: index == store.currentIndex,
                                          isPlayNext: store.isPlayNext(queueId: item.queueId),
-                                         albumTone: albumTone) // r38-fix ④-1：行接专辑 tone
+                                         albumTone: albumTone) // r39-2：行接专辑 tone
                                 .onTapGesture { store.play(queueItem: item) }
                             Divider()
                                 .background(Color.white.opacity(0.08))
@@ -124,14 +124,14 @@ struct QueuePanelView: View {
 
                 Text("共 \(store.queue.count) 首")
                     .font(.system(size: PlayerTokens.textXs))
-                    .foregroundStyle(albumSecondaryText) // r38-fix ④-1：接专辑 tone
+                    .foregroundStyle(albumSecondaryText) // r39-2：接专辑 tone
 
                 // r31：待播的下一首有几首（插进去的歌在面板里看得见：行上有
                 // 「下一首」徽章，这里再给一个总数；为 0 时不显示，不占地方）。
                 if store.playNextQueueIds.count > 0 {
                     Text("· 下一首 \(store.playNextQueueIds.count) 首")
                         .font(.system(size: PlayerTokens.textXs, weight: .medium))
-                        .foregroundStyle(albumAccent) // r38-fix ④-1：接专辑 tone
+                        .foregroundStyle(albumAccent) // r39-2：接专辑 tone
                 }
             }
 
@@ -139,7 +139,7 @@ struct QueuePanelView: View {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(albumText) // r38-fix ④-1：接专辑 tone
+                        .foregroundStyle(albumText) // r39-2：接专辑 tone
                         .frame(width: 26, height: 26)
                         .background(Color.white.opacity(0.14), in: Circle())
                 }
@@ -160,12 +160,12 @@ struct QueueRowView: View {
     let item: QueueItem
     let isCurrent: Bool
     let isPlayNext: Bool
-    /// r38-fix ④-1：专辑 tone（QueuePanelView 的 albumTone 直传；默认 fallback 深场）。
+    /// r39-2：专辑 tone（QueuePanelView 的 albumTone 直传；默认 fallback 深场）。
     var albumTone: AlbumTone = .fallback
 
-    /// r38-fix ④-1：专辑强调色——PlayerView albumAccent 同款：深场取 c、浅场取 a。
+    /// r39-2：专辑强调色——PlayerView albumAccent 同款：深场取 c、浅场取 a。
     private var albumAccent: Color { albumTone.isDark ? albumTone.c : albumTone.a }
-    /// r38-fix ④-1：专辑文字色 / 次要文字色（AlbumTone.text / secondaryText 原样）。
+    /// r39-2：专辑文字色 / 次要文字色（AlbumTone.text / secondaryText 原样）。
     private var albumText: Color { albumTone.text }
     private var albumSecondaryText: Color { albumTone.secondaryText }
 
@@ -178,11 +178,11 @@ struct QueueRowView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.track.title.isEmpty ? "未知标题" : item.track.title)
                     .font(.system(size: PlayerTokens.textMd, weight: isCurrent ? .semibold : .regular))
-                    .foregroundStyle(isCurrent ? albumAccent : albumText) // r38-fix ④-1
+                    .foregroundStyle(isCurrent ? albumAccent : albumText) // r39-2
                     .lineLimit(1)
                 Text(item.track.artist.isEmpty ? item.track.platform : item.track.artist)
                     .font(.system(size: PlayerTokens.textXs))
-                    .foregroundStyle(albumSecondaryText) // r38-fix ④-1
+                    .foregroundStyle(albumSecondaryText) // r39-2
                     .lineLimit(1)
             }
 
@@ -191,22 +191,22 @@ struct QueueRowView: View {
             if isCurrent {
                 Text("正在播放")
                     .font(.system(size: PlayerTokens.textXs, weight: .medium))
-                    .foregroundStyle(albumAccent) // r38-fix ④-1
+                    .foregroundStyle(albumAccent) // r39-2
             } else if isPlayNext {
                 Text("下一首")
                     .font(.system(size: PlayerTokens.textXs, weight: .medium))
-                    .foregroundStyle(albumAccent) // r38-fix ④-1
+                    .foregroundStyle(albumAccent) // r39-2
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
                     .overlay(
                         Capsule()
-                            .stroke(albumAccent.opacity(0.6), lineWidth: 1) // r38-fix ④-1
+                            .stroke(albumAccent.opacity(0.6), lineWidth: 1) // r39-2
                     )
                     .accessibilityLabel("下一首播放 \(item.track.title)")
             } else {
                 Text(PlayerTokens.formatDuration(item.track.durationSeconds))
                     .font(.system(size: PlayerTokens.textXs))
-                    .foregroundStyle(albumSecondaryText) // r38-fix ④-1
+                    .foregroundStyle(albumSecondaryText) // r39-2
                     .monospacedDigit()
             }
         }

@@ -1302,24 +1302,28 @@ final class PlaybackStore: ObservableObject {
         var lastReason = ""
         switch mode {
         case .automatic:
-            // r31 第三推改顺序（用户长期优先级：官方 → 个人云盘 → LX）：
-            // 云盘腿在 LX 腿之前跑——云盘是用户自己的文件，有就先播它，
-            // 不必等 LX；LX 仍优先于官方腿（Moumusic 自动模式设计）。
-            if let cloud = await cloudLeg(track: track, gen: gen, skips: skips, quality: requested) {
-                return cloud
-            }
-            // LX 优先取请求档、账号只兜底。
-            if let lx = await lxLeg(track: track, gen: gen, skips: skips, quality: requested) {
-                return await upgradeIfLower(lx, requested: requested) {
-                    // 酷狗已知非会员不走官方腿：LX 档位低也不向官方腿要高档。
-                    guard !kugouNonMemberLXOnly else { return nil }
-                    return await self.platformLeg(track: track, gen: gen, skips: skips, quality: requested)
-                }
-            }
+            // r32：用户长期优先级官方 → 云盘 → LX（用户 09:22 定）：
+            // 官方腿先，拿到且档位低于请求档时升级，升级闭包先问云盘
+            // 再问 LX（照 .official 分支同款写法）；再云盘腿；最后 LX 腿。
+            // 酷狗已知非会员不走官方腿（分流原样保留），云盘是用户自己
+            // 的文件，不随会员分流。
             if !kugouNonMemberLXOnly,
                let platform = await platformLeg(track: track, gen: gen, skips: skips, quality: requested) {
                 lastReason = platform.reason
-                if platform.url != nil { return platform }
+                if platform.url != nil {
+                    return await upgradeIfLower(platform, requested: requested) {
+                        if let cloud = await self.cloudLeg(track: track, gen: gen, skips: skips, quality: requested) {
+                            return cloud
+                        }
+                        return await self.lxLeg(track: track, gen: gen, skips: skips, quality: requested)
+                    }
+                }
+            }
+            if let cloud = await cloudLeg(track: track, gen: gen, skips: skips, quality: requested) {
+                return cloud
+            }
+            if let lx = await lxLeg(track: track, gen: gen, skips: skips, quality: requested) {
+                return lx
             }
         case .official:
             // 账号腿先（平台 → 云盘），拿不到时走 LX。

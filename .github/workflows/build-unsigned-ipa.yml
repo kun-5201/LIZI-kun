@@ -163,7 +163,7 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c "Print CFBundleURLTypes:0:CFBundleURLSchemes:0" "$APP_PATH/Info.plist")" = "lizinative" || { echo "::error::native URL scheme is not lizinative"; exit 1; }
           echo "--- r35-11: island re-added — native must embed exactly LiziNativeIsland.appex (r28 removal superseded) ---"
           test -d "$APP_PATH/PlugIns/LiziNativeIsland.appex" || { echo "::error::LiziNativeIsland.appex missing in native app bundle"; exit 1; }
-          test "$(ls "$APP_PATH"/PlugIns/*.appex | wc -l | tr -d ' ')" = "1" || { echo "::error::native app must embed exactly one .appex (LiziNativeIsland)"; exit 1; }
+          test "$(ls -d "$APP_PATH"/PlugIns/*.appex | wc -l | tr -d ' ')" = "1" || { echo "::error::native app must embed exactly one .appex (LiziNativeIsland)"; exit 1; }
           echo "--- structured resources must be present (r19 lesson: XcodeGen flattens resources dirs) ---"
           test -f "$APP_PATH/stages/001-particle-lyrics.html" || { echo "::error::stages/ missing in native app bundle"; exit 1; }
           test -f "$APP_PATH/GalleryHTML/forms-labs/index.html" || { echo "::error::GalleryHTML/forms-labs/index.html missing"; exit 1; }

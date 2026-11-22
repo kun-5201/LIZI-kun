@@ -1006,13 +1006,13 @@ struct HomeView: View {
             if !viewModel.rankBoards.isEmpty {
                 HomeCoverRingView(
                     model: railRingModel,
-                    cards: rankCards.map(\.ringCard),
                     marqueeSpeed: viewModel.marqSpeedPxPerSecond,
                     tier: tier,
                     panelIsDark: isDark,
                     coverOnly: true,
                     screenWidth: screenWidth, // r39-5：第 5 件——实测屏宽，环几何按它算
-                    screenHeight: screenHeight // r43-1：第 1 件——实测屏高，判横竖屏用
+                    screenHeight: screenHeight, // r43-1：第 1 件——实测屏高，判横竖屏用
+                    cards: rankCards.map(\.ringCard) // r43-2：第 2 件（成员初始化器顺序：cards 是末位存储属性，调用点必须放最后；run 45011589996 编译修）
                 )
             } else if viewModel.rankSpinnerVisible {
                 // 250ms 后仍在加载：spinner（与 rail 各栏 loadingView 同款
@@ -1377,13 +1377,13 @@ struct HomeView: View {
                     // 「查看全部」一律不动，环只换掉原来那条 RailMarqueeView）。
                     HomeCoverRingView(
                         model: ringModel,
-                        cards: openedTrackCards.map(\.ringCard),
                         marqueeSpeed: viewModel.marqSpeedPxPerSecond,
                         tier: tier,
                         panelIsDark: isDark,
                         coverOnly: true,
                         screenWidth: screenWidth, // r39-5：第 5 件——实测屏宽，环几何按它算
-                        screenHeight: screenHeight // r43-1：第 1 件——实测屏高，判横竖屏用
+                        screenHeight: screenHeight, // r43-1：第 1 件——实测屏高，判横竖屏用
+                        cards: openedTrackCards.map(\.ringCard) // r43-2：第 2 件（成员初始化器顺序：cards 是末位存储属性，调用点必须放最后；run 45011589996 编译修）
                     )
                     Spacer(minLength: 0)
                     openedViewAllButton
@@ -1454,13 +1454,13 @@ struct HomeView: View {
                 // 专辑面板内打开 / 电台进详情）原样透传；「查看全部」不动）。
                 HomeCoverRingView(
                     model: ringModel,
-                    cards: cards.map(\.ringCard),
                     marqueeSpeed: viewModel.marqSpeedPxPerSecond,
                     tier: tier,
                     panelIsDark: isDark,
                     coverOnly: true,
                     screenWidth: screenWidth, // r39-5：第 5 件——实测屏宽，环几何按它算
-                    screenHeight: screenHeight // r43-1：第 1 件——实测屏高，判横竖屏用
+                    screenHeight: screenHeight, // r43-1：第 1 件——实测屏高，判横竖屏用
+                    cards: cards.map(\.ringCard) // r43-2：第 2 件（成员初始化器顺序：cards 是末位存储属性，调用点必须放最后；run 45011589996 编译修）
                 )
                 Spacer(minLength: 0)
                 viewAllButton(total: total)

@@ -274,7 +274,7 @@ struct StageView: View {
                 .frame(maxWidth: .infinity)
 
             // 设置按钮：只有形态声明了 __stagePanel 才显示（壳版同款显隐规则；
-            // 87 个已收录形态全有声明，所以实际常驻）。
+            // 86 个已收录形态全有声明，所以实际常驻）。
             if bridge.panelSpec != nil {
                 circleButton(tokens: tokens, systemName: "gearshape", label: "本形态设置") {
                     toggleSettings()

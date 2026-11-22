@@ -46,7 +46,7 @@ final class StageBridge: NSObject, ObservableObject {
     /// r31：相机形态不再有任何别的特殊——胶囊不再默认收起、「显示控制」
     /// 药丸已删（用户 06:18），控制行与唤醒方式与其它形态一致。
     @Published private(set) var isCamera = false
-    /// 当前形态声明的设置面板（`window.__stagePanel`；已收录形态全有声明，r31 时 86 个、r41 起 87 个；
+    /// 当前形态声明的设置面板（`window.__stagePanel`；r31 起 86 个已收录形态
     /// 全有声明，359 在 r31 补了 shake 面板，此前是唯一没有的）。
     @Published private(set) var panelSpec: StagePanelSpec?
     /// HUD 是否可见（壳版 `stage-hud` 的 `is-idle` 反状态：2.6 秒无操作自动藏起）。

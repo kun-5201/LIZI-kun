@@ -242,6 +242,61 @@ body{font-family:"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft
   .meta{display:none}
   .glass{display:none}
 }
+
+/* ================= 横屏：手机横放放大（r52-4） ================= */
+/* 横屏不再是竖着的小手机（旧 k 下 874×402 只有约 152×329pt）：手机横过来，
+   机身换向为 844×390 贴满横屏，屏幕内容按横屏 iMessage 重排——状态栏在上、
+   导航与会话头同一行、气泡左右交替、语音条 + 输入框在底；灵动岛竖在
+   左侧边中部。竖屏一字不动（竖屏仍走上面 @media (max-aspect-ratio: 9/10)
+   那套）；.ls 由 fit() 按 W/H < 0.9 挂/摘，横屏挂、竖屏摘。 */
+.ls .anchor{left:50%;top:50%}
+.ls .halo{display:none}
+.ls .tilt{transform:none}   /* 基础机位是平的；运镜仍走 JS 内联 transform（applyShot），与竖屏同款写法 */
+.ls .float{animation:none}
+.ls .layers{display:none}
+.ls .meta{display:none}
+.ls .glass{display:none}
+.ls .phone{width:844px;height:390px;border-radius:44px;box-shadow:none}
+.ls .screen{inset:5px;border-radius:38px;display:grid;
+  grid-template-columns:1fr auto 1fr;
+  grid-template-rows:auto auto 1fr auto auto}
+/* 状态栏：整行置顶（时间左、信号右）；岛已挪到左侧边，不用给岛让位 */
+.ls .sbar{grid-column:1 / -1;grid-row:1;height:34px;padding:0 20px}
+.ls .sbar__t{font-size:13px}
+/* 导航在左列，会话头在中列（1fr auto 1fr，中列居中） */
+.ls .nav{grid-column:1;grid-row:2;align-self:center;height:40px}
+.ls .nav__n{font-size:14px}
+.ls .hd{grid-column:2;grid-row:2;display:grid;
+  grid-template-columns:auto auto;grid-template-rows:auto auto;
+  align-items:center;column-gap:10px;padding:0}
+.ls .hd__av{grid-column:1;grid-row:1 / span 2;width:40px;height:40px;flex:none}
+.ls .hd__av b{font-size:15px}
+.ls .hd__n{grid-column:2;grid-row:1;font-size:17px;max-width:420px;text-align:left}
+.ls .hd__s{grid-column:2;grid-row:2;font-size:11px;text-align:left}
+/* 对话区占满中段；语音条 + 输入框各占底下一行；home 条横屏不要 */
+.ls .chat{grid-column:1 / -1;grid-row:3}
+/* 左气泡/输入指示右移 56px：岛竖在左侧边（收起 6..42px、展开 6..66px），
+   左气泡仍从 12px 起会被岛盖住头几个字；56px 起，文字从 70px 起，
+   展开时也不盖字（尾巴尖 51px 只在展开 2 秒里轻擦岛边）。 */
+.ls .bub.l{left:56px}
+.ls .typing.l{left:56px}
+.ls .rec{grid-column:1 / -1;grid-row:4;padding:2px 12px 6px}
+.ls .bar{grid-column:1 / -1;grid-row:5;height:44px;padding:0 12px 4px}
+.ls .bar__in{height:29px}
+.ls .bar__p,.ls .bar__m{width:28px;height:28px}
+.ls .home{display:none}
+/* 灵动岛：左侧边中部竖着（与竖屏顶中横着同一只岛，只换向；开合动画照常） */
+.ls .island{top:50%;left:6px;transform:translateY(-50%);
+  width:36px;height:124px;flex-direction:column;padding:10px 0;gap:8px;border-radius:18px}
+.ls .island.open{width:60px;height:212px;padding:12px 0;gap:9px;border-radius:20px}
+.ls .island__art{width:16px;height:16px}
+.ls .island.open .island__art{width:34px;height:34px;border-radius:9px}
+.ls .island.open .island__art b{font-size:14px}
+.ls .island__meta{flex:1 1 0;min-height:0;align-items:center}
+.ls .island__n,.ls .island__a{writing-mode:vertical-rl;white-space:nowrap}
+.ls .island__wave{height:11px}
+.ls .island.open .island__wave{height:17px}
+
 @media (prefers-reduced-motion: reduce){
   .phone{animation:none}
   .rec__w i{transition:none}
@@ -482,17 +537,29 @@ function fit(){
   PORTRAIT = portrait;
   var k;
   if (portrait){
+    /* r52-4：竖屏分支一字不动；只摘掉横屏布局类（转回竖屏时恢复竖屏
+       原样——类不摘，竖屏会一直套着横屏布局）。 */
+    root.classList.remove('ls');
     k = Math.min(W / 390, H / 844);
     root.style.setProperty('--k', String(k));
     K = k;
     SMAX = 1;
   } else {
-    /* 基础机位留白，给运镜留出推近的余量 */
-    k = Math.min((H * 0.82) / 844, (W * 0.46) / 390, 1.26);
+    /* r52-4：手机横过来放大贴满横屏——机身换向为 844×390（宽/高对调），
+       k 按换向后的尺寸重算：874×402 下 k≈1.03，手机 870×402 贴满；
+       SE 横屏 667×375 下 k≈0.79，手机 667×308 贴满宽（高 82%，机身
+       宽高比 2.16 比视口 1.78 宽，贴满高就得裁掉气泡两侧，宁可上下
+       留黑边也不裁内容）；桌面大屏仍封顶 1.26。
+       运镜 SMAX 同步按换向后的几何重算（meta 已藏，不再留 0.84 的
+       左侧余量）：874×402 与 SE 下 SMAX 都是 1.0，镜头缩放钳到 1.0
+       （见 applyShot），手机贴满后不再推近裁词；rx/ry/rz/ox/py 的
+       运镜照常。 */
+    root.classList.add('ls');
+    k = Math.min(W / 844, H / 390, 1.26);
     root.style.setProperty('--k', String(k));
     K = k;
-    anchor.style.left = W > 1180 ? '62%' : '56%';
-    SMAX = Math.min(1.40, (H * 1.00) / (844 * k), (W * 0.84) / (390 * k));
+    anchor.style.left = '50%';
+    SMAX = Math.min(1.40, H / (390 * k), W / (844 * k));
   }
   buildLayers();   /* 机身挤层随 K 重建（安卓按实际缩放自适应层距） */
 
@@ -504,10 +571,19 @@ function fit(){
   root.style.setProperty('--bw', TW + 'px');
   if (changed) layout();
 
+  /* r52-4（转屏丢词修法 1）：转屏后强制全量重画，不依赖 frame() 的换句
+     检测——layout() 会清掉全部气泡 + curIdx=-2，旧链路只靠下一帧
+     i!==curIdx 时的 setIdx 重画，中间尺寸算出的机位还可能把气泡框
+     在裁切外面。只在横屏做：竖屏没有运镜、手机满屏，气泡一定可见，
+     竖屏一字不动。 */
+  if (changed && !portrait) repaintCurrent();
+
   /* 运镜要用的两个基准 */
   try {
     chatTopLocal = 6 + chat.offsetTop;
-    anchorPx = (W > 1180 ? 0.62 : 0.56) * W;
+    /* r52-4：横过来后手机居中（锚点 50%）；竖屏沿用旧值（PORTRAIT 时
+       anchorPx 不被运镜用，applyShot 竖屏直接清镜头）。 */
+    anchorPx = portrait ? (W > 1180 ? 0.62 : 0.56) * W : 0.5 * W;
   } catch(e){}
 }
 
@@ -622,6 +698,14 @@ function layout(){
 function fadeFor(j){
   if (curIdx < 0) return 1;
   return clamp(1 - Math.abs(j - curIdx) * 0.10, 0.44, 1);
+}
+
+/* r52-4：按当前播放时间 S.t 重算当前句并全量重画（setIdx → paintWindow +
+   applyShot）。转屏/尺寸变化后调用，不等下一帧的换句检测；无当前句时
+   什么都不做。 */
+function repaintCurrent(){
+  var i = idxAt(S.t);
+  if (i >= 0) setIdx(i);
 }
 
 function makeBubble(i){
@@ -797,6 +881,36 @@ function rezoom(){
   if (curIdx >= 0) applyShot(curIdx, true);
 }
 
+/* r52-4（转屏丢词修法 2）：转屏停稳后的自检——只跑一次，不循环。
+   查当前句气泡在不在 DOM 里、在不在可视裁切里；不在就再跑一次
+   layout()+setIdx()+applyShot（rezoom）。中途机位过渡中的误判也只会
+   触发一次等幂重断言（同一目标机位，不循环、不抖动）。 */
+function rotationSelfCheck(){
+  if (PORTRAIT) return;
+  var i = idxAt(S.t);
+  if (i < 0) return;
+  var b = bubbles[i];
+  var ok = false;
+  if (b && b.el && b.el.parentNode){
+    try {
+      var br = b.el.getBoundingClientRect();
+      var cr = chat.getBoundingClientRect();
+      /* 与对话区裁切求交（各边 20px 容差：机位过渡中途的位置也算过，
+         免得过渡中误判又重断言一次）；气泡在 DOM 里但完全在裁切外
+         = 丢词，才恢复。 */
+      ok = br.width > 0 && br.height > 0 &&
+        br.right > cr.left - 20 && br.left < cr.right + 20 &&
+        br.bottom > cr.top - 20 && br.top < cr.bottom + 20;
+    } catch(e){ ok = false; }
+  }
+  if (!ok){
+    layout();
+    var j = idxAt(S.t);
+    if (j >= 0) setIdx(j);
+    rezoom();
+  }
+}
+
 function applyShot(i, force){
   if (RM || !tiltEl) return;
   if (i < 0) return;
@@ -824,12 +938,17 @@ function applyShot(i, force){
   ease = same ? 'cubic-bezier(.33,.7,.3,1)' : sh.e;
 
   var s = sh.s;
+  /* r52-4：横过来后手机已贴满屏，镜头不能再推近裁词——s 钳到 SMAX
+     （874×402 与 SE 下 SMAX 都是 1.0；桌面大屏按余量算到 1.35）。
+     SMAX 此前只算不用（死变量），现在正式当钳制用；rx/ry/rz/ox/py
+     的运镜照常，手机只轻微倾斜/平移，不裁歌词。 */
+  if (s > SMAX) s = SMAX;
   var W = innerWidth || 1440, H = innerHeight || 900;
 
   /* 这句话在手机本地坐标里的中心 —— 镜头就是奔它去的 */
   var bh = (hgt[i] > 0) ? hgt[i] : 44;
   var by = chatTopLocal + threadTY + (offs[i] || 0) + bh * 0.5;
-  var dy = by - 422;                       /* 相对手机中心（844/2） */
+  var dy = by - 195;                       /* r52-4：横过来后手机本地高 390，中心 195（原 844/2=422） */
 
   /* 固定视角：机位真的不动，手机居中摆好，不跟歌词晃 */
   if (P.mode === 'hold'){
@@ -1398,15 +1517,25 @@ function freeDepthUpdate(force){
 
 fit();
 var resizeTimer = null;   /* r49：旋转防抖计时器 */
+var rotateCheckTimer = null; /* r52-4：转屏后自检计时器（只跑一次，不循环） */
 addEventListener("resize", function(){
   fit();
   if (grainDone){ grainDone = false; grain(); }
-  /* r49：150ms 防抖，停稳后横屏重算一次运镜；竖屏不调（竖屏 applyShot 本就会清镜头） */
+  /* r52-4：转屏停稳（resize 停 200ms，r49 的 150ms 改 200ms）后，用最终
+     视口尺寸重读 chatTopLocal/anchorPx（fit() 已重算），再重算一次机位
+     （rezoom），不要拿转屏中间尺寸的结果将就；竖屏不调（竖屏 applyShot
+     本就会清镜头）。停稳 300ms 后再自检一次当前句气泡在不在可视裁切里，
+     不在就重画 + 重算机位一次（只跑一次，不循环）。 */
   if (resizeTimer) clearTimeout(resizeTimer);
+  if (rotateCheckTimer) clearTimeout(rotateCheckTimer);
   resizeTimer = setTimeout(function(){
     resizeTimer = null;
     if (!PORTRAIT && curIdx >= 0) rezoom();
-  }, 150);
+    rotateCheckTimer = setTimeout(function(){
+      rotateCheckTimer = null;
+      rotationSelfCheck();
+    }, 100);   /* 停稳 200ms + 100ms = 转屏停稳 300ms 后查 */
+  }, 200);
 });
 addEventListener("load", function(){ fit(); setTimeout(grain, 220); });
 setTimeout(grain, 900);

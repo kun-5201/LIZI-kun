@@ -1135,6 +1135,8 @@ final class HomeCoverRingModel: ObservableObject {
     /// r44（第 3 件）：pitch 1.40 + R 除数 0.42 后竖屏 step 仍 51.4°
     /// （360/n 分支，n=7），横屏约 23.3°（asin 分支，10 首）——
     /// D 不再是旧 100pt，见 ringPitch。
+    /// r52-2：第 2 件——横屏 R 封顶 320 后 step 回 360/n 分支 51.4°
+    /// （与竖屏同），旧 23.3° 作废。
     var ringStep: CGFloat {
         guard ringBasisWidth > 0, ringSlotCount > 0 else { return 40 } // r46-1：第 1 件——守卫改走真屏基准（与 ringCard/ringRadius 同源）
         let asinDeg = 2 * asin(min(max(ringPitch / (2 * ringRadius), -1), 1)) * 180 / .pi
@@ -1156,6 +1158,25 @@ final class HomeCoverRingModel: ObservableObject {
         min(max((2 * .pi * ringRadius / ringPitch).rounded(), 7), 64)
     }
 
+    /// 横屏圆柱半径封顶（r52-2：第 2 件——横屏扁平的根因就是 R：
+    /// R 随屏宽放大近 3 倍（255→751）、pitch 只放大 1.34 倍，asin 分支
+    /// 从竖屏 52.2° 跌到横屏 23.1°，facing/压暗/深度缩放/卡内透视
+    /// 四个立体感线索全塌（审计实测：facing 0.92、压暗 0.010、深度
+    /// 0.976、卡内透视 0.109、可见 9 张、每像素 0.111°/px）。
+    /// 三选一验算结论（见 verification/r52.cjs §B）：(a) 只抬 step 下限
+    /// 到 40°——R 仍是 751，相邻卡投影间距 450pt，中心卡在 437pt、
+    /// 相邻卡中心到 887pt 已出屏（874），环看着是空的，否决；(c) 只
+    /// 让 P 不跟 R 放大——只修好卡内透视（0.109→0.32）与一点深度缩放，
+    /// facing/压暗/可见张数/每像素全不动，否决；(b) 封顶 R——R 一小，
+    /// cap 回 7、step 回 360/n 分支 51.4°、P=3.2R 回 1024、每像素回
+    /// 0.260°/px，四个线索全回竖屏值。封顶值 320 的取法：与竖屏逐项
+    /// 对齐——step 51.4°、facing 0.623、压暗 0.068、深度 0.895、可见
+    /// 5 张与竖屏全同；卡内透视 0.255（竖屏 0.252）、卡间距 56pt
+    /// （竖屏 54pt）最贴；每像素 0.260°/px 是竖屏 0.326 的八成、
+    /// 是现横屏 0.111 的 2.3 倍。只在横屏封顶，竖屏 R=255 一字不动；
+    /// 横屏卡宽 215pt 不动。
+    static let landscapeRadiusCap: CGFloat = 320
+
     /// 圆柱半径（r39-5：第 5 件——壳版 openRing 原式 R = max(Rview, cardW×0.8)，
     /// Rview = (vw/2 − edgePad − cardW/2) / 0.42，edgePad = 14；
     /// r44 第 3 件：除数 0.762→0.42，与 ringPitch 1.40 联动——竖屏 R≈255pt、
@@ -1166,12 +1187,17 @@ final class HomeCoverRingModel: ObservableObject {
     /// 改 R 不影响拖动速度。
     /// r46-1：第 1 件——半径按真屏宽：横屏 R = (874/2−14−215/2)/0.42 ≈ 751pt
     /// （旧 geo 下约 645pt 作废），竖屏 R≈255pt 不动。
+    /// r52-2：第 2 件——横屏封顶 320pt（见 landscapeRadiusCap），751 是封顶前的值。
     /// 没传屏宽时回落旧弦长公式（r35：pitch 换回卡宽×1.14 后标准档
     /// 169.86/(2·sin20°) ≈ 248pt，compact ≈ 235pt，large ≈ 273pt）。
     var ringRadius: CGFloat {
         if ringBasisWidth > 0 { // r46-1：第 1 件——半径按真屏宽
             let rView = (ringBasisWidth / 2 - 14 - ringCard / 2) / 0.42 // r44：第 3 件——0.762→0.42
-            return max(rView, ringCard * 0.8)
+            let r = max(rView, ringCard * 0.8)
+            // r52-2：第 2 件——横屏封顶 320pt（见 landscapeRadiusCap 注释）；
+            // 竖屏原值不动。isLandscapeScreen 不读 ringRadius，不成环。
+            if isLandscapeScreen { return min(r, Self.landscapeRadiusCap) }
+            return r
         }
         return ringPitch / (2 * sin(ringStep * .pi / 360))
     }
@@ -2814,6 +2840,13 @@ struct HomeRingOverlayView: View {
             let ringCy = model.ringCenterY(screenHeight: geo.size.height) // r51（D5）：topEdge 实参随参数删除
             let ringCx = model.panelRect(screenWidth: geo.size.width) // r51（D5）：halfWidth 已删，panelRect 现直接返回中心 x
             ZStack {
+                // r52-1：第 4 件——透明度只盖视觉层（压暗 + 环卡 + 提示），
+                // 触摸层不跟透明度走：SwiftUI .opacity 会把宿主 UIView 的
+                // alpha 一并压下去，UIKit 点按命中会跳过 alpha < 0.01 的视图，
+                // 收回期（.closing 430ms）末尾约 100ms 里点按会穿过覆盖层
+                // 落到下面的带子/页面上、点卡无反应；触摸层全程满透明度，
+                // 收回期点按一直通到覆盖层卸载（phase=.closed）。
+                ZStack {
                 // 全屏径向变暗（r31：中心跟环走，不再是固定 50% / 48%；
                 // 三档 0.36/0.58/0.78 与半径不动）。
                 // r36-8，第 1 条：压暗层在环卡带上开洞（见 scrimHoleMask）——
@@ -2861,6 +2894,9 @@ struct HomeRingOverlayView: View {
                     .foregroundColor(.white.opacity(0.74))
                     .shadow(color: .black.opacity(0.5), radius: 8, x: 0, y: 1)
                     .position(x: geo.size.width / 2, y: geo.size.height * 0.94)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .opacity(model.overlayOpacity)
                 // r24：触摸层（RingTouchView，UIKit，文件尾）盖在最上层——
                 // 整块覆盖层的触摸都归它：拖动转环、点卡播歌、点空白收回、
                 // 下滑退出（ring.js onOverlayDown + window pointer 监听同款）。
@@ -2879,7 +2915,6 @@ struct HomeRingOverlayView: View {
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .contentShape(Rectangle())
-            .opacity(model.overlayOpacity)
         }
         .ignoresSafeArea()
         // r51：第 1 件——弹簧吸附阶段的带子同步已拆（r33 联动的 onChange(of: angle)
@@ -3063,6 +3098,11 @@ final class StripTouchUIView: UIView, UIGestureRecognizerDelegate {
     weak var model: HomeCoverRingModel?
     var onTapCard: ((Int) -> Void)?
 
+    /// r52-1：第 7 件——本次触摸落指点的 x（touchesBegan 记；handleTap
+    /// 用它先命中，见下）。初值取极大值：万一 touchesBegan 没跑过，
+    /// isTapOnFlatCard(极大值) 必不中，自动回落到抬手点，不误播。
+    private var startX: CGFloat = .greatestFiniteMagnitude
+
     private lazy var pan: UIPanGestureRecognizer = {
         let recognizer = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         recognizer.delegate = self
@@ -3116,6 +3156,15 @@ final class StripTouchUIView: UIView, UIGestureRecognizerDelegate {
 
     // MARK: 手势回调
 
+    /// r52-1：第 7 件——记落指点 x（handleTap 先按它命中；带子 24px/s 在走，
+    /// 落指与抬手之间卡已移位，抬手点可能已不在落指那张卡上）。
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesBegan(touches, with: event)
+        if let touch = touches.first {
+            startX = touch.location(in: self).x
+        }
+    }
+
     @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
         guard let model else { return }
         let location = recognizer.location(in: self)
@@ -3167,10 +3216,16 @@ final class StripTouchUIView: UIView, UIGestureRecognizerDelegate {
     @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
         guard let model, recognizer.state == .ended else { return }
         let location = recognizer.location(in: self)
+        // r52-1：第 7 件——带子 24px/s 在走，落指与抬手之间卡已移位：
+        // 先按落指点（startX）命中，落指点在卡上就播那张（用户的本意）；
+        // 落指点在卡缝/空白时再试抬手点（带子滚过来一张卡，正好落在手指下）。
         // r33，第 4/11 件：点按必须落在卡上才播（见 isTapOnFlatCard）——
-        // 卡缝/空白处的点按直接丢弃，不按最近卡播歌。
-        guard model.isTapOnFlatCard(x: location.x) else { return }
-        onTapCard?(model.anchorNearestFlatCard(x: location.x))
+        // 卡缝/空白处的点按直接丢弃，不按最近卡播歌。两路都走同一校验。
+        if model.isTapOnFlatCard(x: startX) {
+            onTapCard?(model.anchorNearestFlatCard(x: startX))
+        } else if model.isTapOnFlatCard(x: location.x) {
+            onTapCard?(model.anchorNearestFlatCard(x: location.x))
+        }
     }
 }
 
@@ -3281,6 +3336,38 @@ final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
         model?.ringTouchBegan()
     }
 
+    /// r52-1：晃动点按兜底（.ended 与 .failed 共用；r48-4 原逻辑改位）：
+    /// pan 认出来了、tap 的 require(toFail: pan) 不触发——右滑后手指再落
+    /// 下来点卡，轻微一晃整下点按就被拖动手势吞掉（与 r46-7 修的「没拖起
+    /// 来」是同一类丢点按、不同分支：那处只覆盖 dragStarted == false，
+    /// 这里覆盖拖起来了但只是一晃）。晃动小且环基本没转（<1/4 槽）时试
+    /// 一次点卡；真拖动（位移大/转过槽）时不试，拖动就是拖动。
+    /// 两处改动（r48-4 旧写法各有一处丢点按）：
+    /// ① 松手前一刻的角先记下来再调 ringDragEnded——ringDragEnded 会把角
+    /// 钉到目标槽位（吸附分支 angle = targetAngle），判角时读它之后的角，
+    /// 晃动刚好落在槽位边界附近时角跳变超过 1/4 槽、点按被静默丢掉。
+    /// 实算：吸附分支只在角与目标槽位差 <1e-6° 时才同步改角，真实晃动
+    /// 到不了（0.25 槽容限竖屏 12.9°≈39px、横屏 5.8°≈52px，都比 20pt
+    /// 门宽），本条是消除「读后改」的隐患，不是已坐实的 live 根因。
+    /// ② 命中先按落指点（startX/startY，用户本意），手指晃了 <20pt 时
+    /// 松手点可能已离开卡面（侧卡投影后很窄），落指点明明在卡上；落指点
+    /// 不中再试松手点。
+    private func attemptWobbleTap(releasePoint: CGPoint) {
+        guard let model else { return }
+        let wobble = hypot(releasePoint.x - startX, releasePoint.y - startY) < 20
+        let angleBeforeRelease = model.angle
+        let angleBefore = model.ringStartAngle
+        model.ringDragEnded()
+        guard wobble, abs(angleBeforeRelease - angleBefore) < model.ringStep * 0.25,
+              (model.ringPhase == .open || model.ringPhase == .closing) else { return }
+        let startPoint = CGPoint(x: startX, y: startY)
+        if let idx = model.hitTestRingCard(at: startPoint, screenWidth: bounds.width, screenHeight: bounds.height) { // r51（D5）：topEdge 实参随参数删除
+            onTapCard?(idx)
+        } else if let idx = model.hitTestRingCard(at: releasePoint, screenWidth: bounds.width, screenHeight: bounds.height) { // r51（D5）：topEdge 实参随参数删除
+            onTapCard?(idx)
+        }
+    }
+
     @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
         guard let model else { return }
         let location = recognizer.location(in: self)
@@ -3306,24 +3393,10 @@ final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
         case .ended, .cancelled:
             if dragStarted {
                 dragStarted = false
-                // r48-4：第 4 件——带一点晃动的点按（>5px 死区、<20pt 晃动）：
-                // pan 认出来了、tap 的 require(toFail: pan) 不触发，旧代码
-                // 只走 ringDragEnded、不试点卡——右滑后手指再落下来点卡，
-                // 轻微一晃整下点按就被拖动手势吞掉（点按事件被拖动手势吞了，
-                // 与 r46-7 修的「没拖起来」是同一类丢点按、不同分支：那
-                // 处只覆盖 dragStarted == false，这里覆盖拖起来了但只是
-                // 一晃）。晃动小且环基本没转（<1/4 槽）时按松手落点试一次
-                // 点卡（与 r46-7 没拖起来分支同款）；真拖动（位移大/转过
-                // 槽）时不试，拖动就是拖动。角用 ringDragEnded 后的当前角
-                // （弹簧还没跑起来，读到的是松手那一刻的角）。
-                let wobble = hypot(location.x - startX, location.y - startY) < 20
-                let angleBefore = model.ringStartAngle
-                model.ringDragEnded()
-                if wobble, abs(model.angle - angleBefore) < model.ringStep * 0.25,
-                   (model.ringPhase == .open || model.ringPhase == .closing),
-                   let idx = model.hitTestRingCard(at: location, screenWidth: bounds.width, screenHeight: bounds.height) { // r51（D5）：topEdge 实参随参数删除
-                    onTapCard?(idx)
-                }
+                // r52-1：晃动点按兜底（见 attemptWobbleTap；与 r46-7 没拖起来
+                // 分支同款语义，都是按落指点命中——那处覆盖 dragStarted == false，
+                // 这里覆盖拖起来了但只是一晃）。
+                attemptWobbleTap(releasePoint: location)
             } else if (model.ringPhase == .open || model.ringPhase == .closing),
                       let idx = model.hitTestRingCard(at: CGPoint(x: startX, y: startY), screenWidth: bounds.width, screenHeight: bounds.height) { // r51（D5）：topEdge 实参随参数删除
                 // r46-7：第 7 件——晃一下就抬手（pan 认出来了、tap 没触发、
@@ -3346,9 +3419,12 @@ final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
             // 不来，dragStarted / ringDragging 双双卡住，换手后新拖动
             // 接不上。没拖起来时什么都不做（手指还按着，环保持开着；
             // 抬手后 tap 会走点卡/点空白那条路）。
+            // r52-1：第 8 件——拖起来了才失败时，旧代码只调 ringDragEnded、
+            // 不试点卡，一次带晃动的正常点按就这么丢了；与 .ended 同款
+            // 走 attemptWobbleTap（落指点先命中）。
             if dragStarted {
                 dragStarted = false
-                model.ringDragEnded()
+                attemptWobbleTap(releasePoint: location)
             }
         default:
             break

@@ -118,6 +118,35 @@ final class PlaybackStore: ObservableObject {
     @Published private(set) var repeatMode: RepeatMode = .off
     /// 随机播放开关。
     @Published private(set) var isShuffled: Bool = false
+
+    // MARK: - r52-3：歌曲定时（传统播放页专用，7 平台通用；纯内存态，
+    /// App 被杀即失效，不写盘）
+    /// - 分钟定时：到墙钟 deadline 自动暂停播放（只暂停，不清队列、
+    ///   不改播放模式）；切歌不重置倒计时；锁屏/切后台也要到点停——
+    ///   deadline 是墙钟值，到点触发不只靠前台 Timer：到点的一次性
+    ///   Task + 0.25s 进度回调（AV）/0.5s 回调（AM）里的 deadline 检查
+    ///   + 回前台检查，三重兜底。
+    /// - 播完当前歌曲：当前这首播完就暂停，不自动进下一首；单曲循环下
+    ///   播完这首也停；手动切歌取消这一种定时（分钟定时不受影响）。
+    enum SleepTimerMode: Equatable {
+        case none
+        case minutes(deadline: Date)
+        case endOfTrack
+    }
+    /// 当前定时模式（UI 顶栏徽章 + 弹层打勾都读它）。
+    @Published private(set) var sleepTimerMode: SleepTimerMode = .none
+    /// 分钟定时选的档位（15/30/60/90/120；弹层打勾用；播完当前歌曲/
+    /// 无定时时为 nil）。
+    @Published private(set) var sleepTimerMinutes: Int?
+    /// 分钟定时剩余秒数（顶栏徽章读它；10s ticker 刷新 + 设定时时立即算一次）。
+    @Published private(set) var sleepTimerRemainingSeconds: TimeInterval = 0
+    /// 到点触发的一次性任务（设定时/取消时取消旧的，只留最新的一个）。
+    private var sleepTimerDeadlineTask: Task<Void, Never>?
+    /// 剩余时间刷新 ticker（只在分钟定时开着时跑，10s 一跳；到点也在这里补查一次）。
+    private var sleepTimerTicker: Timer?
+    /// 设「播完当前歌曲」时那首歌的身份键（platform+id；手动切到另一首时
+    /// 凭它认出「换歌了」才取消；同一首重播/恢复不取消）。
+    private var sleepTimerEndOfTrackKey: String?
     /// 应用内音量（0…1；只对本 App 的 AVPlayer 生效，不动系统音量；
     ///   当次会话有效，不持久化，重启回 1.0）。静音时 player.volume 为 0，
     ///   `volume` 本身保留静音前的档位，取消静音即恢复。
@@ -441,6 +470,9 @@ final class PlaybackStore: ObservableObject {
     /// 把没声的"假在播"接回来；resume() 自己会再调一次 ensureAudioSessionActive，
     /// 已激活时是空操作。没在播（isPlaying false）时不做任何事。
     private func handleDidBecomeActive() {
+        // r52-3：回前台时补查分钟定时（锁屏/切后台期间到点 Task 被节流时，
+        // 这里是兜底；到点就停，不等下一次进度回调）。
+        checkSleepTimerDeadline()
         guard isPlaying else { return }
         ensureAudioSessionActive()
         DiagLog.shared.recordPlaybackStep("app foreground reactivate (was playing)")
@@ -671,6 +703,18 @@ final class PlaybackStore: ObservableObject {
     /// currentIndex 必须已定位好）。代际 + 看门狗 + 起 playCurrent 任务。
     private func startCurrentTrackPlay(auto: Bool = false) {
         guard let track = currentQueueTrack else { return }
+        // r52-3：手动切歌取消「播完当前歌曲」定时（分钟定时不受影响，
+        // 继续走）：自动进下一首（auto=true）时本模式已在 handleTrackEnded
+        // 里触发过，不到这里；同一首重播/恢复（身份键对得上）不取消。
+        // 无歌时设的定时（身份键为空）：下一首起播时认领为当前首，不取消。
+        if !auto, case .endOfTrack = sleepTimerMode {
+            if let key = sleepTimerEndOfTrackKey, key != Self.likeKey(for: track) {
+                sleepTimerMode = .none
+                sleepTimerEndOfTrackKey = nil
+            } else if sleepTimerEndOfTrackKey == nil {
+                sleepTimerEndOfTrackKey = Self.likeKey(for: track)
+            }
+        }
         // r45-4：记下这一代是不是自动进的；手动点播清掉连续跳歌计数
         //（用户主动换歌，之前的连死 streak 不算到新歌头上）。
         currentPlayAuto = auto
@@ -758,6 +802,119 @@ final class PlaybackStore: ObservableObject {
         if isPlaying { pause() } else { resume() }
     }
 
+    // MARK: - r52-3：歌曲定时（方法）
+
+    /// 顶栏徽章文案（nil = 无定时，不画徽章）：分钟定时取剩余分钟数
+    /// （向上取整，剩 89.5 分钟也写 90 分）；播完当前歌曲写「播完」。
+    var sleepTimerBadgeText: String? {
+        switch sleepTimerMode {
+        case .none: return nil
+        case .minutes:
+            let mins = Int(ceil(max(0, sleepTimerRemainingSeconds) / 60))
+            return "\(max(1, mins))分"
+        case .endOfTrack: return "播完"
+        }
+    }
+
+    /// 设定分钟定时（档位 15/30/60/90/120；入参夹到 1…120 防呆）。
+    /// 旧定时（分钟/播完）一律替换；切歌不重置倒计时（deadline 不动）。
+    func setSleepTimer(minutes: Int) {
+        let mins = min(max(minutes, 1), 120)
+        let deadline = Date().addingTimeInterval(TimeInterval(mins * 60))
+        sleepTimerMode = .minutes(deadline: deadline)
+        sleepTimerMinutes = mins
+        sleepTimerRemainingSeconds = TimeInterval(mins * 60)
+        scheduleSleepTimerDeadlineTask(deadline: deadline)
+        startSleepTimerTicker()
+        DiagLog.shared.recordPlaybackStep("sleep timer set \(mins)min")
+    }
+
+    /// 设定「播完当前歌曲」定时（替换掉分钟定时）；记下当前这首的身份键，
+    /// 手动切到另一首时凭它取消（见 startCurrentTrackPlay）。
+    func setSleepTimerEndOfTrack() {
+        sleepTimerDeadlineTask?.cancel()
+        sleepTimerDeadlineTask = nil
+        stopSleepTimerTicker()
+        sleepTimerMode = .endOfTrack
+        sleepTimerMinutes = nil
+        sleepTimerRemainingSeconds = 0
+        if let track = currentTrack {
+            sleepTimerEndOfTrackKey = Self.likeKey(for: track)
+        } else {
+            sleepTimerEndOfTrackKey = nil
+        }
+        DiagLog.shared.recordPlaybackStep("sleep timer set end-of-track")
+    }
+
+    /// 取消定时（分钟/播完都清；不清队列、不改播放模式、不暂停）。
+    func cancelSleepTimer() {
+        sleepTimerMode = .none
+        sleepTimerMinutes = nil
+        sleepTimerRemainingSeconds = 0
+        sleepTimerEndOfTrackKey = nil
+        sleepTimerDeadlineTask?.cancel()
+        sleepTimerDeadlineTask = nil
+        stopSleepTimerTicker()
+    }
+
+    /// 到点：清定时 + 暂停播放（只暂停，不清队列、不改播放模式；
+    /// 已停播时只清定时）。三个触发源共用：到点一次性 Task、进度回调
+    /// 里的 deadline 检查、回前台检查。
+    private func fireSleepTimer() {
+        guard sleepTimerMode != .none else { return }
+        cancelSleepTimer()
+        pause()
+        DiagLog.shared.recordPlaybackStep("sleep timer fired -> paused")
+    }
+
+    /// 进度回调 / 回前台时调：分钟定时到点就触发（到点 Task 被系统
+    /// 节流时这就是兜底；墙钟比较，不靠累计计时）。
+    func checkSleepTimerDeadline() {
+        if case .minutes(let deadline) = sleepTimerMode, Date() >= deadline {
+            fireSleepTimer()
+        }
+    }
+
+    /// 到点一次性任务（墙钟 sleep；App 被杀即失效，符合口径）。
+    /// 旧任务先取消，只留最新的一个；触发时核对 deadline 仍是当前这份
+    /// （中途重设定时后旧任务不触发）。
+    private func scheduleSleepTimerDeadlineTask(deadline: Date) {
+        sleepTimerDeadlineTask?.cancel()
+        let ns = UInt64(max(0, deadline.timeIntervalSinceNow) * 1_000_000_000)
+        sleepTimerDeadlineTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: ns)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                if case .minutes(let d) = self.sleepTimerMode, d == deadline {
+                    self.fireSleepTimer()
+                }
+            }
+        }
+    }
+
+    /// 剩余时间 ticker（10s 一跳；只在分钟定时开着时跑）：刷新徽章用
+    /// 的剩余秒数，到点也在这里补查一次（到点 Task 之外的第二重兜底）。
+    private func startSleepTimerTicker() {
+        stopSleepTimerTicker()
+        sleepTimerTicker = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.sleepTimerTick() }
+        }
+    }
+
+    private func stopSleepTimerTicker() {
+        sleepTimerTicker?.invalidate()
+        sleepTimerTicker = nil
+    }
+
+    private func sleepTimerTick() {
+        if case .minutes(let deadline) = sleepTimerMode {
+            sleepTimerRemainingSeconds = max(0, deadline.timeIntervalSinceNow)
+            if Date() >= deadline { fireSleepTimer() }
+        }
+    }
+
     /// 下一首（r31：有待播的「下一首」时先播它——随机开着也不随机跳过，
     /// 单曲循环播完也先播它；没有待播时走原来的随机 / 顺序 / 全部循环）。
     /// 随机开时随机挑一首不一样的；循环关且到队尾时停。
@@ -794,6 +951,13 @@ final class PlaybackStore: ObservableObject {
     /// r45-4：播完自动进的都传 auto: true（下一首取链 / 播放失败耗尽
     /// 后才跳歌续播，不直接停，见 playCurrent / handlePlaybackFailure）。
     func handleTrackEnded() {
+        // r52-3：播完当前歌曲定时——当前这首播完就暂停，不自动进下一首；
+        // 单曲循环也不重播，待播「下一首」也不先播（定时优先于两者）。
+        if case .endOfTrack = sleepTimerMode {
+            cancelSleepTimer()
+            pause()
+            return
+        }
         if hasPendingPlayNext {
             next(auto: true)
             return
@@ -1263,6 +1427,8 @@ final class PlaybackStore: ObservableObject {
                 }
                 self.progress = time
                 if dur.isFinite, dur > 0 { self.duration = dur }
+                // r52-3：分钟定时到点检查（AM 引擎 0.5s 进度回调里查墙钟 deadline）。
+                self.checkSleepTimerDeadline()
                 // r36：试听疑似记录（只记诊断，不拦播放、不改状态）：
                 // 系统播放器自己按设备订阅决定整首还是 30 秒试听，
                 // play() 回 true 只代表 prepareToPlay 成功。第一次拿到
@@ -2006,6 +2172,9 @@ final class PlaybackStore: ObservableObject {
             let d = item.asset.duration.seconds
             if d.isFinite, d > 0 { duration = d }
         }
+        // r52-3：分钟定时到点检查（0.25s 进度回调里查墙钟 deadline；
+        // 锁屏/切后台播着时 App 活着，回调照常跑，到点就停）。
+        checkSleepTimerDeadline()
         let atMs = Int(seconds * 1000)
         let idx = LyricsParser.currentLineIndex(lines: lyrics, atMs: atMs)
         if idx != currentLyricIndex {

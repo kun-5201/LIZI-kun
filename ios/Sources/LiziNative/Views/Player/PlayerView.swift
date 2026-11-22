@@ -93,6 +93,9 @@ struct PlayerView: View {
     /// 队列面板是否打开：控制行最左列表图标的回调切它（再点一次关上）。
     @State private var showQueue = false
 
+    /// r52-3：歌曲定时弹层是否打开（传统模式专用；舞台页不挂）。
+    @State private var showSleepTimerSheet = false
+
     /// r36：横屏底图专辑取色（首页 AlbumTone 同款，见 HomeView panelTone）：
     /// 当前曲目封面取 5 档色板，stops[2]/[3]/[4] → tone-a/b/c；切歌重算；
     /// 没封面 / 取图失败 / 取色失败 → 默认色（AlbumTone.fallback，深场）。
@@ -133,6 +136,10 @@ struct PlayerView: View {
                     landscapeLayout(geo: geo, tier: tier)
                 } else {
                     portraitLayout(geo: geo, tier: tier)
+                }
+                // r52-3：歌曲定时弹层（传统模式专用；舞台页是另一个分支，不挂）。
+                if showSleepTimerSheet {
+                    sleepTimerOverlay(isLandscape: isLandscape, screenSize: screenSize)
                 }
             }
             .frame(width: screenSize.width, height: screenSize.height, alignment: .topLeading)
@@ -581,6 +588,11 @@ struct PlayerView: View {
             }
             .accessibilityLabel("返回首页")
             Spacer()
+            // r52-3：歌曲定时钮（搜索左边，间距 58pt：钮径 30 + 间隔 28，
+            // 与搜索—舞台间距同款；齿轮仍在最右缘，搜索/舞台位置不动）。
+            sleepTimerTraditionalTopBarButton(diameter: diameter)
+            Spacer()
+                .frame(width: 0.032 * screenWidth)
             traditionalTopBarCircleButton(systemName: "magnifyingglass", diameter: diameter) {
                 // 搜索页走 App 现有的搜索导航路由，不新造（r34 原行为）。
                 navigation.show(.search)
@@ -1050,6 +1062,10 @@ struct PlayerView: View {
             Spacer()
 
             HStack(spacing: 12) {
+                // r52-3：歌曲定时钮（搜索左边，搜索/舞台位置不动——只在旁边加钮；
+                // 齿轮仍在最右缘）。竖屏 Ø38 毛玻璃圆钮同款，见 sleepTimerTopBarButton。
+                sleepTimerTopBarButton(diameter: Self.portraitTopBarButtonDiameter)
+
                 topBarCircleButton(
                     systemName: "magnifyingglass",
                     diameter: Self.portraitTopBarButtonDiameter
@@ -1090,6 +1106,70 @@ struct PlayerView: View {
                 .background(.ultraThinMaterial, in: Circle())
                 .overlay(Circle().stroke(albumText.opacity(0.25), lineWidth: 0.5)) // r39-2：描边同色
         }
+    }
+
+
+    /// 歌曲定时顶栏钮·竖屏（r52-3）：时钟图标圆钮，Ø38 毛玻璃圆钮同款
+    /// （与搜索/舞台同样式）；定时开着时图标染橙 + 底沿挂剩余时间徽章。
+    private func sleepTimerTopBarButton(diameter: CGFloat) -> some View {
+        Button(action: { showSleepTimerSheet = true }) {
+            sleepTimerButtonContent(diameter: diameter, iconColor: albumText)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(albumText.opacity(0.25), lineWidth: 0.5))
+        }
+        .accessibilityLabel("歌曲定时")
+    }
+
+    /// 歌曲定时顶栏钮·横屏传统（r52-3）：时钟图标圆钮，红描边圆钮同款
+    /// （与搜索/舞台同样式，描边与图标走专辑强调色）；徽章同款。
+    private func sleepTimerTraditionalTopBarButton(diameter: CGFloat) -> some View {
+        Button(action: { showSleepTimerSheet = true }) {
+            sleepTimerButtonContent(diameter: diameter, iconColor: albumAccent)
+                .overlay(Circle().stroke(albumAccent, lineWidth: 2))
+        }
+        .accessibilityLabel("歌曲定时")
+    }
+
+    /// 定时钮内容（两款顶栏共用）：时钟图标 + 剩余时间徽章。
+    /// 定时开着时图标染橙；徽章挂在圆钮底沿——分钟定时「28分」、
+    /// 播完当前歌曲「播完」，一眼看得出还剩多久；无定时不画徽章。
+    private func sleepTimerButtonContent(diameter: CGFloat, iconColor: Color) -> some View {
+        ZStack(alignment: .bottom) {
+            Image(systemName: "clock")
+                .font(.system(size: diameter * 0.47, weight: .semibold))
+                .foregroundStyle(store.sleepTimerMode == .none ? iconColor : Color.orange)
+                .frame(width: diameter, height: diameter)
+            if let badge = store.sleepTimerBadgeText {
+                Text(badge)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Color.orange, in: Capsule())
+                    .offset(y: 5)
+            }
+        }
+    }
+
+    /// 歌曲定时弹层容器（r52-3）：遮罩点按关闭；竖屏底部弹层、横屏居中
+    /// 面板（内容见 SleepTimerSheetView）；竖屏横屏共用同一个定时状态，
+    /// 旋转不丢定时、不重置倒计时。
+    private func sleepTimerOverlay(isLandscape: Bool, screenSize: CGSize) -> some View {
+        ZStack {
+            Color.black.opacity(0.4)
+                .onTapGesture { showSleepTimerSheet = false }
+            if isLandscape {
+                SleepTimerSheetView(isLandscape: true) { showSleepTimerSheet = false }
+                    .frame(width: 520)
+            } else {
+                VStack {
+                    Spacer()
+                    SleepTimerSheetView(isLandscape: false) { showSleepTimerSheet = false }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            }
+        }
+        .frame(width: screenSize.width, height: screenSize.height, alignment: .topLeading)
     }
 
 

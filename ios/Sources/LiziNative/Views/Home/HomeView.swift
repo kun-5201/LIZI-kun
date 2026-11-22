@@ -955,10 +955,23 @@ struct HomeView: View {
                 .onChange(of: viewModel.selectedSource) { _ in
                     selectedRankBoard = nil
                     rankDetailTracks = []
+                    // r52-1：第 6 件——切源时旧环覆盖层可滞留约 1 秒（审计 H1）：
+                    // 自动切源（点播/恢复播切到正在播放）时旧模型还开着，
+                    // 它的全屏覆盖层盖在新面板上吃掉点按、对错的模型做命中
+                    // （命中 nil → 点空白关环、不播歌）。切源即关三环，
+                    // 已关的 closeRing 是空操作；点卡播歌那路 tapRingCard
+                    // 已先关环，这里不再重复关一次也无害。
+                    ringModel.closeRing(quick: true)
+                    railRingModel.closeRing(quick: true)
+                    rankSongsRingModel.closeRing(quick: true)
                 }
                 .onChange(of: viewModel.selectedPlatform) { _ in
                     selectedRankBoard = nil
                     rankDetailTracks = []
+                    // r52-1：第 6 件——切平台同款（内容换了，旧环不留）。
+                    ringModel.closeRing(quick: true)
+                    railRingModel.closeRing(quick: true)
+                    rankSongsRingModel.closeRing(quick: true)
                 }
         }
         // r44（第 2 件）：横屏全宽出血时内边距左右加 bleed（内容屏上位置不动），

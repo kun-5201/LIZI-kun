@@ -454,13 +454,18 @@ struct HomeView: View {
         (playback.currentTrack ?? viewModel.lastTrack)?.coverURL
     }
 
-    /// r45-fix：分隔条拖动手势——从 body 里抽出来单独成声明。r45 首轮
+    /// r45-fix：分隔条拖动手势——从 body 里抽出来单独成函数。r45 首轮
     /// 构建时编译器报 HomeView.swift:679 类型检查超时（整条 body 大
     /// 表达式已到临界）；抽出来后 body 与手势各查各的。行为一字未动：
     /// 拖动改 Hero/面板比例、松手即停写当前方向的 key。
+    /// 注意是函数不是计算属性：手势里用的 heroH / minHeroH / maxHeroH /
+    /// contentH / isLandscape 都是 body 里 GeometryReader 的局部量，
+    /// struct 层根本没有，计算属性里会报 cannot find in scope；改成
+    /// 函数、调用时把这五个量传进来，闭包捕获方式与原来在 body 里内联
+    /// 时完全一致——原来也是捕获 body 当次算出的局部 let，不是实时读。
     /// onEnded 里的 UserDefaults.set 也先拆成 let 再传（同款超时点，
     /// 不再把三元表达式直接塞进 set 的参数里）。
-    private var dividerDragGesture: some Gesture {
+    private func dividerDragGesture(heroH: CGFloat, minHeroH: CGFloat, maxHeroH: CGFloat, contentH: CGFloat, isLandscape: Bool) -> some Gesture {
         DragGesture(minimumDistance: 6)
             .onChanged { value in
                 if dragStartHeroH == nil { dragStartHeroH = heroH }
@@ -484,6 +489,25 @@ struct HomeView: View {
                 let keyToSave = isLandscape ? Self.heroFractionLandscapeKey : Self.heroFractionPortraitKey
                 UserDefaults.standard.set(fractionToSave, forKey: keyToSave)
             }
+    }
+
+    /// r45-fix：分隔条无障碍微调动作——与手势同款问题：二轮构建时超时点
+    /// 移到这里（.accessibilityAdjustableAction 的闭包，HomeView.swift:691），
+    /// 说明超时的是整条手柄修饰链、不是某一处 set()，只抽手势不够；
+    /// 这个闭包也抽出来单独成函数。fraction / minFrac / maxFrac /
+    /// isLandscape 同样是 body 局部量，调用时传进来，捕获方式与内联时一致。
+    private func dividerAdjustAction(fraction: CGFloat, minFrac: CGFloat, maxFrac: CGFloat, isLandscape: Bool) -> (AccessibilityAdjustmentDirection) -> Void {
+        { direction in
+            let step: CGFloat = 0.05
+            let next = min(max(fraction + (direction == .increment ? step : -step), minFrac), maxFrac)
+            if isLandscape {
+                heroFractionLandscape = next
+            } else {
+                heroFractionPortrait = next
+            }
+            let keyToSave = isLandscape ? Self.heroFractionLandscapeKey : Self.heroFractionPortraitKey
+            UserDefaults.standard.set(Double(next), forKey: keyToSave)
+        }
     }
 
     var body: some View {
@@ -672,24 +696,12 @@ struct HomeView: View {
                                 // r44（第 4 件）：手柄跟 live 间隙走；横屏全屏时夹到 ≥0
                                 // （手柄贴屏顶 0–28pt 可抓，与面板顶重叠 28pt，见交回）。
                                 .offset(y: max(0, gapTopLive + heroH + gapMidLive / 2 - 14))
-                                // r45-fix：手势抽到 dividerDragGesture（见 body 上方），
+                                // r45-fix：手势与微调动作都抽到 body 上方的函数里，
                                 // body 里只剩引用，不再整条大表达式一起查。
-                                .gesture(dividerDragGesture)
+                                .gesture(dividerDragGesture(heroH: heroH, minHeroH: minHeroH, maxHeroH: maxHeroH, contentH: contentH, isLandscape: isLandscape))
                                 .accessibilityLabel("调整 Hero 与面板高度")
                                 .accessibilityHint("上下拖动改变两块高度，松手即停")
-                                .accessibilityAdjustableAction { direction in
-                                    let step: CGFloat = 0.05
-                                    let next = min(max(fraction + (direction == .increment ? step : -step), minFrac), maxFrac)
-                                    if isLandscape {
-                                        heroFractionLandscape = next
-                                    } else {
-                                        heroFractionPortrait = next
-                                    }
-                                    // r45-fix：同款拆分——key 先拆成 let 再传 set，
-                                    // 不把三元表达式直接塞进参数里。
-                                    let keyToSave = isLandscape ? Self.heroFractionLandscapeKey : Self.heroFractionPortraitKey
-                                    UserDefaults.standard.set(Double(next), forKey: keyToSave)
-                                }
+                                .accessibilityAdjustableAction(dividerAdjustAction(fraction: fraction, minFrac: minFrac, maxFrac: maxFrac, isLandscape: isLandscape))
                         }
 
                         // 面板之下：下载管理卡 + 本地音乐区（r28：竖屏露在首屏，不再是

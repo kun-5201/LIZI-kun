@@ -680,6 +680,15 @@ actor FoliaKugouService {
         return json
     }
 
+    /// r49：回包 data 形态（只记形态，不记内容）——/v5/url 各档全空时
+    /// 诊断要分清是 data 本身空、还是结构不对。
+    private static func kugouDataKind(_ v: Any?) -> String {
+        if v == nil { return "null" }
+        if let arr = v as? [Any] { return "array(\(arr.count))" }
+        if v is [String: Any] { return "dict" }
+        return "other"
+    }
+
     /// 从回包里找第一支歌曲数组（Folia `songListOf` 同款：按
     /// song_list / songlist / songs / list / lists / info / items 的
     /// 顺序在 data 与顶层里找）。
@@ -1384,6 +1393,8 @@ actor FoliaKugouService {
     /// App 照样挂无损徽章、升级链也以为档位已够，会员高音质失效还
     /// 看不出来）。
     private func fetchSongURL(hash: String, quality: String, albumId: Int, albumAudioId: Int) async throws -> (url: String?, authRequired: Bool, reason: String, servedQuality: String?) {
+        // r49：vip_type / vip_token 不发往 /v5/url——无回包原文对照，
+        // 绝不擅自加参数（登录态只走 gateway 默认注入的 token/userid）。
         let params: [String: String] = [
             "album_id": String(albumId), "area_code": "1", "hash": hash.lowercased(),
             "ssa_flag": "is_fromtrack", "version": "11430", "page_id": "967177915",
@@ -1397,12 +1408,28 @@ actor FoliaKugouService {
                               xRouter: "trackercdn.kugou.com", encryptKey: true)
         }
         if res.httpStatus == 401 || res.httpStatus == 403 || Self.upstreamErrorCode(res.json) == 152 {
+            // r49：失败终态记诊断——各档上游 errcode / status / error 文案 /
+            // data 形态进 DiagLog，不再只剩 unavailable。
+            DiagLog.shared.recordLog(category: "kugou-url", message: "fetchSongURL auth", fields: [
+                "quality": quality, "httpStatus": res.httpStatus,
+                "errcode": Self.upstreamErrorCode(res.json),
+                "status": Self.upstreamStatus(res.json),
+                "error": Self.strField(Self.dataDict(res.json), "error", "msg"),
+                "dataKind": Self.kugouDataKind(res.json?["data"]),
+            ])
             return (nil, true, "login", nil)
         }
         if Self.needsVerify(res.json) {
             // withRegisterRetry 里已经 register_dev + 重试过一次，仍是
             // 20028：设备验证过不去，再换档位/变体也是同一答案，直接认
             // 需要登录（匿名设备未注册 / 登录态的 dfid 已失效都走这里）。
+            DiagLog.shared.recordLog(category: "kugou-url", message: "fetchSongURL verify", fields: [
+                "quality": quality, "httpStatus": res.httpStatus,
+                "errcode": Self.upstreamErrorCode(res.json),
+                "status": Self.upstreamStatus(res.json),
+                "error": Self.strField(Self.dataDict(res.json), "error", "msg"),
+                "dataKind": Self.kugouDataKind(res.json?["data"]),
+            ])
             return (nil, true, "login", nil)
         }
         let rawData = res.json?["data"]
@@ -1423,6 +1450,15 @@ actor FoliaKugouService {
             return (url, false, "", firstServed.isEmpty ? servedQuality : firstServed)
         }
         let err = Self.strField(Self.dataDict(res.json), "error", "msg")
+        // r49：失败终态记诊断——各档上游 errcode / status / error 文案 /
+        // data 形态进 DiagLog（/v5/url 各档 + legacy 全空且无鉴权失败时，
+        // 这里是唯一能看到上游说什么的地方）。
+        DiagLog.shared.recordLog(category: "kugou-url", message: "fetchSongURL no url", fields: [
+            "quality": quality, "httpStatus": res.httpStatus,
+            "errcode": Self.upstreamErrorCode(res.json),
+            "status": Self.upstreamStatus(res.json),
+            "error": err, "dataKind": Self.kugouDataKind(rawData),
+        ])
         return (nil, false, err.isEmpty ? "unavailable" : err, nil)
     }
 
@@ -1510,6 +1546,12 @@ actor FoliaKugouService {
             return .json(200, ["code": 0, "url": url, "quality": "128", "via": "kugou-legacy"])
         }
         if noUrlReason.isEmpty { noUrlReason = "unavailable" }
+        // r49：失败终态汇总进 DiagLog（各档明细已在 fetchSongURL 里记过）——
+        // 桥层只剩 reason 时，这里能对上是哪条链、什么原因、登录与否。
+        DiagLog.shared.recordLog(category: "kugou-url", message: "songUrl no url", fields: [
+            "quality": req.string("quality", "master"), "reason": noUrlReason,
+            "loggedIn": !loginState().token.isEmpty,
+        ])
         // Folia `kugouNoUrlError(noUrlSeen, signedOut)` 同款：整条链都没给
         // 地址 + 根本没登录 → 登录后可能能放，回 reason:"login"（不回
         // 上游原文，否则播放页只显示「暂时无法播放」，用户不知道要登录）。

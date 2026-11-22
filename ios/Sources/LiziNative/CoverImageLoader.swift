@@ -38,6 +38,12 @@ actor CoverImageLoader {
     /// 调用方的取消，视图消失也不停。
     private var inFlight: [URL: Task<UIImage?, Never>] = [:]
 
+    /// r49: 短期否定缓存——失败的 URL 60s 内直接回 nil，不进门、不联网；
+    /// ProxyImageView 的重试（首试 + 2 次）在 60s 内撞上它都是廉价 nil，
+    /// 一次冷启动风暴里每 URL 最多进门 2 次（代理 + 直链各一）。
+    private var negativeCache: [URL: Date] = [:]
+    private static let negativeTTL: TimeInterval = 60
+
     private init() {
         cache.totalCostLimit = 50 * 1024 * 1024
         cache.countLimit = 200
@@ -47,6 +53,11 @@ actor CoverImageLoader {
     /// 调用方取消等待时抛 CancellationError，但拉图本身继续跑完、进缓存。
     func image(for url: URL) async -> UIImage? {
         if let hit = cache.object(forKey: url as NSURL) { return hit }
+        // r49: 否定缓存命中（60s 内失败过）直接回 nil，不进门。
+        if let failedAt = negativeCache[url] {
+            if Date().timeIntervalSince(failedAt) < Self.negativeTTL { return nil }
+            negativeCache[url] = nil
+        }
         // r48-11：磁盘缓存优先——上次加载过直接读本地，不联网。
         if let data = DiskCache.data(kind: .cover, key: DiskCache.coverKey(for: url)),
            let img = UIImage(data: data) {
@@ -68,6 +79,11 @@ actor CoverImageLoader {
         if let image { store(image, for: url) }
         // r48-11：联网取图成功才写盘（失败不写，不缓存坏数据）。
         if let data { DiskCache.store(data, kind: .cover, key: DiskCache.coverKey(for: url)) }
+        // r49: 失败记否定缓存（成功不记）；过期条目顺手清掉。
+        if image == nil {
+            negativeCache[url] = Date()
+            negativeCache = negativeCache.filter { Date().timeIntervalSince($0.value) < Self.negativeTTL }
+        }
         inFlight[url] = nil
     }
 

@@ -678,6 +678,11 @@ final class PlaybackStore: ObservableObject {
         let wasInFlight = playCurrentActive
         advanceGeneration()
         let gen = resolveGeneration
+        // r49：tap 同步记一条（与 playCurrent 入口的 "play start" 分开）：
+        // Task 调度不到时，"play tap" 之后仍有这一条证明点按已收到、
+        // 代际已推进；看门狗 MISSING 时先看这条，再分清是主线程卡死
+        // 还是 Task 没启动。
+        DiagLog.shared.recordPlaybackStep("tap received gen=\(gen) source=\(track.platform) id=\(track.id)")
         if wasInFlight {
             DiagLog.shared.recordPlaybackStep("resolve superseded source=\(track.platform) id=\(track.id)")
         }
@@ -686,17 +691,16 @@ final class PlaybackStore: ObservableObject {
         // 第 22 轮第 5 件：看门狗——playCurrent 的第一步 "play start" 是
         // 在 Task 里记的；主线程若在 tap 到 Task 启动之间卡死（04:22 诊断：
         // tap 后 14 秒零记录），没有任何任务能记下这一步。看门狗跑在 detached
-        // 后台任务里（不依赖主线程），3 秒 / 8 秒后各查一次面包屑里有没有
-        // 这一代的 "play start source="；没有就记一笔，下次诊断直接分清
+        // 后台任务里（不依赖主线程），3 秒 / 8 秒后各查一次这一代有没有
+        // "play start"；没有就记一笔，下次诊断直接分清
         // “主线程卡死”还是“playCurrent 里某一步 trap”。已启动就静默。
+        // r49：查 DiagLog 各代 play start 独立表（hasPlayStart），不再扫
+        // 30 条滑动窗口的 contains——快速连点 4–5 次就能把旧代 play start
+        // 顶出窗口而误报 MISSING。
         Task.detached {
             for waitSeconds in [3, 8] {
                 try? await Task.sleep(nanoseconds: UInt64(waitSeconds) * 1_000_000_000)
-                let crumbs = (DiagLog.shared.json()["playbackBreadcrumb"] as? [String]) ?? []
-                let started = crumbs.contains {
-                    $0.contains("play start source=") && $0.contains("gen=\(gen)")
-                }
-                if started { break }
+                if DiagLog.shared.hasPlayStart(gen: gen) { break }
                 DiagLog.shared.recordPlaybackStep("play start MISSING after \(waitSeconds)s gen=\(gen) (main stall suspected)")
             }
         }
@@ -1003,7 +1007,9 @@ final class PlaybackStore: ObservableObject {
         // 记在 @Published 赋值之后，tap→entry 之间是黑洞；现在分两步：
         // entry（Task 调度到了）与 state set（赋值完成），死在哪一段
         // 下次诊断直接看得到；看门狗（play() 里）就查这一句。
+        // r49：同步记进各代 play start 独立表（看门狗只查这张表）。
         DiagLog.shared.recordPlaybackStep("play start source=\(track.platform) id=\(track.id) gen=\(gen)")
+        DiagLog.shared.recordPlayStart(gen: gen)
         isLoading = true
         errorMessage = nil
         loginPromptPlatform = nil
@@ -1585,15 +1591,18 @@ final class PlaybackStore: ObservableObject {
                     // 加的（官方试听档位虚高反而赢、落雪整首被扔）；酷狗
                     // 官方腿从不产试听标记（服务端 songUrl 从不设 preview），
                     // 会员官方地址就是全曲，档位低也播；LX 自报高档顶掉它
-                    // 只会播死链。已知非会员 / 会员态未知时保持强占不变
-                    // （strongLX = !kugouIsVip）。kugouIsVip 直接问三态
-                    // （已登录 + 会员态已知 + isVip），不再经分流反推。
+                    // 只会播死链。r49：已登录且（isVip 或 vip 未知）时都保
+                    // 护官方链——vipKnown 未知时 LX 仍可顶掉官方链（r48-2
+                    // 尾巴）；未知 ≠ 非会员，strongLX 也为 false，不做升
+                    // 级替换；官方腿失败时 LX 仍可兜底（见下云盘/LX 腿）。
+                    // 已知非会员时不保护。kugouIsVip 不再要求 vipKnown
+                    // 为真。
                     // 放在 .automatic 分支内，不动分支外的 resolveURL
                     // 其余部分（r32 §3d 锁定）。
                     let kugouIsVip = track.platform == "kugou"
                         && LoginStore.shared.isLoggedIn(platform: "kugou")
-                        && LoginStore.shared.vipKnown(platform: "kugou")
-                        && LoginStore.shared.isVip(platform: "kugou")
+                        && (LoginStore.shared.isVip(platform: "kugou")
+                            || !LoginStore.shared.vipKnown(platform: "kugou"))
                     if kugouIsVip { return platform }
                     return await upgradeIfLower(platform, requested: requested, strongLX: !kugouIsVip) {
                         if let cloud = await self.cloudLeg(track: track, gen: gen, skips: skips, quality: requested) {
@@ -1617,11 +1626,12 @@ final class PlaybackStore: ObservableObject {
                 if platform.url != nil {
                     // r48-2：已确认的酷狗会员，官方腿的结果直接用、不再问
                     // LX（同 .automatic 分支的早返；LX 自报高档顶掉可用
-                    // 的官方 VIP 链只会播死链）。
+                    // 的官方 VIP 链只会播死链）。r49：同 .automatic 分支，
+                    // 已登录且（isVip 或 vip 未知）时都保护官方链。
                     let kugouIsVip = track.platform == "kugou"
                         && LoginStore.shared.isLoggedIn(platform: "kugou")
-                        && LoginStore.shared.vipKnown(platform: "kugou")
-                        && LoginStore.shared.isVip(platform: "kugou")
+                        && (LoginStore.shared.isVip(platform: "kugou")
+                            || !LoginStore.shared.vipKnown(platform: "kugou"))
                     if kugouIsVip { return platform }
                     return await upgradeIfLower(platform, requested: requested) {
                         // r31 第三推改顺序：升级先问云盘再问 LX（用户长期优先级）。

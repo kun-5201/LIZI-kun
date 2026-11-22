@@ -482,9 +482,18 @@ final class StageBridge: NSObject, ObservableObject {
         // r24：走 Proxies.directImageData——同一个门、6s 上限、入口 https 归一；
         // 旧写法 dataTask 直连原地址：http 在真机上 ATS -1022，https 无超时
         // 上限（默认 60s），主色一直算不出来。
+        // r49: 先读 DiskCache（与 NowPlayingCoordinator 同款读法），命中直接用；
+        // 未命中再调 directImageData，成功后写盘——锁屏与舞台不再各拉一份。
         Task { [weak self] in
             guard let self else { return }
-            guard let data = await Proxies.directImageData(url),
+            var data: Data?
+            if let cached = DiskCache.data(kind: .cover, key: DiskCache.coverKey(for: url)) {
+                data = cached
+            } else if let fetched = await Proxies.directImageData(url) {
+                data = fetched
+                DiskCache.store(fetched, kind: .cover, key: DiskCache.coverKey(for: url))
+            }
+            guard let data,
                   let image = UIImage(data: data),
                   let rgb = Self.averageColor(of: image) else { return }
             await MainActor.run {

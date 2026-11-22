@@ -425,6 +425,9 @@ extension NetEaseService {
         payload = shapePayload(routeKey: hit.key, payload: payload)
 
         let t0 = Date()
+        // r49：ladder 任一档的 vip 信号（song/url 分支内赋值），normalize
+        // 之后用来把最终无 url 的项优先改成 reason:"vip"。
+        var songUrlSawVipRefusal = false
         do {
             let result: UpstreamResult
             // 搜索要快：上游慢网时别重试、别拖到前端 60 秒超时才掐掉——
@@ -438,24 +441,52 @@ extension NetEaseService {
                 // （jymaster → dolby/sky → hires → lossless → exhigh → higher
                 // → standard），直到拿到地址；上游自动降级时首调即中，不多花请求。
                 // normalize 会把实际 level/br 原样透传，前端只显示实际档。
+                // r49：① 登录态只记诊断、不拦路——匿名（!hasMusicU）也照常
+                // 走 ladder，未登录用户的免费歌必须还能播，绝不直接回 login
+                // 拦掉；② 保留首个 vip 信号——每档都覆写 got，只有拿到 url
+                // 才 break，前档的 vip 信号会被后档洗掉（normalize 只看最终
+                // 一档）；任一档出现 code -110 或 cannotListenReason==1 即
+                // 记下 sawVipRefusal，最终无 url 时优先回 reason:"vip"。
+                // ③ 每档的 level / code / cannotListenReason / url 有无 /
+                // MUSIC_U 有无（只记布尔，绝不记 cookie 值）写进 DiagLog。
+                let hasMusicU = session.hasMusicU
                 let ladder = ["jymaster", "dolby", "sky", "hires", "lossless", "exhigh", "higher", "standard"]
                 let reqLevel = payload["level"] as? String ?? "lossless"
                 var idx = ladder.firstIndex(of: reqLevel) ?? 4
                 var got: UpstreamResult? = nil
                 var lastErr: Error? = nil
+                var sawVipRefusal = false
+                var tierDiag: [[String: Any]] = []
                 while idx < ladder.count {
                     var p2 = payload
                     p2["level"] = ladder[idx]
                     if ladder[idx] == "sky" { p2["immerseType"] = "c51" } else { p2.removeValue(forKey: "immerseType") }
                     do {
                         let rr = try await eapiRequest(apiPath, p2, timeout: reqTimeout, attempts: reqAttempts)
-                        let hasUrl = (((rr.json["data"] as? [[String: Any]])?.first?["url"] as? String) ?? "").isEmpty == false
+                        let first = (rr.json["data"] as? [[String: Any]])?.first ?? [:]
+                        let itemCode = int(first, "code")
+                        let itemCannot = int(dict(first, "freeTrialPrivilege"), "cannotListenReason")
+                        let hasUrl = ((first["url"] as? String) ?? "").isEmpty == false
+                        if !hasUrl && (itemCode == -110 || itemCannot == 1) { sawVipRefusal = true }
+                        tierDiag.append(["level": ladder[idx], "code": itemCode,
+                                         "cannotListenReason": itemCannot, "hasUrl": hasUrl,
+                                         "hasMusicU": hasMusicU])
                         payload = p2
                         got = rr
                         if hasUrl { break }
-                    } catch let e { lastErr = e }
+                    } catch let e {
+                        lastErr = e
+                        tierDiag.append(["level": ladder[idx], "code": -1,
+                                         "cannotListenReason": 0, "hasUrl": false,
+                                         "hasMusicU": hasMusicU, "error": e.localizedDescription])
+                    }
                     idx += 1
                 }
+                songUrlSawVipRefusal = sawVipRefusal
+                DiagLog.shared.recordLog(category: "netease-url", message: "song/url ladder", fields: [
+                    "anonymous": !hasMusicU, "hasMusicU": hasMusicU,
+                    "sawVipRefusal": sawVipRefusal, "tiers": tierDiag,
+                ])
                 guard let rr = got else {
                     throw lastErr ?? NSError(domain: "LiziUpstream", code: 502,
                                              userInfo: [NSLocalizedDescriptionKey: "网易取链失败"])
@@ -466,7 +497,19 @@ extension NetEaseService {
             } else {
                 result = try await weapiRequest(apiPath, payload, timeout: reqTimeout, attempts: reqAttempts)
             }
-            let normalized = await normalize(routeKey: hit.key, data: result.json, payload: payload)
+            var normalized = await normalize(routeKey: hit.key, data: result.json, payload: payload)
+            // r49：保留首个 vip 信号——normalize 只看最终一档，前档的 vip
+            // 拒绝会被后档洗掉；ladder 任一档拒过时，最终无 url 的项优先
+            // 回 reason:"vip"，而不是最后一档的笼统 unavailable。
+            if hit.key == "song/url", songUrlSawVipRefusal,
+               var items = normalized["data"] as? [[String: Any]] {
+                items = items.map { item in
+                    var it = item
+                    if ((it["url"] as? String) ?? "").isEmpty { it["reason"] = "vip" }
+                    return it
+                }
+                normalized["data"] = items
+            }
             // 退出登录：上游已作废 MUSIC_U，本地 session.json 必须一起清掉。
             // 之前这里只转发不清理 —— 退出后死 cookie 还留在本地，之后
             // 每次 /api/session 的 sessionVerify 都拿不到 profile 而回

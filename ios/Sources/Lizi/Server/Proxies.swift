@@ -1,3 +1,4 @@
+import CryptoKit // r49: urlHash 用 SHA256
 import Foundation
 
 /// /api/img 图片代理 + 各平台音频代理。
@@ -12,50 +13,113 @@ import Foundation
 /// 的 2 候选 × 2 重试 = 每张图 20003ms 成批死，http 腿再补一个 -1022。
 /// 门把并发压到 4（< 6，会话内永不排队），排队发生在 Swift 侧、不进
 /// URLSession 的超时计时；每个开始跑的请求都有完整超时可用。
+/// r49：门等加 6s 硬上限 + 32 排队上限（见下），等槽超时/队满直接失败，
+/// 不再无限等（门等期间超时计时根本没开始，20–30 张冷封面排队即 40–56s）。
 /// VM 证据：单发 curl p3/p4.music.126.net https 全部 200（首字节 1.5–1.7s），
 /// 端点本身是好的；Referer 也已排除（无 Referer 同样 200，错 Referer 只会
 /// 快 403、不会 10s 超时）。VM 通 ≠ 真机通：真机出口若另有拦截，快速失败 +
 /// 占位，下次诊断凭新日志的 ms / code 再分。
+
+/// r49: 门等待失败原因（与上游 -1001 区分的内部码；proxyImage 对其直接 502，
+/// 不进会话——门等期间会话任务根本还没创建）。
+enum CoverFetchGateError: Error, LocalizedError {
+    /// 排队已满（32 个 waiter），直接失败、不再排队。
+    case queueFull
+    /// 等槽超过 6s。
+    case gateTimeout
+    var errorDescription: String? {
+        switch self {
+        case .queueFull: return "cover fetch gate queue full"
+        case .gateTimeout: return "cover fetch gate timeout (6s)"
+        }
+    }
+}
+
+/// r49: 门内失败也带等槽毫秒数——run 抛错时调用方 catch 里也能读到真实
+/// gateWaitMs（旧代码只在成功路径拷 waitMs，失败日志 gateWait 恒为 0）。
+struct CoverFetchError: Error {
+    let underlying: Error
+    let waitMs: Int
+}
+
 actor CoverFetchGate {
     static let shared = CoverFetchGate()
     static let maxConcurrent = 4
+    /// r49: 门等硬上限——等槽超过 6s 直接失败（旧实现无限等）。
+    static let gateWaitTimeout: TimeInterval = 6
+    /// r49: 排队上限——waiter 超过 32 个直接失败（fail fast），不无界排队。
+    static let maxWaiters = 32
     private var running = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [Waiter] = []
+
+    /// r49: 排队中的一次等槽：超时任务按 id 摘 waiter（CheckedContinuation
+    /// 二次 resume 会 trap，摘掉才 resume；release 叫醒的已不在队里，
+    /// 超时任务按 id 找不到、直接忽略）。
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
 
     /// 在门内跑一次取图：拿槽 → 跑 work → 还槽（work 抛错/取消也还）。
     /// 返回取图结果 + 等槽毫秒数（诊断用：总 ms 大而 waitMs 小 = 上游 stalls；
     /// waitMs 大 = 首页并发把门堵了）。
+    /// r49: 拿槽失败（超时/队满/取消）也把已等毫秒数包在 CoverFetchError 里
+    /// 抛出去——旧代码只在成功路径拷 waitMs，run 一抛错调用方 catch 里的
+    /// gateWaitMs 恒为 0。
     func run<T>(_ work: () async throws -> T) async throws -> (value: T, waitMs: Int) {
         let t0 = Date()
-        guard await acquire() else { throw CancellationError() }
-        let waitMs = Int(Date().timeIntervalSince(t0) * 1000)
+        let waitMs: Int
+        do {
+            try await acquire()
+            waitMs = Int(Date().timeIntervalSince(t0) * 1000)
+        } catch {
+            throw CoverFetchError(underlying: error, waitMs: Int(Date().timeIntervalSince(t0) * 1000))
+        }
         defer { release() }
-        let value = try await work()
-        return (value, waitMs)
+        do {
+            let value = try await work()
+            return (value, waitMs)
+        } catch {
+            throw CoverFetchError(underlying: error, waitMs: waitMs)
+        }
     }
 
-    /// 拿一个取图槽；等槽期间被取消返回 false（调用方不跑取图）。
-    private func acquire() async -> Bool {
+    /// r49: 拿一个取图槽；等槽期间被取消抛 CancellationError（调用方不跑取图，
+    /// 有槽就还槽）；等槽超 6s 抛 gateTimeout；排队满 32 抛 queueFull。
+    private func acquire() async throws {
         if running < Self.maxConcurrent {
             running += 1
-            return true
+            return
         }
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            waiters.append(continuation)
+        guard waiters.count < Self.maxWaiters else { throw CoverFetchGateError.queueFull }
+        let acquired = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let id = UUID()
+            waiters.append(Waiter(id: id, continuation: continuation))
+            Task.detached {
+                try? await Task.sleep(nanoseconds: UInt64(Self.gateWaitTimeout * 1_000_000_000))
+                await CoverFetchGate.shared.timeOutWaiter(id: id)
+            }
         }
-        // 被 resume 叫醒时槽已是我们的（release 把槽直接交给下一个 waiter，
-        // running 计数不变）；若等槽期间调用方已取消，这次取图不跑了、把槽还回去。
+        // 等槽期间被取消：拿到槽就还槽，没拿到（超时）本来就没槽；一律按取消走。
         if Task.isCancelled {
-            release()
-            return false
+            if acquired { release() }
+            throw CancellationError()
         }
-        return true
+        guard acquired else { throw CoverFetchGateError.gateTimeout }
+    }
+
+    /// r49: 门等超时——还在队里的 waiter 摘掉并以 false 叫醒（acquire 抛
+    /// gateTimeout）；已被 release 叫醒的不在队里，直接忽略。
+    private func timeOutWaiter(id: UUID) {
+        guard let idx = waiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = waiters.remove(at: idx)
+        waiter.continuation.resume(returning: false)
     }
 
     private func release() {
         if let next = waiters.first {
             waiters.removeFirst()
-            next.resume()
+            next.continuation.resume(returning: true)
         } else {
             running -= 1
         }
@@ -119,8 +183,70 @@ enum Proxies {
         config.timeoutIntervalForRequest = 6
         config.timeoutIntervalForResource = 8
         config.httpMaximumConnectionsPerHost = 6
-        return URLSession(configuration: config)
+        // r49: 挂轻量 metrics delegate（只采失败请求的段耗时，见下）；
+        // URLSession 强持 delegate，会话静态常驻、无需另行持有。
+        return URLSession(configuration: config, delegate: ImageSessionMetricsDelegate(), delegateQueue: nil)
     }()
+
+    /// r49: 失败日志用的 URL 指纹——整条 URL 的 SHA256 前 8 位，只记指纹、不记完整 URL。
+    private static func urlHash(_ url: URL) -> String {
+        let digest = SHA256.hash(data: Data(url.absoluteString.utf8))
+        return String(digest.map { String(format: "%02x", $0) }.joined().prefix(8))
+    }
+
+    /// r49: 墙钟总闸超时（与 -1001 区分的内部错；proxyImage 按
+    /// proxy-wallclock-timeout 记原因）。
+    private enum ImageFetchWallClockError: Error, LocalizedError {
+        case timedOut
+        var errorDescription: String? { "image fetch wall-clock timeout (6s)" }
+    }
+
+    /// r49: 会话调用墙钟总闸——data 任务与 6s 睡眠竞速；谁先完就以谁为准，
+    /// 另一路 group.cancelAll() 取消到底（URLSession 的 async API 收到取消会
+    /// 取消底层 URLSessionTask，不是调用方不等了、任务还在跑）。
+    /// 6s 与 imageFetchTimeout 同值：门等 6s + 会话 6s，单次 proxyImage
+    /// 最坏 ≈ 12s，且失败原因可按段区分（gate-timeout / wallclock / -1001）。
+    private static func fetchWithWallClock(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
+            group.addTask { try await imageSession.data(for: request) }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(imageFetchTimeout * 1_000_000_000))
+                throw ImageFetchWallClockError.timedOut
+            }
+            do {
+                guard let first = try await group.next() else { throw CancellationError() }
+                group.cancelAll()
+                return first
+            } catch {
+                group.cancelAll()
+                throw error
+            }
+        }
+    }
+
+    /// r49: 封面会话轻量 metrics 采（URLSessionTaskDelegate）：只在任务失败时
+    /// （task.error != nil）把最后一次 transaction 的 DNS/连接/响应段耗时写进
+    /// DiagLog；成功请求不记。只实现 didFinishCollecting，不碰重定向/鉴权等
+    /// 回调，不改变会话行为。DiagLog.recordLog 自带 NSLock，delegate 队列调也安全。
+    private final class ImageSessionMetricsDelegate: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+            guard let error = task.error else { return }
+            let last = metrics.transactionMetrics.last
+            func ms(_ start: Date?, _ end: Date?) -> Int {
+                guard let start, let end else { return -1 }
+                return max(0, Int(end.timeIntervalSince(start) * 1000))
+            }
+            let dnsMs = ms(last?.domainLookupStartDate, last?.domainLookupEndDate)
+            let connectMs = ms(last?.connectStartDate, last?.connectEndDate)
+            let responseMs = ms(last?.responseStartDate, last?.responseEndDate)
+            let host = task.originalRequest?.url?.host ?? ""
+            let code = (error as NSError).code
+            DiagLog.shared.recordLog(category: "cover",
+                message: "img metrics host=\(host) code=\(code) dns=\(dnsMs)ms connect=\(connectMs)ms response=\(responseMs)ms",
+                fields: ["host": host, "reason": "img-metrics", "code": code, "lane": "proxy",
+                         "dnsMs": dnsMs, "connectMs": connectMs, "responseMs": responseMs])
+        }
+    }
 
     /// 封面 URL 入口 https 归一（r24 新写）：只换 scheme，不换 host。
     /// 真机 ATS 下 http 永远 -1022，升上去是唯一能成的路；https 原样过。
@@ -150,7 +276,8 @@ enum Proxies {
         request.setValue(imageUA, forHTTPHeaderField: "User-Agent")
         do {
             let fetched = try await CoverFetchGate.shared.run {
-                try await imageSession.data(for: request)
+                // r49: 墙钟总闸（见 fetchWithWallClock）：6s 竞速，超时取消到底层任务。
+                try await fetchWithWallClock(request)
             }
             let (data, resp) = fetched.value
             guard let http = resp as? HTTPURLResponse,
@@ -195,7 +322,8 @@ enum Proxies {
             }
             request.setValue(imageUA, forHTTPHeaderField: "User-Agent")
             let fetched = try await CoverFetchGate.shared.run {
-                try await imageSession.data(for: request)
+                // r49: 墙钟总闸（见 fetchWithWallClock）：6s 竞速，超时取消到底层任务。
+                try await fetchWithWallClock(request)
             }
             gateWaitMs = fetched.waitMs
             let (data, resp) = fetched.value
@@ -213,9 +341,12 @@ enum Proxies {
             // 会报 415「not an image」，掩盖真实原因；现在直接记上游状态。
             guard (200..<300).contains(http.statusCode) else {
                 let ms = Int(Date().timeIntervalSince(started) * 1000)
+                // r49: 上游状态失败日志也补 urlHash / gateWaitMs / sessionMs 分段字段。
+                let sessionMs = max(0, ms - gateWaitMs)
+                let hash = urlHash(fetchURL)
                 DiagLog.shared.recordLog(category: "cover",
-                    message: "img proxy \(host) upstream HTTP \(http.statusCode) (\(ms)ms gateWait=\(gateWaitMs)ms)",
-                    fields: ["host": host, "reason": "proxy-status-\(http.statusCode)", "code": http.statusCode, "lane": "proxy"])
+                    message: "img proxy \(host) upstream HTTP \(http.statusCode) (\(ms)ms gateWait=\(gateWaitMs)ms session=\(sessionMs)ms urlHash=\(hash))",
+                    fields: ["host": host, "reason": "proxy-status-\(http.statusCode)", "code": http.statusCode, "lane": "proxy", "urlHash": hash, "gateWaitMs": gateWaitMs, "sessionMs": sessionMs])
                 return .error(502, "上游 \(host) 返回 HTTP \(http.statusCode)")
             }
             let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? "image/jpeg"
@@ -230,19 +361,39 @@ enum Proxies {
                 "Cache-Control": "public, max-age=86400",
             ], body: data)
         } catch {
+            // r49: run 抛错也带 gateWaitMs——先拆 CoverFetchError 的包装
+            // （旧代码 gateWaitMs 只在成功路径赋值，失败日志恒为 0）。
+            var rootError = error
+            if let wrapped = error as? CoverFetchError {
+                gateWaitMs = wrapped.waitMs
+                rootError = wrapped.underlying
+            }
             // 第 20 轮：任务被取消（-999，调用方导航走了 / 视图没了 / 连接断了）
             // 不是失败：不重试、不记日志，立刻回 499。注意：URLSession 的 async API 在
             // 这里漏出的是原始 NSURLError -999，不是 CancellationError，
             // 两边都要认。
-            if error is CancellationError || (error as NSError).code == NSURLErrorCancelled {
+            if rootError is CancellationError || (rootError as NSError).code == NSURLErrorCancelled {
                 return .error(499, "cancelled")
             }
             let ms = Int(Date().timeIntervalSince(started) * 1000)
-            let code = (error as NSError).code
+            let sessionMs = max(0, ms - gateWaitMs)
+            let hash = urlHash(fetchURL)
+            // r49: 门等失败（超时/队满）直接 502，不进会话——门等期间会话
+            // 任务根本还没创建，与 -1001 是两回事，原因可区分。
+            if let gateError = rootError as? CoverFetchGateError {
+                let reason = gateError == .gateTimeout ? "gate-timeout" : "gate-queue-full"
+                DiagLog.shared.recordLog(category: "cover",
+                    message: "img proxy \(host) gate failed (\(ms)ms gateWait=\(gateWaitMs)ms session=\(sessionMs)ms urlHash=\(hash) reason=\(reason))",
+                    fields: ["host": host, "reason": reason, "lane": "proxy", "urlHash": hash, "gateWaitMs": gateWaitMs, "sessionMs": sessionMs])
+                return .error(502, rootError.localizedDescription)
+            }
+            let code = (rootError as NSError).code
+            // r49: 墙钟总闸超时与普通上游失败原因分开记（-1001 之外的新码）。
+            let reason = rootError is ImageFetchWallClockError ? "proxy-wallclock-timeout" : "proxy-error"
             DiagLog.shared.recordLog(category: "cover",
-                message: "img proxy \(host) fetch failed (\(ms)ms gateWait=\(gateWaitMs)ms code=\(code)): \(error.localizedDescription)",
-                fields: ["host": host, "reason": "proxy-error", "lane": "proxy"])
-            return .error(502, error.localizedDescription)
+                message: "img proxy \(host) fetch failed (\(ms)ms gateWait=\(gateWaitMs)ms session=\(sessionMs)ms urlHash=\(hash) code=\(code)): \(rootError.localizedDescription)",
+                fields: ["host": host, "reason": reason, "lane": "proxy", "urlHash": hash, "gateWaitMs": gateWaitMs, "sessionMs": sessionMs])
+            return .error(502, rootError.localizedDescription)
         }
     }
 

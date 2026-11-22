@@ -43,6 +43,12 @@ final class NowPlayingCoordinator: ObservableObject {
     private var lastArtworkTrackId: String?
     private var lastCoverURL: String?
     private var lastCoverKey: String?
+    /// r49 R1：上一次成功挂进 nowPlayingInfo 的路线 A 动态键（本歌 own-A
+    /// 或上一首 fallback-A 都记）。本歌视频未就绪时 writeNowPlaying 不再
+    /// 把动态键从 info 里拿掉，而是保留这把键、只更新标题/进度/静态图，
+    /// 等 onReady 回调再写一次换成本歌视频——同一首歌挂载只 none → A 单调，
+    /// 绝不 A → none。
+    private var lastMountedAnimKey: String?
     private var lastTrackId: String?
     private var lastPlaying: Bool = false
     private var lastReassertAt: Date = .distantPast
@@ -62,6 +68,13 @@ final class NowPlayingCoordinator: ObservableObject {
     /// 已对哪首歌启动过准备（每首只启动一次）、到货的封面图暂存（启动时用）、
     /// 启动入口 kickAnimatedPrepares / maybeKickAnimatedPrepares。
     private var artworkPrepareKickedTrackId: String?
+    /// r49 R4：kicked 那次准备用的是哪个封面键。封面 10 秒重试成功后
+    /// lastCoverKey 变了（失败那轮曾被置成 defaultKey），只凭 trackId
+    /// 守门会把真封面的准备永远挡住；键变了就清掉 kicked 标记再 kick。
+    private var artworkPrepareKickedKey: String?
+    /// r49 R5：路线 A 生成失败后已安排过延迟重准备的键（每键最多 1 次，
+    /// 避免失败反复重试烧电；键是封面 URL 的哈希，新封面不在集合里）。
+    private var routeARepreparedKeys: Set<String> = []
     private var lastCoverImage: UIImage?
     private var lastCoverImageTrackId: String?
 
@@ -174,6 +187,12 @@ final class NowPlayingCoordinator: ObservableObject {
         // 或一个键都没挂上时，另一个键本可以由 A 补上却被跳过。
         var route3x4 = "none"
         var route1x1 = "none"
+        // r49 R3：实际写入的键与来源（own-A / fallback-A / own-B / none），
+        // 诊断直接写挂的是哪把键、哪条路线，不再只记本歌的 aKey/bKey。
+        var mountedKey3x4 = "-"
+        var mountedSource3x4 = "none"
+        var mountedKey1x1 = "-"
+        var mountedSource1x1 = "none"
         if #available(iOS 26.0, *), animatedArtworkEnabled {
             let supported = MPNowPlayingInfoCenter.supportedAnimatedArtworkKeys
             let appleKey = AppleAnimatedArtworkProvider.shared.albumKey(for: track)
@@ -183,10 +202,27 @@ final class NowPlayingCoordinator: ObservableObject {
                    let art = AppleAnimatedArtworkProvider.shared.artwork(forKey: key, aspect: .portrait) {
                     info[MPNowPlayingInfoProperty3x4AnimatedArtwork] = art
                     route3x4 = "B"
+                    mountedKey3x4 = key
+                    mountedSource3x4 = "own-B"
                 } else if let animKey = animatedArtworkKeyForCurrentTrack(),
                           let art = AnimatedArtworkManager.shared.artwork(forKey: animKey, aspect: .portrait) {
                     info[MPNowPlayingInfoProperty3x4AnimatedArtwork] = art
                     route3x4 = "A"
+                    mountedKey3x4 = animKey
+                    // r49 R1：挂 A 成功时记下这把键；own 与 fallback 按本歌
+                    // 自己的 aKey 认（不用 lastCoverKey——切歌后它还没翻转，
+                    // 会把上一首的键误认成 own）。
+                    mountedSource3x4 = (animKey == aKey) ? "own-A" : "fallback-A"
+                    lastMountedAnimKey = animKey
+                } else if let retained = lastMountedAnimKey,
+                          let art = AnimatedArtworkManager.shared.artwork(forKey: retained, aspect: .portrait) {
+                    // r49 R1：本歌视频未就绪、连回退键都没有时，不把动态键
+                    // 从 info 里拿掉——保留上一次成功挂载的键，只更新标题/
+                    // 歌手/进度/静态图；生成完 onReady 回调再写一次换成本歌视频。
+                    info[MPNowPlayingInfoProperty3x4AnimatedArtwork] = art
+                    route3x4 = "A"
+                    mountedKey3x4 = retained
+                    mountedSource3x4 = "fallback-A"
                 }
             }
             if supported.contains(MPNowPlayingInfoProperty1x1AnimatedArtwork) {
@@ -194,17 +230,31 @@ final class NowPlayingCoordinator: ObservableObject {
                    let art = AppleAnimatedArtworkProvider.shared.artwork(forKey: key, aspect: .square) {
                     info[MPNowPlayingInfoProperty1x1AnimatedArtwork] = art
                     route1x1 = "B"
+                    mountedKey1x1 = key
+                    mountedSource1x1 = "own-B"
                 } else if let animKey = animatedArtworkKeyForCurrentTrack(),
                           let art = AnimatedArtworkManager.shared.artwork(forKey: animKey, aspect: .square) {
                     info[MPNowPlayingInfoProperty1x1AnimatedArtwork] = art
                     route1x1 = "A"
+                    mountedKey1x1 = animKey
+                    mountedSource1x1 = (animKey == aKey) ? "own-A" : "fallback-A"
+                    lastMountedAnimKey = animKey
+                } else if let retained = lastMountedAnimKey,
+                          let art = AnimatedArtworkManager.shared.artwork(forKey: retained, aspect: .square) {
+                    // r49 R1：同上，1x1 槽也保留上一次成功挂载的键。
+                    info[MPNowPlayingInfoProperty1x1AnimatedArtwork] = art
+                    route1x1 = "A"
+                    mountedKey1x1 = retained
+                    mountedSource1x1 = "fallback-A"
                 }
             }
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         lastPlaying = store.isPlaying
         logAnimatedMountIfChanged(track: track, route3x4: route3x4, route1x1: route1x1,
-                                  aKey: aKey, bKey: bKey, coverHost: coverHost)
+                                  aKey: aKey, bKey: bKey, coverHost: coverHost,
+                                  mountedKey: mountedKey3x4, mountedSource: mountedSource3x4,
+                                  mountedKey1x1: mountedKey1x1, mountedSource1x1: mountedSource1x1)
         // 封面还没到货（或换歌了）就去拉，到了补写一次。封面已拉取失败耗尽的
         // 歌不再重拉（coverFailedTrackId 守门，见上）；切歌时 lastTrackId 变化
         // 仍会重拉。
@@ -218,9 +268,15 @@ final class NowPlayingCoordinator: ObservableObject {
     /// 动态、走的哪条路线，下次真机复现直接从设置 → 诊断日志看最后一步。
     /// r20：desc 里带本歌的 A 键与 B 键——挂载从“上一首兜底”切到“本歌”
     /// 的那一次会再记一条，锁屏上到底挂的是哪首歌的视频一眼能对上。
+    /// r49 R3：desc 与 fields 增加 mountedKey / mountedSource（实际写入的
+    /// animKey 或 appleKey + own-A / fallback-A / own-B / none）：单条 none
+    /// 不再推不出写了几次、A 不再推不出是本歌视频还是上一首回退；挂载键一变
+    /// desc 就变，去重不再把“换键”吞掉。
     private func logAnimatedMountIfChanged(track: Track, route3x4: String, route1x1: String,
-                                           aKey: String, bKey: String, coverHost: String) {
-        let desc = "enabled=\(animatedArtworkEnabled) 3x4=\(route3x4) 1x1=\(route1x1) aKey=\(aKey) bKey=\(bKey)"
+                                           aKey: String, bKey: String, coverHost: String,
+                                           mountedKey: String, mountedSource: String,
+                                           mountedKey1x1: String, mountedSource1x1: String) {
+        let desc = "enabled=\(animatedArtworkEnabled) 3x4=\(route3x4) 1x1=\(route1x1) aKey=\(aKey) bKey=\(bKey) mountedKey=\(mountedKey) mountedSource=\(mountedSource) mountedKey1x1=\(mountedKey1x1) mountedSource1x1=\(mountedSource1x1)"
         guard lastMountDiagTrackId != track.id || lastMountDiagDesc != desc else { return }
         lastMountDiagTrackId = track.id
         lastMountDiagDesc = desc
@@ -228,7 +284,9 @@ final class NowPlayingCoordinator: ObservableObject {
             message: "lock screen artwork mounted track=\(track.title) artist=\(track.artist) platform=\(track.platform) coverHost=\(coverHost) \(desc)",
             fields: ["lane": "animated-mount", "route3x4": route3x4, "route1x1": route1x1,
                      "enabled": animatedArtworkEnabled, "platform": track.platform,
-                     "trackId": track.id, "aKey": aKey, "bKey": bKey, "coverHost": coverHost])
+                     "trackId": track.id, "aKey": aKey, "bKey": bKey, "coverHost": coverHost,
+                     "mountedKey": mountedKey, "mountedSource": mountedSource,
+                     "mountedKey1x1": mountedKey1x1, "mountedSource1x1": mountedSource1x1])
     }
 
     /// 当前歌挂哪个动态视频：本歌的竖版视频就绪就挂本歌的；没就绪就挂上一首的缓存。
@@ -236,7 +294,13 @@ final class NowPlayingCoordinator: ObservableObject {
     /// 方形一失败竖版也被拖死）。
     private func animatedArtworkKeyForCurrentTrack() -> String? {
         if let key = lastCoverKey, AnimatedArtworkManager.shared.isReady(key: key, aspect: .portrait) { return key }
-        return AnimatedArtworkManager.shared.fallbackKey(for: lastCoverKey ?? "")
+        if let fallback = AnimatedArtworkManager.shared.fallbackKey(for: lastCoverKey ?? "") { return fallback }
+        // r49 R2：lastGoodKey 也丢了时（kick 的已就绪分支曾绕过 prepare，
+        // lastGoodKey 永远没补上），再退到上一次成功挂载的键（R1 的
+        // lastMountedAnimKey），须竖版就绪。放 coordinator 侧做，不动
+        // manager 的 fallbackKey、不跨文件传参、不循环依赖。
+        if let retained = lastMountedAnimKey, AnimatedArtworkManager.shared.isReady(key: retained, aspect: .portrait) { return retained }
+        return nil
     }
 
     /// 锁屏专辑图：先走 https 下整张原图；到货后写静态 artwork，并触发
@@ -360,6 +424,14 @@ final class NowPlayingCoordinator: ObservableObject {
         writeNowPlaying()
         // 第 21 轮第 3 件：动态视频的 prepare 不再这里启动，等 startedTrackId
         // 再由 kickAnimatedPrepares 启动（图已暂存到 lastCoverImage）。
+        // r49 R4：封面 10 秒重试成功后 lastCoverKey 变了（失败那轮曾被置成
+        // defaultKey、且那轮已 kick 过），只凭 trackId 守门会把真封面的准备
+        // 永远挡住。键变了就清掉 kicked 标记再 kick；键没变说明这把键已
+        // kick 过，仍挡住。
+        if lastCoverKey != artworkPrepareKickedKey {
+            artworkPrepareKickedTrackId = nil
+            artworkPrepareKickedKey = nil
+        }
         maybeKickAnimatedPrepares(for: track)
     }
 
@@ -397,6 +469,7 @@ final class NowPlayingCoordinator: ObservableObject {
         }
         guard let coverImage = image else { return }
         artworkPrepareKickedTrackId = track.id
+        artworkPrepareKickedKey = animKey  // r49 R4
         DiagLog.shared.recordPlaybackStep("animated prepare kick id=\(track.id) platform=\(track.platform) key=\(animKey)")
         AppleAnimatedArtworkProvider.shared.prepare(for: track) { [weak self] ready in
             guard let self, ready else { return }
@@ -408,11 +481,44 @@ final class NowPlayingCoordinator: ObservableObject {
                 Task { @MainActor in
                     guard self.lastCoverKey == animKey else { return }
                     self.writeNowPlaying()
+                    // r49 R5：生成失败后补挂载——onReady 回调时视频仍未就绪
+                    // （renderWithRetry 两次都失败），且仍是当前歌：5 秒后
+                    // 重准备一次，每键最多 1 次（routeARepreparedKeys 守门），
+                    // 避免无限重试烧电。重准备走 prepare（内部仍有重试一次），
+                    // 成功后它的 onReady 再补写一次 Now Playing 换成本歌视频。
+                    if !AnimatedArtworkManager.shared.isReady(key: animKey),
+                       !self.routeARepreparedKeys.contains(animKey) {
+                        self.routeARepreparedKeys.insert(animKey)
+                        Task.detached {
+                            try? await Task.sleep(nanoseconds: 5_000_000_000)
+                            await MainActor.run {
+                                guard self.store?.currentTrack?.id == track.id,
+                                      self.lastCoverKey == animKey,
+                                      self.animatedArtworkEnabled else { return }
+                                AnimatedArtworkManager.shared.prepare(cover: coverImage, key: animKey) { [weak self] in
+                                    guard let self else { return }
+                                    Task { @MainActor in
+                                        guard self.lastCoverKey == animKey else { return }
+                                        self.writeNowPlaying()
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         } else {
-            // 视频已就绪：直接重挂一次（没有 onReady 回调会再补写）。
-            writeNowPlaying()
+            // r49 R2：已就绪也走 prepare()——它内部的 isReady 分支会同步置
+            // lastGoodKey 并立即回调；之前这里只 writeNowPlaying()、绕过
+            // prepare()，lastGoodKey 永远不补，下一首切来 fallbackKey 因
+            // lastGoodKey == nil 返回 nil → 锁屏掉回 none。
+            AnimatedArtworkManager.shared.prepare(cover: coverImage, key: animKey) { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in
+                    guard self.lastCoverKey == animKey else { return }
+                    self.writeNowPlaying()
+                }
+            }
         }
     }
 

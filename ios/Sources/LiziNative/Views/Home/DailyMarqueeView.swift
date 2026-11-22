@@ -160,7 +160,8 @@ private struct MarqueeCard: View {
     var body: some View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 7) {
-                ProxyImageView(url: track.coverURL) { LiziTokens.paper2 }
+                // r49: 白占位改深色——与 CoverImageView 同款 DefaultCoverArt（环内深色占位一致）。
+                ProxyImageView(url: track.coverURL) { DefaultCoverArt(iconSize: 64) }
                 .frame(width: 156, height: 156)
                 .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius10))
                 Text(track.title)

@@ -41,6 +41,7 @@ final class DiagLog {
 
     private func loadPersisted() {
         loadBreadcrumb()
+        loadPlayStartByGen()
         let ud = UserDefaults.standard
         if let data = ud.data(forKey: PersistKey.logs),
            let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
@@ -183,6 +184,50 @@ final class DiagLog {
         persistBreadcrumb()
     }
 
+    // MARK: - r49 各代 play start 独立索引
+
+    /// 各代 play start 时间戳（gen → 秒）：面包屑只有最近 30 条，快速
+    /// 连点 4–5 次就能把旧代 play start 顶出窗口，看门狗在窗口里
+    /// contains 会误报 MISSING。play start 在哪一代发生就记在哪一代，
+    /// 看门狗只查这张表，不再扫 30 条滑动窗口。recordPlaybackStep 的
+    /// 同步落盘写法一字不动；这张表只作看门狗判断 + 诊断展示，走
+    /// UserDefaults 镜像（只留最近 50 代，防无限涨）。
+    private var playStartByGen: [Int: Double] = [:]
+    private static let playStartByGenKey = "lizi.playStartByGen"
+
+    private func loadPlayStartByGen() {
+        let ud = UserDefaults.standard
+        guard let data = ud.data(forKey: Self.playStartByGenKey),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Double] else { return }
+        playStartByGen = Dictionary(uniqueKeysWithValues: raw.compactMap { (k, v) in
+            Int(k).map { ($0, v) }
+        })
+    }
+
+    private func persistPlayStartByGen() {
+        let raw = Dictionary(uniqueKeysWithValues: playStartByGen.map { (String($0.key), $0.value) })
+        if let data = try? JSONSerialization.data(withJSONObject: raw) {
+            UserDefaults.standard.set(data, forKey: Self.playStartByGenKey)
+        }
+    }
+
+    /// playCurrent 入口记 "play start" 时同步记这一代（与面包屑同行，
+    /// 但不进 30 条窗口）。看门狗只认这张表。
+    func recordPlayStart(gen: Int) {
+        lock.lock(); defer { lock.unlock() }
+        playStartByGen[gen] = Date().timeIntervalSince1970
+        if playStartByGen.count > 50 {
+            for g in playStartByGen.keys.sorted().dropLast(50) { playStartByGen.removeValue(forKey: g) }
+        }
+        persistPlayStartByGen()
+    }
+
+    /// 这一代记过 play start 吗（看门狗用）。
+    func hasPlayStart(gen: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return playStartByGen[gen] != nil
+    }
+
     // MARK: - 上次死亡上报（第 21 轮第 1 件）
 
     /// 上次启动是否干净退出（false = 上次没走 applicationWillTerminate；
@@ -266,6 +311,7 @@ final class DiagLog {
         events = []
         lastSearch = [:]
         breadcrumbSteps = []
+        playStartByGen = [:]
         diagLogReceived = 0
         previousRunClean = true
         lastDeathStep = ""
@@ -277,6 +323,7 @@ final class DiagLog {
         ud.removeObject(forKey: PersistKey.events)
         ud.removeObject(forKey: PersistKey.lastSearch)
         ud.removeObject(forKey: "lizi.playbackBreadcrumb")
+        ud.removeObject(forKey: Self.playStartByGenKey)
         ud.removeObject(forKey: RunKey.lastDeathStep)
         ud.removeObject(forKey: RunKey.lastDeathAt)
         ud.removeObject(forKey: RunKey.lastDeathMemoryMB)
@@ -289,6 +336,8 @@ final class DiagLog {
         lock.lock(); defer { lock.unlock() }
         return ["lastSearch": lastSearch, "requests": requests, "events": events, "logs": logs,
                 "playbackBreadcrumb": breadcrumbSteps,
+                // r49：各代 play start 时间戳（gen → 秒，看门狗的判断表）。
+                "playStartByGen": Dictionary(uniqueKeysWithValues: playStartByGen.map { (String($0.key), $0.value) }),
                 // 第 15 轮第 4 件：挂起的 LX 取链任务数（>0 且一直不回零
                 // 就是有脚本 Promise 不 settle、任务泄漏了）。
                 "lxPendingCalls": LXScriptInstance.pendingMusicUrlCalls,

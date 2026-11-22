@@ -313,10 +313,18 @@ switch platform {
 case "netease":
 // /api/song/url：ids 是 JSON 数组字符串，level 原样透传。
 guard let id = Int(key) else { return SongURLResult(reason: "unavailable", via: "platform")}
-let d = await call(path: "/api/song/url",
+// r49：取链单独区分 network 与 unavailable——call() 在 502/超时/
+// 空体时直接回 nil，桥层原来一律坍缩成 unavailable；这里用已有的
+// callSoft 变体（(status, dict)，不新加 call()、其它调用方一字不
+// 动）：没体（dict nil）或服务端 502 → reason:"network"；有体无
+// 数据才按 per-item 码判 vip/unavailable。
+let (songUrlStatus, d) = await callSoft(path: "/api/song/url",
 query: ["ids": "[\(id)]", "level": param])
-guard let items = d?["data"] as? [[String: Any]], let item = items.first else {
-return SongURLResult(reason: "unavailable", via: "platform")
+guard let d else {
+return SongURLResult(reason: "network", via: "platform")
+}
+guard let items = d["data"] as? [[String: Any]], let item = items.first else {
+return SongURLResult(reason: songUrlStatus == 502 ? "network" : "unavailable", via: "platform")
 }
 let urlString = (item["url"] as? String) ?? ""
 let isTrial = item["freeTrialInfo"] != nil && !(item["freeTrialInfo"] is NSNull)

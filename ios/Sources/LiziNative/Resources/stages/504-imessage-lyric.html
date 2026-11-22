@@ -1287,13 +1287,14 @@ try {
 } catch(e){ fail(e); }
 
 /* 机身厚度：沿 z 轴挤层（亮度连续爬升消除层纹），总厚保持约 58.8px。
-   桌面固定 40 层、层距 1.47px。
-   ⚠ 安卓 WebView 深度缓冲精度不足：层距 <2.4px 时 3D 排序会翻，侧壁整块闪到前面。
+   ⚠ 深度缓冲精度不足时层距 <2.4px 会 3D 排序翻转，侧壁整块闪到前面。
    页面整体还要乘 --k 缩放，运镜再叠加 scale(s)，实际层距 = gap × K × s；
-   所以安卓按当前 K 动态分层，保证最广镜头（s=1.18）下实际层距 ≥2.6px。
+   r49：全平台按当前 K 动态分层，保证最广镜头（s=1.18）下实际层距 ≥2.6px。
+   （原桌面固定 40 层、层距 1.47px，原守卫只在 ANDROID 分支生效；
+   横屏 iPhone K≈0.391 时旧层距投影仅 0.68px，iOS 同样会翻，Chromium 精度高才不翻。）
    自由视角还会再乘 freeS(0.80–2.60) 和视角余弦，固定层距不够用；
    进入 free 后由 freeDepthUpdate() 按需减层、放大 gap（见下）。
-   桌面 GPU 深度精度足够，整套守卫只在 ANDROID 分支生效。 */
+   r49：freeDepthUpdate() 仍只在 ANDROID 分支生效（自由视角是桌面/Android 拖动场景）。 */
 var ANDROID = /Android/i.test(navigator.userAgent || '');
 var layerEls = null, layerBack = null, layerBaseN = 0, layerCurN = 0, layerCurGap = 0;
 function buildLayers(){
@@ -1303,16 +1304,13 @@ function buildLayers(){
   /* 清空后重建；fit() 每次算出新的 K 都会调用 */
   while (lyEl.firstChild) lyEl.removeChild(lyEl.firstChild);
 
-  if (ANDROID){
-    kk = K;
-    if (!isFinite(kk) || kk <= 0) kk = 0.56;           /* K 异常时按 1280×576 实测值 */
-    need = 2.6 / (kk * 1.18);                          /* 局部坐标下最广镜头仍 ≥2.6px */
-    NL = Math.min(20, Math.max(8, Math.floor(58.8 / need)));
-    gap = 58.8 / NL;                                   /* 总厚保持约 58.8，层数随 K 自适应 */
-  } else {
-    NL = 40;
-    gap = 1.47;
-  }
+  /* r49：全平台按当前 K 自适应分层（原只在 ANDROID 分支；横屏 iOS K≈0.391 时旧固定层距
+     投影仅 0.68px，远低于 2.4px 翻转阈值，iOS 又无守卫，故横屏黑屏） */
+  kk = K;
+  if (!isFinite(kk) || kk <= 0) kk = 0.56;             /* K 异常时按 1280×576 实测值 */
+  need = 2.6 / (kk * 1.18);                            /* 局部坐标下最广镜头仍 ≥2.6px */
+  NL = Math.min(20, Math.max(8, Math.floor(58.8 / need)));
+  gap = 58.8 / NL;                                     /* 总厚保持约 58.8，层数随 K 自适应 */
 
   for (i = 0; i < NL; i++){
     t = i / (NL - 1);                                  /* 0 = 最深（背板）  1 = 最亮（贴屏幕） */
@@ -1326,11 +1324,10 @@ function buildLayers(){
     lyEl.appendChild(li);
   }
 
-  /* 背板：安卓与最深层至少隔 2 个 gap —— 只隔 1 个时它和挤层也贴太近，同样会翻 */
+  /* r49：背板与最深层至少隔 2 个 gap（全平台）—— 只隔 1 个时它和挤层也贴太近，同样会翻。
+     旧非安卓固定 -60px：横屏 NL=10/gap=5.88 时距最深层仅 1.2px（投影约 0.55px），仍在翻转区。 */
   back = document.createElement('i');
-  back.style.transform = ANDROID
-    ? 'translateZ(' + (-((NL + 2) * gap)).toFixed(2) + 'px)'
-    : 'translateZ(-60px)';
+  back.style.transform = 'translateZ(' + (-((NL + 2) * gap)).toFixed(2) + 'px)';
   back.style.background = 'radial-gradient(72% 50% at 32% 30%,#2a2a33,#0e0e12 72%)';
   lyEl.appendChild(back);
 
@@ -1400,9 +1397,16 @@ function freeDepthUpdate(force){
 }
 
 fit();
+var resizeTimer = null;   /* r49：旋转防抖计时器 */
 addEventListener("resize", function(){
   fit();
   if (grainDone){ grainDone = false; grain(); }
+  /* r49：150ms 防抖，停稳后横屏重算一次运镜；竖屏不调（竖屏 applyShot 本就会清镜头） */
+  if (resizeTimer) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(function(){
+    resizeTimer = null;
+    if (!PORTRAIT && curIdx >= 0) rezoom();
+  }, 150);
 });
 addEventListener("load", function(){ fit(); setTimeout(grain, 220); });
 setTimeout(grain, 900);

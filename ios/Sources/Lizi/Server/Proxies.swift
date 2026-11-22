@@ -15,6 +15,12 @@ import Foundation
 /// URLSession 的超时计时；每个开始跑的请求都有完整超时可用。
 /// r49：门等加 6s 硬上限 + 32 排队上限（见下），等槽超时/队满直接失败，
 /// 不再无限等（门等期间超时计时根本没开始，20–30 张冷封面排队即 40–56s）。
+/// r50：上面这套「队满当场拒」正是 2026-11-23 03:48 真机门风暴的死法——
+/// 酷狗列表一开 50 张封面 22ms 内同时进门，4 槽 + 32 队只接纳 36 个，
+/// 剩下的 gateWait=0 当场全拒，且 CoverImageLoader 的 60s 否定缓存把
+/// 「没试过」当成「试过且失败」又罚 60 秒。r50 改成：队满不再当场拒，
+/// 改为 FIFO 排队等槽、等槽总预算 36s（见 gateWaitTimeout）；等槽超时
+/// 仍是「没试过」，调用方不得记否定缓存（见 CoverImageLoader）。
 /// VM 证据：单发 curl p3/p4.music.126.net https 全部 200（首字节 1.5–1.7s），
 /// 端点本身是好的；Referer 也已排除（无 Referer 同样 200，错 Referer 只会
 /// 快 403、不会 10s 超时）。VM 通 ≠ 真机通：真机出口若另有拦截，快速失败 +
@@ -23,14 +29,16 @@ import Foundation
 /// r49: 门等待失败原因（与上游 -1001 区分的内部码；proxyImage 对其直接 502，
 /// 不进会话——门等期间会话任务根本还没创建）。
 enum CoverFetchGateError: Error, LocalizedError {
-    /// 排队已满（32 个 waiter），直接失败、不再排队。
+    /// r50：保留作兼容——acquire 不再抛它（队满改排队等槽，见下），
+    /// 现实中不再产生 gate-queue-full 日志；proxyImage 的 gate 分支
+    /// 仍认这个 case，以防将来恢复队满路径时日志原因不断。
     case queueFull
-    /// 等槽超过 6s。
+    /// 等槽超过总预算（r50：36s）。
     case gateTimeout
     var errorDescription: String? {
         switch self {
         case .queueFull: return "cover fetch gate queue full"
-        case .gateTimeout: return "cover fetch gate timeout (6s)"
+        case .gateTimeout: return "cover fetch gate timeout (36s)"
         }
     }
 }
@@ -45,10 +53,16 @@ struct CoverFetchError: Error {
 actor CoverFetchGate {
     static let shared = CoverFetchGate()
     static let maxConcurrent = 4
-    /// r49: 门等硬上限——等槽超过 6s 直接失败（旧实现无限等）。
-    static let gateWaitTimeout: TimeInterval = 6
-    /// r49: 排队上限——waiter 超过 32 个直接失败（fail fast），不无界排队。
-    static let maxWaiters = 32
+    /// r50：等槽总预算 36s（r49 是 6s + 32 队满当场拒）。
+    /// 算账：burst 50 张封面 / 4 槽 × 单张取图约 1.5–2s ≈ 19–25s，
+    /// 36s 让尾部排队者也能等到槽；不是「把 32 改大」——队满当场拒
+    /// 已删，排队长度不再设限、只限等待时间（每 waiter 一个 36s
+    /// 超时任务，到时摘队抛 gateTimeout）。超时仍是「没试过」，
+    /// 调用方不得记否定缓存、可重试（见 CoverImageLoader）。
+    static let gateWaitTimeout: TimeInterval = 36
+    // r50：maxWaiters 已删——r49 的 32 队满当场拒就是门风暴的根因，
+    // 排队本身只是一个挂起的 continuation，代价极小；上限改由
+    // gateWaitTimeout 的时间预算承担。
     private var running = 0
     private var waiters: [Waiter] = []
 
@@ -63,7 +77,7 @@ actor CoverFetchGate {
     /// 在门内跑一次取图：拿槽 → 跑 work → 还槽（work 抛错/取消也还）。
     /// 返回取图结果 + 等槽毫秒数（诊断用：总 ms 大而 waitMs 小 = 上游 stalls；
     /// waitMs 大 = 首页并发把门堵了）。
-    /// r49: 拿槽失败（超时/队满/取消）也把已等毫秒数包在 CoverFetchError 里
+    /// r49: 拿槽失败（超时/取消）也把已等毫秒数包在 CoverFetchError 里
     /// 抛出去——旧代码只在成功路径拷 waitMs，run 一抛错调用方 catch 里的
     /// gateWaitMs 恒为 0。
     func run<T>(_ work: () async throws -> T) async throws -> (value: T, waitMs: Int) {
@@ -85,13 +99,18 @@ actor CoverFetchGate {
     }
 
     /// r49: 拿一个取图槽；等槽期间被取消抛 CancellationError（调用方不跑取图，
-    /// 有槽就还槽）；等槽超 6s 抛 gateTimeout；排队满 32 抛 queueFull。
+    /// 有槽就还槽）；等槽超 36s 抛 gateTimeout。
+    /// r50：删掉 r49 的「waiters 满 32 直接抛 queueFull」——burst 下队满
+    /// 当场拒就是 03:48 风暴（50 连拒、gateWait=0）。现在队满只排队，
+    /// FIFO 先到先得（列表自上而下创建视图，到达顺序 ≈ 可见顺序，
+    /// 真正的可见优先需要调用方传优先级，那是调用方改动、本件不做，
+    /// 见回报）；排空只靠 release（每完成一张唤醒队首），与 r49 相同。
     private func acquire() async throws {
         if running < Self.maxConcurrent {
             running += 1
             return
         }
-        guard waiters.count < Self.maxWaiters else { throw CoverFetchGateError.queueFull }
+        // r50: 不再设队满上限，直接进队等槽（36s 总预算，见 gateWaitTimeout）。
         let acquired = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             let id = UUID()
             waiters.append(Waiter(id: id, continuation: continuation))
@@ -204,8 +223,11 @@ enum Proxies {
     /// r49: 会话调用墙钟总闸——data 任务与 6s 睡眠竞速；谁先完就以谁为准，
     /// 另一路 group.cancelAll() 取消到底（URLSession 的 async API 收到取消会
     /// 取消底层 URLSessionTask，不是调用方不等了、任务还在跑）。
-    /// 6s 与 imageFetchTimeout 同值：门等 6s + 会话 6s，单次 proxyImage
-    /// 最坏 ≈ 12s，且失败原因可按段区分（gate-timeout / wallclock / -1001）。
+    /// 6s 与 imageFetchTimeout 同值：r50 门等总预算 36s + 会话 6s，单次
+    /// proxyImage 最坏 ≈ 42s（r49 是 12s），且失败原因可按段区分
+    /// （gate-timeout / wallclock / -1001）。42s 只发生在 burst 尾部
+    /// 排队时，单张冷封面仍是 6s 会话上限；队空自动补试靠调用方重试
+    /// （否定缓存不再罚 gate 失败，见 CoverImageLoader）。
     private static func fetchWithWallClock(_ request: URLRequest) async throws -> (Data, URLResponse) {
         try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
             group.addTask { try await imageSession.data(for: request) }
@@ -265,9 +287,19 @@ enum Proxies {
     /// 上限、无并发门——代理 40s 死透后直链再等 60s，一张图最坏 100s 才占位。
     /// 新写法：入口 https 归一 → 同一个门、同一个 6s 会话、带各家 Referer/UA；
     /// 任何失败回 nil（调用方占位），不抛错。
+    /// r50：签名不动（NowPlayingCoordinator / StageBridge 也在调，改签名
+    /// 要动调用方）；新增 directImageDataDetailed 供 CoverImageLoader 用，
+    /// 区分「门等失败（没试过）」与「真取失败」，否定缓存只罚后者。
     static func directImageData(_ url: URL) async -> Data? {
+        await directImageDataDetailed(url).data
+    }
+
+    /// r50：directImageData 的带原因版。gateFailed=true 表示等槽超时、
+    /// 连网都没碰（CoverFetchGateError），调用方不得记否定缓存；
+    /// gateFailed=false 的 nil 是真取失败（上游 4xx/5xx、超时、坏数据）。
+    static func directImageDataDetailed(_ url: URL) async -> (data: Data?, gateFailed: Bool) {
         let fetchURL = upgradedImageURL(url)
-        guard let host = fetchURL.host else { return nil }
+        guard let host = fetchURL.host else { return (nil, false) }
         var request = URLRequest(url: fetchURL, timeoutInterval: imageFetchTimeout)
         let ref = imageReferer(host)
         if !ref.isEmpty {
@@ -281,10 +313,16 @@ enum Proxies {
             }
             let (data, resp) = fetched.value
             guard let http = resp as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode) else { return nil }
-            return data
+                  (200..<300).contains(http.statusCode) else { return (nil, false) }
+            return (data, false)
         } catch {
-            return nil
+            // r50: 门等失败与真取失败分开——run 抛出的 CoverFetchError
+            // 里包着 CoverFetchGateError 时就是「没试过」。
+            if let wrapped = error as? CoverFetchError,
+               wrapped.underlying is CoverFetchGateError {
+                return (nil, true)
+            }
+            return (nil, false)
         }
     }
 
@@ -294,7 +332,8 @@ enum Proxies {
     /// （http→https 候选 × 每候选重试 2 次 × 10s）整段删除，不是改数：
     /// https 腿在真机上 10s 超时 ×2 = 20003ms，http 腿 ATS -1022 秒拦；
     /// VM 单发同款 URL 全部 200，Referer 也已排除（见 CoverFetchGate 注释）。
-    /// 新逻辑：入口一次升 https → 门（最多 4 并发）→ 单次取图 6s → 失败立刻
+    /// 新逻辑：入口一次升 https → 门（最多 4 并发，r50：队满排队等槽、
+    /// 总预算 36s，不再当场拒）→ 单次取图 6s → 失败立刻
     /// 502，不重试、不回退 http。代理腿最坏 6s（旧 40s）。
     /// 保留：取消（-999）回 499 不重试（r20 的修法）；上游 HTTP 错误
     /// （403/404）不重试、直接 502；Content-Type 与 10MB 上限。
@@ -378,14 +417,20 @@ enum Proxies {
             let ms = Int(Date().timeIntervalSince(started) * 1000)
             let sessionMs = max(0, ms - gateWaitMs)
             let hash = urlHash(fetchURL)
-            // r49: 门等失败（超时/队满）直接 502，不进会话——门等期间会话
+            // r49: 门等失败（r50 起只有超时）直接 502，不进会话——门等期间会话
             // 任务根本还没创建，与 -1001 是两回事，原因可区分。
             if let gateError = rootError as? CoverFetchGateError {
                 let reason = gateError == .gateTimeout ? "gate-timeout" : "gate-queue-full"
                 DiagLog.shared.recordLog(category: "cover",
                     message: "img proxy \(host) gate failed (\(ms)ms gateWait=\(gateWaitMs)ms session=\(sessionMs)ms urlHash=\(hash) reason=\(reason))",
                     fields: ["host": host, "reason": reason, "lane": "proxy", "urlHash": hash, "gateWaitMs": gateWaitMs, "sessionMs": sessionMs])
-                return .error(502, rootError.localizedDescription)
+                // r50：门等失败打上进程内标记头——这是「没试过」，不是上游失败；
+                // CoverImageLoader 认这个头：不记否定缓存、不再白白跑直链腿
+                // （直链走同一个门，burst 下同样要排队）。body 与旧 .error
+                // 一致，对 Router / NowPlayingCoordinator 的行为不变。
+                var resp = HttpResponse.error(502, rootError.localizedDescription)
+                resp.headers["X-Lizi-Gate-Failed"] = reason
+                return resp
             }
             let code = (rootError as NSError).code
             // r49: 墙钟总闸超时与普通上游失败原因分开记（-1001 之外的新码）。

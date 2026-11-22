@@ -198,6 +198,14 @@ final class PlaybackStore: ObservableObject {
     private var fallbackRetried = false
     /// r26：LX 死链降档重试只做一次（见 handlePlaybackFailure 2a）。
     private var lxDowngradeRetried = false
+    /// r50：证书失败重取链只做一次（见 handlePlaybackFailure 1b）。
+    private var certReResolveRetried = false
+    /// r50：最近一次直链的真实地址（代理起播时会把 currentAssetURL 换成
+    /// lizi-audio://，死链 host 要从这里取，不能从 currentAssetURL 取）。
+    private var lastDirectAssetURL: URL?
+    /// r50：最近一次 item 失败的原始错误（observe 里记；证书失败判定
+    /// 走它，不靠文案猜）。
+    private var lastItemError: Error?
     private var currentAssetURL: URL?
     private var audioSessionActivated = false
     private var wasPlayingBeforeInterruption = false
@@ -995,6 +1003,10 @@ final class PlaybackStore: ObservableObject {
         proxyTried = false
         fallbackRetried = false
         lxDowngradeRetried = false
+        // r50：证书失败重取链与直链地址、item 错误随新歌清零。
+        certReResolveRetried = false
+        lastDirectAssetURL = nil
+        lastItemError = nil
         // r31：单曲覆盖只对上一首歌有效——换了歌（id 或平台变了）就清掉，
         // 回全局默认档；同首歌重播（选档后立即重解析）不动覆盖。
         if currentTrack?.id != track.id || currentTrack?.platform != track.platform {
@@ -1142,6 +1154,9 @@ final class PlaybackStore: ObservableObject {
             return
         }
         currentAssetURL = url
+        // r50：直链地址另记一份（代理起播后 currentAssetURL 会变成
+        // lizi-audio://，证书失败要重取链时死链 host 从这里取）。
+        if url.scheme == "http" || url.scheme == "https" { lastDirectAssetURL = url }
         let asset: AVURLAsset
         if url.scheme == AudioProxyLoader.scheme {
             asset = AVURLAsset(url: url)
@@ -1325,6 +1340,8 @@ final class PlaybackStore: ObservableObject {
             Task { @MainActor in
                 guard gen == self.currentPlayGeneration else { return }
                 if item.status == .failed {
+                    // r50：记下原始错误供 handlePlaybackFailure 判证书失败。
+                    self.lastItemError = item.error
                     let reason = item.error?.localizedDescription ?? "-"
                     DiagLog.shared.recordPlaybackStep("item failed source=\(self.currentTrack?.platform ?? "-") id=\(self.currentTrack?.id ?? "-") error=\(reason)")
                     await self.handlePlaybackFailure(gen: gen)
@@ -1350,14 +1367,40 @@ final class PlaybackStore: ObservableObject {
         }
         let failObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] note in
             guard let self else { return }
             Task { @MainActor in
                 guard gen == self.currentPlayGeneration else { return }
+                // r50：播到一半失败的原始错误同样记下（与 status failed 同口径）。
+                if let err = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error {
+                    self.lastItemError = err
+                }
                 await self.handlePlaybackFailure(gen: gen)
             }
         }
         itemObservers = [endObserver, failObserver]
+    }
+
+    /// r50：证书/TLS 失败判定（03:48 酷狗：直链 AVPlayer 报「The certificate
+    /// for this server is invalid.」、代理 URLSession 报 TLS 失败——两条路
+    /// 同死在同一 host 的证书上）。只认错误链里的码（-1200 安全连接失败 /
+    /// -1201 证书日期 / -1202 证书不可信，含 AVFoundation -11800 底下的
+    /// NSURLError）；码对不上时再看链上文案是否含 certificate（AVPlayer
+    /// 有时只剩顶层文案）。绝不按 host 猜——host 只在调用处另行核对。
+    private static func isCertFailure(_ error: Error?) -> Bool {
+        var current: Error? = error
+        var sawCertText = false
+        while let e = current {
+            let ns = e as NSError
+            if ns.code == NSURLErrorSecureConnectionFailed
+                || ns.code == NSURLErrorServerCertificateHasBadDate
+                || ns.code == NSURLErrorServerCertificateUntrusted {
+                return true
+            }
+            if e.localizedDescription.lowercased().contains("certificate") { sawCertText = true }
+            current = ns.userInfo[NSUnderlyingErrorKey] as? Error
+        }
+        return sawCertText
     }
 
     /// 地址进了播放器才发现是死的（代理 502/403、解码失败）时的重试链
@@ -1382,6 +1425,43 @@ final class PlaybackStore: ObservableObject {
             let proxyURL = proxyLoader.proxyURL(for: url, source: track.platform)
             await startItem(url: proxyURL, track: track, gen: gen)
             return
+        }
+        // r50-1b：证书失败重取链（每首只一次）：直链与代理同死在同一
+        // host 的证书上时，再试同一条地址没有意义；但取链端点可能换
+        // host——服务端 songUrl 失败路径上多了网页通道（kugou-web，
+        // fs.w.kugou.com），重取一次可能拿到另一 CDN host 的活链。
+        // 只对酷狗 + 证书失败 + 死链 host 确是 .kugou.com 时跑；
+        // 重取只走平台腿（跳云盘/LX），且本函数入口已清过磁盘音频
+        // 缓存，重取到的一定是新拿的地址。新地址 host 与死链 host
+        // 相同 → 证书还会死在同一处，不起播，直接落到 2a/2b；不同 →
+        // 起播。
+        if !certReResolveRetried, track.platform == "kugou",
+           Self.isCertFailure(lastItemError),
+           let deadHost = lastDirectAssetURL?.host?.lowercased(),
+           deadHost == "kugou.com" || deadHost.hasSuffix(".kugou.com") {
+            certReResolveRetried = true
+            DiagLog.shared.recordPlaybackStep("play FAIL cert, re-resolve platform once source=\(track.platform) id=\(track.id) host=\(deadHost)")
+            let skips = SkipSet(skipPlatform: false, skipCloud: true, skipLX: true)
+            if let result = await resolveURL(for: track, gen: gen, skips: skips),
+               let url = result.url, gen == currentPlayGeneration {
+                let newHost = (url.host ?? "").lowercased()
+                if newHost != deadHost {
+                    lastFetchVia = result.via
+                    lastFetchReason = result.reason
+                    actualQuality = result.actualQuality
+                    servedQualityLabel = result.servedLabel
+                    currentVia = result.via
+                    noteVideoReward(track: track, result: result)
+                    recordDowngradeIfNeeded(requested: preferredQuality, served: result.actualQuality,
+                                            via: result.via)
+                    DiagLog.shared.recordPlaybackStep("play FAIL cert, new host source=\(track.platform) id=\(track.id) host=\(newHost) via=\(result.via)")
+                    await startItem(url: url, track: track, gen: gen)
+                    beginQualityMeasurement(url: url, claimed: result.actualQuality,
+                                            servedLabel: result.servedLabel, track: track, gen: gen)
+                    return
+                }
+                DiagLog.shared.recordPlaybackStep("play FAIL cert, same host skip source=\(track.platform) id=\(track.id) host=\(newHost)")
+            }
         }
         // 2a：LX 死链降档重试（每首只一次）：实际回档往下降一档再取 LX，
         //   降档后 LX 仍是第一档（平台腿还没跑过，跳过平台/云盘，只跑 LX）。
@@ -1463,7 +1543,13 @@ final class PlaybackStore: ObservableObject {
         if lastFetchReason == "vip" {
             VideoRewardStore.shared.noteVIPRefusal(platform: track.platform)
         }
-        DiagLog.shared.recordPlaybackStep("play FAIL all tiers source=\(track.platform) id=\(track.id) reason=\(lastFetchReason)")
+        // r50：终态带上证书失败标记 + 死链 host（驱动断言用；UI 的
+        // errorMessage 仍是 reason，不把证书细节露给用户）。
+        if Self.isCertFailure(lastItemError), let deadHost = lastDirectAssetURL?.host {
+            DiagLog.shared.recordPlaybackStep("play FAIL all tiers source=\(track.platform) id=\(track.id) reason=\(lastFetchReason) cert=true host=\(deadHost)")
+        } else {
+            DiagLog.shared.recordPlaybackStep("play FAIL all tiers source=\(track.platform) id=\(track.id) reason=\(lastFetchReason)")
+        }
     }
 
     /// r48-8：会员歌失败时，未登录该平台就改成登录提示（不是笼统 unavailable / vip）。

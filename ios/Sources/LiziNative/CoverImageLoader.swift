@@ -41,6 +41,12 @@ actor CoverImageLoader {
     /// r49: 短期否定缓存——失败的 URL 60s 内直接回 nil，不进门、不联网；
     /// ProxyImageView 的重试（首试 + 2 次）在 60s 内撞上它都是廉价 nil，
     /// 一次冷启动风暴里每 URL 最多进门 2 次（代理 + 直链各一）。
+    /// r50：否定缓存只罚真正取失败的 URL——门等失败（gate-queue-full /
+    /// gate-timeout，连网都没碰）不再记入（见 noteFinished 的 gateFailed
+    /// 参数）。r49 的做法等于把「没试过」当成「试过且失败」罚 60 秒，
+    /// 正是 03:48 风暴里被拒的封面 60 秒内不再重试的另一半根因；
+    /// 修完后 ProxyImageView 的 0.5s / 1.5s 重试对门失败真正生效，
+    /// 队空后补试走这条重试链。
     private var negativeCache: [URL: Date] = [:]
     private static let negativeTTL: TimeInterval = 60
 
@@ -66,8 +72,9 @@ actor CoverImageLoader {
         }
         if let running = inFlight[url] { return await running.value }
         let task = Task.detached {
-            let (img, data) = await CoverImageLoader.fetchUncached(url: url)
-            await CoverImageLoader.shared.noteFinished(img, data: data, for: url)
+            // r50: fetchUncached 同时回 gateFailed——门等失败不记否定缓存。
+            let (img, data, gateFailed) = await CoverImageLoader.fetchUncached(url: url)
+            await CoverImageLoader.shared.noteFinished(img, data: data, gateFailed: gateFailed, for: url)
             return img
         }
         inFlight[url] = task
@@ -75,12 +82,16 @@ actor CoverImageLoader {
     }
 
     /// 在飞任务收尾（无论成功失败都清 inFlight；成功才进缓存）。
-    private func noteFinished(_ image: UIImage?, data: Data?, for url: URL) {
+    /// r50：gateFailed=true（门等超时，没试过）不记否定缓存——
+    /// 否定缓存只罚真正取失败的 URL，否则 ProxyImageView 的重试
+    /// 永远撞上 60s 否定缓存、队空了也补试不了。
+    private func noteFinished(_ image: UIImage?, data: Data?, gateFailed: Bool, for url: URL) {
         if let image { store(image, for: url) }
         // r48-11：联网取图成功才写盘（失败不写，不缓存坏数据）。
         if let data { DiskCache.store(data, kind: .cover, key: DiskCache.coverKey(for: url)) }
         // r49: 失败记否定缓存（成功不记）；过期条目顺手清掉。
-        if image == nil {
+        // r50: 门等失败（gateFailed）不记——没试过就不罚。
+        if image == nil, !gateFailed {
             negativeCache[url] = Date()
             negativeCache = negativeCache.filter { Date().timeIntervalSince($0.value) < Self.negativeTTL }
         }
@@ -88,8 +99,13 @@ actor CoverImageLoader {
     }
 
     /// 进程内代理 → 直链（不抛错；两步都失败返回 `nil`）。
-    /// 进程内代理 → 直链（不抛错；两步都失败返回 `(nil, nil)`）。
-    private static func fetchUncached(url: URL) async -> (UIImage?, Data?) {
+    /// 进程内代理 → 直链（不抛错；两步都失败返回 `(nil, nil, gateFailed)`）。
+    /// r50：第三个返回值 gateFailed=true 表示「两步都没真正试过」
+    /// （代理腿门等失败，或直链腿门等失败）——调用方不得记否定缓存。
+    /// 代理腿门等失败时直接跳过直链腿：直链走同一个门，burst 下
+    /// 同样要排队，再等一轮 36s 没有意义，等 ProxyImageView 重试
+    /// 时再进门。
+    private static func fetchUncached(url: URL) async -> (UIImage?, Data?, Bool) {
         // 1) 进程内代理（Proxies.proxyImage：白名单 + Referer + https 升级）。
         let proxyReq = HttpRequest(method: "GET", path: "/api/img",
                                    query: ["url": url.absoluteString],
@@ -97,17 +113,24 @@ actor CoverImageLoader {
         let proxyResp = await Proxies.proxyImage(proxyReq)
         if (200...299).contains(proxyResp.status),
            let image = UIImage(data: proxyResp.body) {
-            return (image, proxyResp.body)
+            return (image, proxyResp.body, false)
+        }
+        // r50: 代理腿门等失败（X-Lizi-Gate-Failed 头）= 没试过：
+        // 不记否定缓存、不跑直链腿，直接回 gateFailed。
+        if proxyResp.headers["X-Lizi-Gate-Failed"] != nil {
+            return (nil, nil, true)
         }
         // 2) 直链兜底（r24：走 Proxies.directImageData——同一个门、6s 上限、
         // 入口 https 归一；旧写法 URLSession.shared.data(from:) 默认 60s，
         // 代理死透后直链再等 60s，一张图最坏 100s 才占位）。
-        if let data = await Proxies.directImageData(url),
+        let direct = await Proxies.directImageDataDetailed(url)
+        if let data = direct.data,
            let image = UIImage(data: data) {
-            return (image, data)
+            return (image, data, false)
         }
         // 直链也失败：返回 nil，调用方占位，不抛错、不编图。
-        return (nil, nil)
+        // r50: 直链腿门等失败同样是没试过（gateFailed=true），不记否定缓存。
+        return (nil, nil, direct.gateFailed)
     }
 
     private func store(_ image: UIImage, for url: URL) {
@@ -129,6 +152,8 @@ actor CoverImageLoader {
 /// 最多 3 次（首试 + 2 次重试，间隔 0.5s / 1.5s）；URL 变了旧任务取消、
 /// 新任务重开；成功一次即停；每次都走 CoverImageLoader（进程内缓存 +
 /// 在飞去重），重试不重复发请求。
+/// r50：重试对门等失败重新生效——r49 时重试撞上 60s 否定缓存全是廉价
+/// nil，现在门失败不记否定缓存，重试会真的重新进门（队空后补试）。
 struct ProxyImageView<Placeholder: View>: View {
     let url: URL?
     let placeholder: Placeholder

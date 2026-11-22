@@ -331,19 +331,38 @@ actor KugouAPI {
     /// VIP 字段多名兜底；VIP 为 0 再查 unionVIP；失败回落 legacyProfile。
     /// 上游明确拒了（status 0 / errcode 非 0）抛 unavailable；传输层
     /// 抛错原样往上走，调用方按「断网 ≠ 登出」处理。
+    /// r50：legacyProfile 重写（见该函数注释）——r48-9 版没发上游必需
+    /// 的 RSA `p`、没发 Cookie/dfid 头、form 值没编码，兜底从来没真
+    /// 正跑通过；主路失败时这里记一笔 kind，兜底成败另记一笔，下次
+    /// 复现直接看这两行分清死在哪一步。
     func androidProfile() async throws -> Profile {
         do {
             return try await androidProfileOnce()
         } catch {
-            // r48-9：RSA 体那路被上游拒了（status 非 1 → .unavailable）时以前
-            // 直接抛掉，form 兜底只在 .invalidResponse 时才试——登录态保住了，
-            // 画像却永远拿不到（昵称剩「酷狗用户」、头像空、VIP 未知），正是
-            // 「登录了无法获取到用户信息」。RSA 路任何失败都试一次 form 兜底
-            // （同端点 POST form，plat/token/userid/clienttime + web 签名）；
-            // 两路都失败才往上抛，调用方按「断网 ≠ 登出」保登录态。
-            if let legacy = try? await legacyProfile() { return legacy }
+            // r50：主路失败记一笔在哪一步（只记错误种类/码，不记 token/
+            // cookie 值；transport 只记 domain + code，不记 description
+            // ——URL 里可能带 token）。
+            DiagLog.shared.recordLog(category: "kugou-profile", message: "androidProfile primary FAIL", fields: ["kind": Self.profileErrorKind(error)])
+            if let legacy = try? await legacyProfile() {
+                DiagLog.shared.recordLog(category: "kugou-profile", message: "legacyProfile ok", fields: [:])
+                return legacy
+            }
             throw error
         }
+    }
+
+    /// r50：画像失败种类（只记种类，不记任何凭据值）。
+    private static func profileErrorKind(_ error: Error) -> String {
+        if let api = error as? APIError {
+            switch api {
+            case .unavailable: return "upstream-rejected"
+            case .invalidResponse: return "invalid-response"
+            case .qrCodeUnavailable: return "qr-unavailable"
+            case .loginFailed: return "login-failed"
+            }
+        }
+        let ns = error as NSError
+        return "transport:\(ns.domain)/\(ns.code)"
     }
 
     private func androidProfileOnce() async throws -> Profile {
@@ -371,30 +390,71 @@ actor KugouAPI {
         return try await profileFromDict(profile)
     }
 
-    /// 兜底：同端点 POST form（plat/token/userid/clienttime + web 签名）。
+    /// r50 兜底（重写——r48-9 版发错了请求，兜底从来没真正跑通过）：
+    /// 上游 `user_detail.js` 原文：POST /v3/get_my_info，body 必须带
+    /// RSA 加密的 `p`（{token, clienttime}，lite 公钥 raw 加密，大写
+    /// hex）+ visit_time + usertype + userid；r48-9 版没发 `p`，该端
+    /// 点不可能认这种请求。r48-9 版还丢了登录上下文：没发 Cookie 头、
+    /// 没发 dfid/mid 头（主路 gateway 两样都发）；form 值也没做百分
+    /// 号编码，token 里有 +/= 等字符时会坏掉。
+    /// 重写后与主路的区别只剩两点：直连 usercenter host（不走 gateway
+    /// + x-router）与 body 编码（form 而非 JSON）——`p`、Cookie、
+    /// dfid/mid/kg-* 头、签名（网关 android 签名同款：盐 + 排好序的
+    /// query 参数串 + body + 盐）全补上。成败都记一笔诊断（step +
+    /// httpStatus + errcode/status，不记凭据值），两路都失败才往上抛。
     private func legacyProfile() async throws -> Profile {
         guard !session.token.isEmpty else { throw APIError.unavailable }
-        let clienttime = String(Int(Date().timeIntervalSince1970))
-        var params: [String: String] = ["plat": "1", "token": session.token,
-                                         "userid": session.userid, "clienttime": clienttime]
-        params["signature"] = Self.webSignature(params)
+        let clienttime = Int(Date().timeIntervalSince1970)
+        let pJSON = Self.jsonString(.o([
+            ("token", .s(session.token)),
+            ("clienttime", .i(clienttime)),
+        ]))
+        guard let p = rsaRawEncryptUpperHex(pJSON) else { throw APIError.invalidResponse }
+        let formItems = [
+            URLQueryItem(name: "visit_time", value: String(clienttime)),
+            URLQueryItem(name: "usertype", value: "1"),
+            URLQueryItem(name: "p", value: p),
+            URLQueryItem(name: "userid", value: String(Int(session.userid) ?? 0)),
+        ]
+        var formComps = URLComponents()
+        formComps.queryItems = formItems
+        guard let bodyString = formComps.percentEncodedQuery,
+              let bodyData = bodyString.data(using: .utf8) else { throw APIError.invalidResponse }
+        var qParams: [String: String] = ["plat": "1"]
+        qParams["signature"] = Self.androidSignature(qParams, body: bodyData)
         var comps = URLComponents(string: "https://usercenter.kugou.com/v3/get_my_info")!
-        comps.queryItems = params.map { URLQueryItem(name: $0.key, value: $0.value) }
+        comps.queryItems = qParams.map { URLQueryItem(name: $0.key, value: $0.value) }
         guard let url = comps.url else { throw APIError.invalidResponse }
-        let bodyString = params.sorted { $0.key < $1.key }
-            .map { "\($0.key)=\($0.value)" }.joined(separator: "&")
-        let (data, http) = try await Upstream.fetch(url, headers: [
+        let dev = deviceIdentity()
+        var headers: [String: String] = [
             "Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": Self.gatewayUA,
-        ], timeout: 15, method: "POST", body: Data(bodyString.utf8))
-        guard (200..<300).contains(http.statusCode),
-              let json = Upstream.jsonObject(data),
-              Self.upstreamStatus(json) == 1 else { throw APIError.unavailable }
-        let dict = Self.dataDict(json)
-        let profile = (dict["user_info"] as? [String: Any])
-            ?? (dict["userinfo"] as? [String: Any])
-            ?? (dict["profile"] as? [String: Any]) ?? dict
-        return try await profileFromDict(profile)
+            "dfid": dev.dfid, "clienttime": String(clienttime), "mid": dev.mid,
+            "kg-rc": "1", "kg-thash": "5d816a0", "kg-rec": "1",
+            "kg-rf": "B9EDA08A64250DEFFBCADDEE00F8F25F",
+        ]
+        if let cookie = sessionCookieHeader(), !cookie.isEmpty { headers["Cookie"] = cookie }
+        do {
+            let (data, http) = try await Upstream.fetch(url, headers: headers, timeout: 15, method: "POST", body: bodyData)
+            guard let json = Upstream.jsonObject(data) else {
+                DiagLog.shared.recordLog(category: "kugou-profile", message: "legacyProfile FAIL", fields: ["step": "no-json", "httpStatus": http.statusCode])
+                throw APIError.unavailable
+            }
+            guard (200..<300).contains(http.statusCode), Self.upstreamStatus(json) == 1 else {
+                DiagLog.shared.recordLog(category: "kugou-profile", message: "legacyProfile FAIL", fields: ["step": "upstream-rejected", "httpStatus": http.statusCode, "errcode": Self.upstreamErrorCode(json), "status": Self.upstreamStatus(json)])
+                throw APIError.unavailable
+            }
+            let dict = Self.dataDict(json)
+            let profile = (dict["user_info"] as? [String: Any])
+                ?? (dict["userinfo"] as? [String: Any])
+                ?? (dict["profile"] as? [String: Any]) ?? dict
+            return try await profileFromDict(profile)
+        } catch let api as APIError {
+            throw api
+        } catch {
+            DiagLog.shared.recordLog(category: "kugou-profile", message: "legacyProfile FAIL", fields: ["step": "transport", "kind": Self.profileErrorKind(error)])
+            throw APIError.unavailable
+        }
     }
 
     private func profileFromDict(_ profile: [String: Any]) async throws -> Profile {

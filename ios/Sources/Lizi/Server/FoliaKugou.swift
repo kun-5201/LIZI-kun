@@ -1392,6 +1392,23 @@ actor FoliaKugouService {
     /// served 回，VIP 请求被上游悄悄降档（要 flac 只给 320/128）时
     /// App 照样挂无损徽章、升级链也以为档位已够，会员高音质失效还
     /// 看不出来）。
+    /// r50-20018（2026-11-23 VM 核实，无回包原文对照不得改映射）：
+    /// - Folia `kugouFailure.ts` 原文：「酷狗的文档和代码里都没有说哪个码
+    ///   是要会员、没有版权或者限地区，所以只引不分」——Folia 只记录
+    ///   status + errcode，不把任何码映射成 VIP / 版权 / 地区。
+    /// - Bodian 代码里的 20018 是波点（bodian-music-api）自己的码，
+    ///   不是酷狗 /v5/url 的码，不可跨平台套用。
+    /// - Moumusic 同样没有任何 20018 映射；它是在请求里带 vipType /
+    ///   IsFreePart 并轮换 vipType 候选值（本实现 r49 已定不擅自加
+    ///   参数，无回包原文前不动）。
+    /// - 03:48 日志事实：flac 与 320 两档同报 20018 + status 2 +
+    ///   error "" + data null，standard 档正常给链——20018 是「该档
+    ///   位不给地址」，档位级拒绝；status 2 在 Folia 里无 documented
+    ///   含义（只写了 status 3 是 /song/url 判不可播但 legacy 可能活）。
+    /// 结论：20018 绝不映射成 reason "vip"（r49-1 的规则是只有服务端
+    /// 明确说需会员才映射；误映射会触发 noteVIPRefusal、把本地会员
+    /// 资格立即清掉 + 误弹登录）。无链时仍回 "unavailable"，ladder
+    /// 照常降档；errcode/status 全进 DiagLog（r49 已有），供驱动断言。
     private func fetchSongURL(hash: String, quality: String, albumId: Int, albumAudioId: Int) async throws -> (url: String?, authRequired: Bool, reason: String, servedQuality: String?) {
         // r49：vip_type / vip_token 不发往 /v5/url——无回包原文对照，
         // 绝不擅自加参数（登录态只走 gateway 默认注入的 token/userid）。
@@ -1494,6 +1511,59 @@ actor FoliaKugouService {
         return Self.audioUrlOf(d["url"]) ?? Self.audioUrlOf(d["backup_url"])
     }
 
+    /// r50：网页取链兜底（Moumusic `songURLWebOnce` 同款流程，新写）：
+    /// GET wwwapi.kugou.com/yy/index.php?r=play/getdata，hash 大写，
+    /// appid 1014 / platid 4，mid / dfid / userid / token + 有 album
+    /// 时 album_id / album_audio_id；头：浏览器 UA + Referer
+    /// https://www.kugou.com/ + 登录 Cookie（有才带）。回包 data 或
+    /// 顶层里找 play_url / play_backup_url / url。Moumusic 注释写明
+    /// 这路是「移动端 tracker 回 20006 时网页接口仍给地址」的兜底；
+    /// 本实现 tracker 回 20018 无链、legacy 也空时同样试它。只认
+    /// 地址有无，不拿 status/errcode 拦路（只进诊断）。
+    private func fetchWebPlayURL(hash: String, albumId: Int, albumAudioId: Int) async -> String? {
+        let dev = deviceIdentity()
+        let login = loginState()
+        var params: [String: String] = [
+            "r": "play/getdata",
+            "hash": hash.uppercased(),
+            "appid": "1014",
+            "platid": "4",
+            "mid": dev.mid,
+            "dfid": dev.dfid,
+            "userid": login.userid.isEmpty ? "0" : login.userid,
+            "token": login.token,
+        ]
+        if albumId != 0 { params["album_id"] = String(albumId) }
+        if albumAudioId != 0 { params["album_audio_id"] = String(albumAudioId) }
+        var comps = URLComponents(string: "https://wwwapi.kugou.com/yy/index.php")
+        comps?.queryItems = params.map { URLQueryItem(name: $0.key, value: $0.value) }
+        guard let url = comps?.url else { return nil }
+        var headers: [String: String] = [
+            "User-Agent": Self.legacyUA,
+            "Referer": "https://www.kugou.com/",
+        ]
+        if let cookie = webCookieHeader(), !cookie.isEmpty { headers["Cookie"] = cookie }
+        guard let (data, http) = try? await Upstream.fetch(url, headers: headers, timeout: 15),
+              (200..<300).contains(http.statusCode),
+              let json = Upstream.jsonObject(data) else {
+            DiagLog.shared.recordLog(category: "kugou-url", message: "fetchSongURL web FAIL", fields: ["stage": "transport"])
+            return nil
+        }
+        let d = Self.dataDict(json)
+        guard let playURL = Self.audioUrlOf(d["play_url"] ?? d["play_backup_url"] ?? d["url"] ?? json["play_url"]) else {
+            DiagLog.shared.recordLog(category: "kugou-url", message: "fetchSongURL web no url", fields: [
+                "httpStatus": http.statusCode,
+                "errcode": Self.upstreamErrorCode(json),
+                "status": Self.upstreamStatus(json),
+            ])
+            return nil
+        }
+        DiagLog.shared.recordLog(category: "kugou-url", message: "fetchSongURL web ok", fields: [
+            "host": URL(string: playURL)?.host ?? "",
+        ])
+        return playURL
+    }
+
     private func songUrl(_ req: HttpRequest) async throws -> HttpResponse {
         let hash = (req.string("hash").isEmpty ? req.string("id") : req.string("hash")).uppercased()
         guard !hash.isEmpty else {
@@ -1531,6 +1601,12 @@ actor FoliaKugouService {
                         // payload 里读的 quality）；上游没给才回落请求档
                         // tier——以前直接回 tier，会员请求被降档时 App
                         // 照样显示高档，会员权益失效还看不出来。
+                        // r50：记一笔成功链的 host——tracker 链 TLS 死掉时，
+                        // 诊断要分清死的是哪个 CDN host（见 r50 第 2 件）。
+                        DiagLog.shared.recordLog(category: "kugou-url", message: "songUrl ok", fields: [
+                            "via": "kugou", "host": URL(string: url)?.host ?? "",
+                            "quality": r.servedQuality ?? tier,
+                        ])
                         return .json(200, ["code": 0, "url": url, "quality": r.servedQuality ?? tier, "via": "kugou"])
                     }
                     if noUrlReason.isEmpty { noUrlReason = r.reason }
@@ -1543,7 +1619,20 @@ actor FoliaKugouService {
             }
         }
         if let url = await legacyPlayInfo(hash: hash) {
+            // r50：legacy 活链也记 host（同上，TLS 诊断要分清 host）。
+            DiagLog.shared.recordLog(category: "kugou-url", message: "songUrl ok", fields: [
+                "via": "kugou-legacy", "host": URL(string: url)?.host ?? "", "quality": "128",
+            ])
             return .json(200, ["code": 0, "url": url, "quality": "128", "via": "kugou-legacy"])
+        }
+        // r50：网页通道兜底（Moumusic songURLWebOnce 同款：wwwapi.kugou.com
+        // play/getdata）——tracker 各档 + legacy 全空时再试一次；它回的
+        // play_url 常落在 fs.w.kugou.com，与 tracker 的 fs.youthandroid2
+        // 不是同一 CDN host，tracker 链 TLS 死掉时这条可能活。只在失败
+        // 路径上跑一次，不参与档位 ladder；实际档位未知，回 ""（云盘
+        // 同款：不挂假徽章）。
+        if let url = await fetchWebPlayURL(hash: hash, albumId: albumId, albumAudioId: albumAudioId) {
+            return .json(200, ["code": 0, "url": url, "quality": "", "via": "kugou-web"])
         }
         if noUrlReason.isEmpty { noUrlReason = "unavailable" }
         // r49：失败终态汇总进 DiagLog（各档明细已在 fetchSongURL 里记过）——

@@ -191,7 +191,7 @@ enum DiskCache {
             guard let files = try? FileManager.default.contentsOfDirectory(
                 at: dir(for: kind), includingPropertiesForKeys: [.fileSizeKey]) else { continue }
             for f in files {
-                total += (try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                total += Int64((try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
             }
         }
         return total

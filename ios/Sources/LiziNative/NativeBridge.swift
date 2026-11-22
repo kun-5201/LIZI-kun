@@ -297,12 +297,12 @@ private static func audioResultFromData(_ data: Data) -> SongURLResult? {
           let url = URL(string: urlString) else { return nil }
     return SongURLResult(url: url,
                          actualQuality: (d["quality"] as? String).flatMap(AudioQuality.init(rawValue:)),
-                         servedLabel: d["servedLabel"] as? String,
                          isTrial: d["isTrial"] as? Bool ?? false,
                          isPreview: d["isPreview"] as? Bool ?? false,
                          reason: "", via: d["via"] as? String ?? "platform",
                          bitrate: d["bitrate"] as? Int ?? 0,
-                         clipStartMs: d["clipStartMs"] as? Int ?? 0)
+                         clipStartMs: d["clipStartMs"] as? Int ?? 0,
+                         servedLabel: d["servedLabel"] as? String)
 }
 
 private static func songURLUncached(track: Track, quality: AudioQuality) async -> SongURLResult {

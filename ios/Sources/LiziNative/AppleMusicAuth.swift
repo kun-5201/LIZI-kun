@@ -311,6 +311,30 @@ final class AppleMusicAuth {
         return result
     }
 
+    /// r48-5：第 5 件——设备 Apple ID 所在地区 → catalog 两字店面码。
+    /// 系统播放器按设备地区解析 store id，地区决定一首歌能不能播整首，
+    /// 与订阅无关：《最伟大的作品》两个店面 id 在 cn 曲库里都是 404
+    /// （VM 实测），大陆 Apple ID 注定播不了整首。拿不到（没授权/出错）
+    /// 或没映射时回 nil，调用方按未知处理、不拦播放。结果缓存一次
+    /// （地区极少变；切号后重启 App 才刷新——可接受，见驱动 §5-D）。
+    private static var cachedStorefront: String?
+    static func deviceStorefrontCode() async -> String? {
+        if let cached = cachedStorefront { return cached }
+        let code: String? = await withCheckedContinuation { cont in
+            SKCloudServiceController().requestStorefrontCountryCode { code, _ in
+                cont.resume(returning: code)
+            }
+        }
+        guard let code else { return nil }
+        let map = ["CHN": "cn", "TWN": "tw", "HKG": "hk", "USA": "us", "JPN": "jp",
+                   "KOR": "kr", "GBR": "gb", "DEU": "de", "FRA": "fr", "AUS": "au",
+                   "CAN": "ca", "SGP": "sg", "MYS": "my", "THA": "th", "VNM": "vn",
+                   "IDN": "id", "PHL": "ph", "IND": "in", "BRA": "br", "MEX": "mx"]
+        let sf = map[code]
+        cachedStorefront = sf
+        return sf
+    }
+
     /// 验订阅（r36：只作显示用，不作播放门槛；播放路径已不再调它）。
     /// 根因（r35 的 bug，用户 2026-11-21 20:55 报“有订阅仍只能播试听”）：
     /// 旧版 `if let capable = await hasCatalogPlayback() { return capable }`

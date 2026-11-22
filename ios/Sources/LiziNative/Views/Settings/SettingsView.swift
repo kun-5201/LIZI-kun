@@ -174,6 +174,11 @@ struct SettingsView: View {
     @State private var backgroundStatus: String? = nil
     /// r31-download：下载管理页 sheet 开关。
     @State private var showDownloads = false
+    /// r48-12/13：本地缓存上限与清空——已用空间文案（进页时算一次）、
+    /// 清空进行中态、清空结果行（已释放多少 / 缓存已清空）。
+    @State private var diskCacheUsageText = ""
+    @State private var diskCacheClearing = false
+    @State private var diskCacheClearedText: String? = nil
     /// r36 免责声明：关于页「免责声明」行点开全文页的开关。
     @State private var showDisclaimer = false
     /// r36 第 15 件：关于页「项目地址」行点开后用系统浏览器打开仓库链接。
@@ -985,6 +990,73 @@ private struct PickedVideoFile: Transferable {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("下载管理 \(downloads.summaryText)")
+            // r48-12：缓存上限开关——放在「存储与下载」分区、显眼可用，
+            // 不藏子页；档位 512MB–16GB，默认 16GB；写 UserDefaults、重启保留；
+            // 调小后多出的缓存立即清掉（SettingsStore.didSet 里调 prune），
+            // 调大不丢已有缓存。
+            Picker("缓存上限", selection: $settings.coverDiskCacheLimitMB) {
+                ForEach(SettingsStore.coverDiskCacheLimitOptions, id: \.self) { mb in
+                    Text(SettingsStore.coverDiskCacheLimitText(mb)).tag(mb)
+                }
+            }
+            .pickerStyle(.menu)
+            .accessibilityLabel("本地缓存上限")
+            // r48-13：清空缓存——点一下清掉封面 + 歌词 + 音频信息三路全部缓存
+            // 文件并显示已释放多少；只清缓存，不动已下载的本地音乐、不动登录态、
+            // 不动其他设置；清缓存跑在后台任务里，不卡界面、不影响正在播的歌
+            // （播放器手里已有流地址，内存封面缓存也不动）。
+            Button(action: clearDiskCache) {
+                HStack {
+                    rowLabel("清空缓存", hint: diskCacheUsageText)
+                    Spacer()
+                    if diskCacheClearing {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "trash")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(LiziTokens.ink2)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(diskCacheClearing)
+            .accessibilityLabel("清空本地缓存")
+            if let cleared = diskCacheClearedText {
+                Text(cleared)
+                    .font(.system(size: 13))
+                    .foregroundColor(LiziTokens.ink2)
+            }
+        }
+        .onAppear { refreshDiskCacheUsage() }
+    }
+
+    /// r48-12/13：刷新「已用空间」文案（进页时 + 改上限/清完后各算一次）。
+    private func refreshDiskCacheUsage() {
+        let bytes = DiskCache.totalBytes()
+        diskCacheUsageText = "已用 \(Self.diskCacheSizeText(bytes))"
+    }
+
+    private static func diskCacheSizeText(_ bytes: Int64) -> String {
+        if bytes >= 1024 * 1024 * 1024 { return String(format: "%.1f GB", Double(bytes) / 1_073_741_824) }
+        if bytes >= 1024 * 1024 { return String(format: "%.1f MB", Double(bytes) / 1_048_576) }
+        if bytes >= 1024 { return "\(bytes / 1024) KB" }
+        return "\(bytes) B"
+    }
+
+    /// r48-13：清空缓存——后台删文件，主线程只改文案；不卡界面。
+    private func clearDiskCache() {
+        guard !diskCacheClearing else { return }
+        diskCacheClearing = true
+        diskCacheClearedText = nil
+        Task.detached {
+            let freed = DiskCache.clearAll()
+            await MainActor.run {
+                diskCacheClearing = false
+                diskCacheUsageText = "已用 0 B"
+                diskCacheClearedText = freed > 0
+                    ? "已释放 \(Self.diskCacheSizeText(freed))，缓存已清空"
+                    : "缓存已清空"
+            }
         }
     }
 

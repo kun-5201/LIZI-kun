@@ -350,12 +350,14 @@ final class HomeViewModel: ObservableObject {
     /// r33：defer 条件从「代际相等或 dailyTask 已空」改成
     /// 「generation >= homeLoadGeneration」——无接管者时旧加载也落下，
     /// 不再有不落的出口。
-    func loadDaily(generation: Int? = nil) async {
+    func loadDaily(generation: Int? = nil, force: Bool = false) async {
         let platform = selectedPlatform
         let generation = generation ?? homeLoadGeneration
         // r35：先查缓存（在 isLoadingDaily = true 之前，命中不闪 spinner）；
         // 代际/平台守卫照旧：对不上就不写。
-        if let cached = HomeDataCache.shared.dailyIfFresh(platform: platform) {
+        // r48-7：第 7 件——force（下拉刷新）时跳过两道缓存直查新数；
+        // 不 force 时走原有缓存（r35「只拉一次」不动）。
+        if !force, let cached = HomeDataCache.shared.dailyIfFresh(platform: platform) {
             guard generation == homeLoadGeneration, platform == selectedPlatform else { return }
             daily = cached.tracks
             dailyEmptyReason = cached.emptyReason
@@ -364,8 +366,8 @@ final class HomeViewModel: ObservableObject {
             return
         }
         // r35-9：否定缓存命中（5 分钟内空过）——直接显示空态文案，
-        // 不起新请求、不亮 spinner。
-        if let neg = HomeDataCache.shared.dailyNegativeIfFresh(platform: platform) {
+        // 不起新请求、不亮 spinner。r48-7：force 时跳过（同上）。
+        if !force, let neg = HomeDataCache.shared.dailyNegativeIfFresh(platform: platform) {
             guard generation == homeLoadGeneration, platform == selectedPlatform else { return }
             daily = []
             dailyEmptyReason = neg.emptyReason ?? emptyReason(for: platform)
@@ -427,6 +429,15 @@ final class HomeViewModel: ObservableObject {
         // defer 也按“当前代际或无接管者”规则结算，不再有不落的出口。
         guard generation == homeLoadGeneration else { return }
         guard platform == selectedPlatform, !Task.isCancelled else { return }
+        // r48-7：第 7 件——force 刷新失败（空结果）且旧内容还在时，旧内容
+        // 保留：daily 与 dailyEmptyReason 都不动（旧 daily 非空时原因必
+        // 是 nil——起手已清、填 daily 的那单没设原因），也不写否定缓存
+        // （storeDaily 的空结果会写 5 分钟否定缓存，下次无缓存加载会把
+        // 内存里的旧内容清掉）。只清加载态（defer）。旧内容为空时走原有
+        // 逻辑（空态 + 原因）。
+        if force, result.tracks.isEmpty, !daily.isEmpty {
+            return
+        }
         daily = result.tracks
         if result.tracks.isEmpty {
             dailyEmptyReason = result.emptyReason ?? emptyReason(for: platform)
@@ -441,7 +452,7 @@ final class HomeViewModel: ObservableObject {
     /// 直接显示空态文案，不起新请求、不亮 spinner）；没命中才起新请求
     /// （各走独立 60 秒预算，见 NativeBridge.rankBoards）。代际守卫与
     /// loadDaily 同款（切台 +1，旧加载回来对不上直接丢）。
-    func loadRankBoards(generation: Int? = nil) async {
+    func loadRankBoards(generation: Int? = nil, force: Bool = false) async {
         let platform = selectedPlatform
         let generation = generation ?? homeLoadGeneration
         // 没榜的平台（波点/汽水/Apple Music）：不发请求、不走缓存，
@@ -454,7 +465,9 @@ final class HomeViewModel: ObservableObject {
             rankSpinnerVisible = false
             return
         }
-        if let cached = HomeDataCache.shared.rankIfFresh(platform: platform) {
+        // r48-7：第 7 件——force（下拉刷新）时跳过两道缓存直查新数；
+        // 不 force 时走原有缓存（loadDaily 同款）。
+        if !force, let cached = HomeDataCache.shared.rankIfFresh(platform: platform) {
             guard generation == homeLoadGeneration, platform == selectedPlatform else { return }
             rankBoards = cached.boards
             rankEmptyReason = cached.emptyReason
@@ -462,7 +475,8 @@ final class HomeViewModel: ObservableObject {
             rankSpinnerVisible = false
             return
         }
-        if let neg = HomeDataCache.shared.rankNegativeIfFresh(platform: platform) {
+        // r48-7：第 7 件——force 时跳过否定缓存（同上）。
+        if !force, let neg = HomeDataCache.shared.rankNegativeIfFresh(platform: platform) {
             guard generation == homeLoadGeneration, platform == selectedPlatform else { return }
             rankBoards = []
             rankEmptyReason = neg.emptyReason
@@ -491,6 +505,12 @@ final class HomeViewModel: ObservableObject {
         let result = await NativeBridge.rankBoards(platform: platform)
         guard generation == homeLoadGeneration else { return }
         guard platform == selectedPlatform, !Task.isCancelled else { return }
+        // r48-7：第 7 件——force 刷新失败（空榜单）且旧内容还在时，旧内容
+        // 保留（loadDaily 同款：不盖、不写否定缓存；只清加载态，defer）。
+        // 旧内容为空时走原有逻辑（空态 + 原因）。
+        if force, result.boards.isEmpty, !rankBoards.isEmpty {
+            return
+        }
         rankBoards = result.boards
         rankEmptyReason = result.emptyReason
         HomeDataCache.shared.storeRank(platform: platform, boards: result.boards, emptyReason: result.emptyReason)
@@ -669,7 +689,12 @@ final class HomeViewModel: ObservableObject {
     /// 永远不清，面板就一直转圈——每日推荐在 r31/r33 修的是同一毛病，
     /// 栏这里是漏网的。
     /// 超时按失败处理（`error` 带文案，面板显示红字原因，不留 spinner）。
-    func loadRailPage(_ page: HomeRailPage, force: Bool = false) {
+    /// r48-7：第 7 件——preserveOldOnError（只下拉刷新传 true）：新结果
+    /// 带错、旧结果有内容时，不用错误结果盖掉旧内容（面板的 error 分支
+    /// 会整块替换成错误页，旧卡片就没了）；只清加载态。旧结果本身就是
+    /// 错/空时照常盖（旧态已是错误态，新错即原有错误态）。其余调用点
+    /// （selectSource、喜欢栏星标重拉、重试按钮）默认 false，行为不动。
+    func loadRailPage(_ page: HomeRailPage, force: Bool = false, preserveOldOnError: Bool = false) {
         guard page != .daily, page != .rank, page != .nowPlaying else { return } // r38-1：正在播放不取数
         // r35：缓存守卫对所有栏生效（含 .liked）。喜欢栏例外：星标旗
         // 置起（播放页点了星标）时不走缓存、要重拉看新星标；旗子等到
@@ -720,14 +745,54 @@ final class HomeViewModel: ObservableObject {
                 railSpinnerVisiblePages.remove(page)
                 return
             }
-            railResults[page] = fetched
-            // r35：成功（error == nil）才写缓存；失败的不缓存，
-            // 下次访问重拉（重试按钮照常 force）。
-            if fetched.error == nil {
-                HomeDataCache.shared.storeRail(platform: platform, page: page, result: fetched)
+            // r48-7：第 7 件——下拉刷新失败时旧内容保留（见函数头
+            // preserveOldOnError）；不写缓存（失败本来就不缓存）。
+            if preserveOldOnError, fetched.error != nil,
+               let old = railResults[page], !old.entries.isEmpty {
+                // 旧内容保留：不写 railResults、不写缓存。
+            } else {
+                railResults[page] = fetched
+                // r35：成功（error == nil）才写缓存；失败的不缓存，
+                // 下次访问重拉（重试按钮照常 force）。
+                if fetched.error == nil {
+                    HomeDataCache.shared.storeRail(platform: platform, page: page, result: fetched)
+                }
             }
             railLoadingPages.remove(page)
             railSpinnerVisiblePages.remove(page)
+        }
+    }
+
+    /// r48-7：第 7 件——首页下拉刷新：重新拉取当前模式的内容。
+    /// 走现有取数链路（loadDaily / loadRankBoards / loadRailPage），
+    /// 不另写一套取数；force: true 绕开缓存（不绕就命中缓存直接返回，
+    /// 等于没刷）。不丢在播的歌（只写本模式的 daily/rankBoards/
+    /// railResults，不碰 PlaybackStore 队列与当前曲目）、不换模式
+    /// （不调 selectSource、不写 selectedSource）、不重置带子位置
+    /// （不碰 flatOffsetX/selectedFlatIndex；内容真换了时带子按 r48-3
+    /// 的跟随落在播的那首上、不是从头，不换内容时带子一动不动）。
+    /// 正在播放是直播队列、不取数，直接返回。失败时旧内容保留（见
+    /// loadDaily/loadRankBoards/loadRailPage 的 force 失败分支），
+    /// 只清加载态。竖屏横屏共用同一个外层 ScrollView，.refreshable
+    /// 挂在它上面，两向都能用。
+    func refreshCurrentSource() async {
+        switch selectedSource {
+        case .daily:
+            await loadDaily(force: true)
+        case .rank:
+            await loadRankBoards(force: true)
+        case .nowPlaying:
+            return
+        case .featured, .liked, .created, .radio:
+            loadRailPage(selectedSource, force: true, preserveOldOnError: true)
+            // loadRailPage 是 fire-and-forget（内部起 Task）；下拉指示
+            // 要等到取数落下再消失，等 railLoadingPages 清掉这栏（60 秒
+            // 腿超时同款上限 + 5 秒余量；栏已在拉取中时等在飞的那单；
+            // insert 在 Task 之前同步发生，无竞态）。
+            let deadline = Date().addingTimeInterval(NativeBridge.legTimeout + 5)
+            while railLoadingPages.contains(selectedSource), Date() < deadline {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
         }
     }
 

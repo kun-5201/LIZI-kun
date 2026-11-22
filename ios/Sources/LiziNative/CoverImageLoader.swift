@@ -28,7 +28,8 @@ import UIKit
 /// 改深色（CoverImageView.swift），加载失败不再看着像没数据。
 ///
 /// 内存缓存：同一 URL 在一次启动里只拉一次（`NSCache`，约 50MB 上限，
-/// 封面图本身不大；跨启动不持久化，磁盘缓存不在本轮范围）。
+/// 封面图本身不大）；跨启动的持久化走磁盘缓存（r48-11：`DiskCache`，
+/// 封面 + 歌词 + 音频信息共用 16GB 池，见 DiskCache.swift）。
 actor CoverImageLoader {
     static let shared = CoverImageLoader()
 
@@ -46,10 +47,16 @@ actor CoverImageLoader {
     /// 调用方取消等待时抛 CancellationError，但拉图本身继续跑完、进缓存。
     func image(for url: URL) async -> UIImage? {
         if let hit = cache.object(forKey: url as NSURL) { return hit }
+        // r48-11：磁盘缓存优先——上次加载过直接读本地，不联网。
+        if let data = DiskCache.data(kind: .cover, key: DiskCache.coverKey(for: url)),
+           let img = UIImage(data: data) {
+            store(img, for: url)
+            return img
+        }
         if let running = inFlight[url] { return await running.value }
         let task = Task.detached {
-            let img = await CoverImageLoader.fetchUncached(url: url)
-            await CoverImageLoader.shared.noteFinished(img, for: url)
+            let (img, data) = await CoverImageLoader.fetchUncached(url: url)
+            await CoverImageLoader.shared.noteFinished(img, data: data, for: url)
             return img
         }
         inFlight[url] = task
@@ -57,13 +64,16 @@ actor CoverImageLoader {
     }
 
     /// 在飞任务收尾（无论成功失败都清 inFlight；成功才进缓存）。
-    private func noteFinished(_ image: UIImage?, for url: URL) {
+    private func noteFinished(_ image: UIImage?, data: Data?, for url: URL) {
         if let image { store(image, for: url) }
+        // r48-11：联网取图成功才写盘（失败不写，不缓存坏数据）。
+        if let data { DiskCache.store(data, kind: .cover, key: DiskCache.coverKey(for: url)) }
         inFlight[url] = nil
     }
 
     /// 进程内代理 → 直链（不抛错；两步都失败返回 `nil`）。
-    private static func fetchUncached(url: URL) async -> UIImage? {
+    /// 进程内代理 → 直链（不抛错；两步都失败返回 `(nil, nil)`）。
+    private static func fetchUncached(url: URL) async -> (UIImage?, Data?) {
         // 1) 进程内代理（Proxies.proxyImage：白名单 + Referer + https 升级）。
         let proxyReq = HttpRequest(method: "GET", path: "/api/img",
                                    query: ["url": url.absoluteString],
@@ -71,17 +81,17 @@ actor CoverImageLoader {
         let proxyResp = await Proxies.proxyImage(proxyReq)
         if (200...299).contains(proxyResp.status),
            let image = UIImage(data: proxyResp.body) {
-            return image
+            return (image, proxyResp.body)
         }
         // 2) 直链兜底（r24：走 Proxies.directImageData——同一个门、6s 上限、
         // 入口 https 归一；旧写法 URLSession.shared.data(from:) 默认 60s，
         // 代理死透后直链再等 60s，一张图最坏 100s 才占位）。
         if let data = await Proxies.directImageData(url),
            let image = UIImage(data: data) {
-            return image
+            return (image, data)
         }
         // 直链也失败：返回 nil，调用方占位，不抛错、不编图。
-        return nil
+        return (nil, nil)
     }
 
     private func store(_ image: UIImage, for url: URL) {

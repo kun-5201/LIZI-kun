@@ -702,6 +702,10 @@ final class HomeCoverRingModel: ObservableObject {
     /// 在播曲目的身份键（`platform:id`；r26-3D 开环锚点用，不驱动渲染，
     /// 故不用 @Published；调用方经 syncInputs 同步 playback.currentTrack）。
     var playingKey: String?
+    /// r48-3：第 3 件——上次已跟到带子上的在播曲目键（syncInputs 里跟随
+    /// 用：只在「在播曲目换了」或「内容换了」时跟一次，平时不动带子；
+    /// 跟随实际生效（尺寸量到了）才记，没生效不记、下次 sync 再试）。
+    var lastFollowedPlayingKey: String?
     @Published var isLoadingDaily = false
     /// 每日推荐 spinner 是否可见（r35-9，P0-2：250ms 后仍未回来才亮；
     /// 视图只认这面旗子亮 spinner，不认 isLoadingDaily）。
@@ -1031,6 +1035,29 @@ final class HomeCoverRingModel: ObservableObject {
         // 布局前的 0/残值，直接按卡数补满。
         if flatSetWidth < CGFloat(itemCount) * (flatCard + flatGap), itemCount > 0 { // r43-2：第 2 件——卡数，曲目路与旧 tracks.count 同值
             flatSetWidth = CGFloat(itemCount) * (flatCard + flatGap)
+        }
+        // r48-3：第 3 件——带子跟到在播/被选的那首（全模式）：
+        // 旧代码只改 selectedFlatIndex（上抬）不改 flatOffsetX——切歌、
+        // 切模式、恢复后带子还停在旧位置（切到「正在播放」就从头显示，
+        // 用户 01:15 截图：Hero 在播《阿拉斯加海湾》，带子却停在
+        // DAY BY DAY / 你在看孤独的风景）。只在「在播曲目换了」或
+        // 「内容换了」时跟一次：平时 sync() 只推状态，不动带子——用户
+        // 正拖着带子浏览时不抢；环开着时不动（带子藏着，跟随由转环的
+        // 同步链管）；正拖着带子时不动。跟到后留 2s dwell（与 r46-6
+        // 收环后同值），让用户看清被选卡再接着滚。不播（playingKey 为
+        // 空）时不跟、不乱跳。尺寸没量到时不记 lastFollowed，下次 sync
+        // 再试，不丢跟随。
+        if let key = playingKey, let pi = playingIndex,
+           (key != lastFollowedPlayingKey || itemIDs != oldIDs),
+           ringPhase != .open, !flatDragging,
+           itemCount > 0, flatSetWidth > 0, stripSize.width > 0,
+           (0..<itemCount).contains(pi) {
+            centerFlatOnSelected(pi)
+            flatDwellUntil = Date().addingTimeInterval(Self.closeResumeMs / 1000)
+            flatDwellReason = "follow-playing" // r48-3
+            lastFollowedPlayingKey = key
+        } else if playingKey == nil {
+            lastFollowedPlayingKey = nil
         }
     }
 
@@ -1911,6 +1938,15 @@ final class HomeCoverRingModel: ObservableObject {
     func playTrack(at index: Int, store: PlaybackStore) {
         guard (0..<itemCount).contains(index) else { return } // r43-2：第 2 件——条目下标，曲目路与旧 tracks.indices 同值
         selectedFlatIndex = index // r39-4：点中的卡整体上抬 1pt（r43-3；FlatRingCard 的 isSelected）
+        // r48-3：第 3 件——点卡就把带子停在被选的那首上（全模式、平带/环
+        // 通用）：r47-2 只修了环里点卡（tapRingCard → centerFlatOnSelected），
+        // 平带点卡不居中（r47 交接 D5 的已知缺口）；通用路点卡也一样
+        // （曲目卡点播后带子停在那首上；集合卡点后换内容，syncInputs 按
+        // 新内容归零/跟到在播曲目，这里的居中会被覆盖，不抢）。放
+        // setQueue/onTap 之前：点下去立刻居中，不等异步的 currentTrack
+        // 回来再跟（点已在播的那张时 currentTrack 根本不变，syncInputs
+        // 的跟随到不了，全靠这里）。
+        centerFlatOnSelected(index)
         // r43-2：第 2 件——通用路：点按走卡自带的 onTap（调用方填好的原行为），
         // 不走 setQueue（歌单/专辑/电台卡本来就不是曲目，拼不出队列）。
         if isGeneric {
@@ -1928,10 +1964,10 @@ final class HomeCoverRingModel: ObservableObject {
     /// （与平带卡 selectedFlatIndex 同款；收回淡出里可见，环收完清掉）。
     func tapRingCard(trackIndex: Int, store: PlaybackStore) {
         selectedRingIndex = trackIndex
+        // r48-3：带子居中已收进 playTrack（平带/环、曲目/通用全路），
+        // 这里不再另写一份（r47-2 的 `if !isGeneric` 居中随之归并：
+        // 通用路点卡同样跟到被选卡）。
         playTrack(at: trackIndex, store: store)
-        // r47-2：第 2 件——收环后带子停在被选的卡上（通用路是集合卡、点后换
-        // 内容，syncInputs 会按新内容归零，不在这里定偏移）。
-        if !isGeneric { centerFlatOnSelected(trackIndex) }
         closeRing()
     }
 
@@ -3332,7 +3368,24 @@ final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
         case .ended, .cancelled:
             if dragStarted {
                 dragStarted = false
+                // r48-4：第 4 件——带一点晃动的点按（>5px 死区、<20pt 晃动）：
+                // pan 认出来了、tap 的 require(toFail: pan) 不触发，旧代码
+                // 只走 ringDragEnded、不试点卡——右滑后手指再落下来点卡，
+                // 轻微一晃整下点按就被拖动手势吞掉（点按事件被拖动手势吞了，
+                // 与 r46-7 修的「没拖起来」是同一类丢点按、不同分支：那
+                // 处只覆盖 dragStarted == false，这里覆盖拖起来了但只是
+                // 一晃）。晃动小且环基本没转（<1/4 槽）时按松手落点试一次
+                // 点卡（与 r46-7 没拖起来分支同款）；真拖动（位移大/转过
+                // 槽）时不试，拖动就是拖动。角用 ringDragEnded 后的当前角
+                // （弹簧还没跑起来，读到的是松手那一刻的角）。
+                let wobble = hypot(location.x - startX, location.y - startY) < 20
+                let angleBefore = model.ringStartAngle
                 model.ringDragEnded()
+                if wobble, abs(model.angle - angleBefore) < model.ringStep * 0.25,
+                   (model.ringPhase == .open || model.ringPhase == .closing),
+                   let idx = model.hitTestRingCard(at: location, screenWidth: bounds.width, screenHeight: bounds.height, topEdge: topEdge) {
+                    onTapCard?(idx)
+                }
             } else if (model.ringPhase == .open || model.ringPhase == .closing),
                       let idx = model.hitTestRingCard(at: CGPoint(x: startX, y: startY), screenWidth: bounds.width, screenHeight: bounds.height, topEdge: topEdge) {
                 // r46-7：第 7 件——晃一下就抬手（pan 认出来了、tap 没触发、

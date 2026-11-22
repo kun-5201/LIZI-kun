@@ -157,6 +157,8 @@ final class AppleMusicService {
                 return try await playlistTracks(req)
             case "song/url":
                 return try await songUrl(req)
+            case "available":
+                return try await available(req)
             case "lyric":
                 return try await lyric(req)
             default:
@@ -500,6 +502,40 @@ final class AppleMusicService {
         return .json(200, ["code": 200, "source": "applemusic", "name": plName, "cover": plCover, "tracks": tracks])
     }
 
+    /// r48-5：第 5 件——地区曲库可得性：`GET /api/applemusic/available
+    /// ?id=<store id>&storefront=<cn|tw|hk|…>`，查这首歌在不在指定地区
+    /// 的 Apple Music 曲库里。VM 实测（2026-11-23，网页 token）：
+    /// 《最伟大的作品》两个店面 id（1632190510 tw / 1721454344 hk）
+    /// 在 cn 曲库里都是 404（只在 tw/hk 其一有）——设备 Apple ID 是
+    /// 大陆时系统播放器按设备地区解析 store id，整首注定播不了，有
+    /// 会员也一样，不是订阅校验的问题。回 `available`：true = 在该
+    /// 地区曲库里；false = 明确不在（catalog 404）；null = 查不到
+    /// （没 token / 没网 / 苹果拒了），调用方按未知处理、不拦播放。
+    /// 只读 catalog，不编数据；token 走 catalogToken 三路。
+    private func available(_ req: HttpRequest) async throws -> HttpResponse {
+        var id = req.string("id")
+        if id.hasPrefix("am-") { id = String(id.dropFirst(3)) }
+        let sf = req.string("storefront").lowercased()
+        guard !id.isEmpty, !sf.isEmpty else {
+            return .json(200, ["code": 200, "available": NSNull()])
+        }
+        let token = await catalogToken()
+        guard !token.isEmpty,
+              let url = URL(string: "https://api.music.apple.com/v1/catalog/\(scURLEncode(sf))/songs/\(scURLEncode(id))"),
+              let (data, resp) = try? await Upstream.fetch(url, headers: ["Authorization": "Bearer \(token)", "Origin": "https://music.apple.com"], timeout: 15) else {
+            return .json(200, ["code": 200, "available": NSNull()])
+        }
+        if resp.statusCode == 404 {
+            return .json(200, ["code": 200, "available": false])
+        }
+        guard resp.statusCode == 200,
+              let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let list = j["data"] as? [[String: Any]], !list.isEmpty else {
+            return .json(200, ["code": 200, "available": NSNull()])
+        }
+        return .json(200, ["code": 200, "available": true])
+    }
+
     private func songUrl(_ req: HttpRequest) async throws -> HttpResponse {
         var id = [req.string("id"), req.string("mid")].first(where: { !$0.isEmpty }) ?? ""
         if id.hasPrefix("am-") { id = String(id.dropFirst(3)) }
@@ -517,14 +553,22 @@ final class AppleMusicService {
             return .json(200, ["code": 200, "url": purl, "preview": true, "quality": "standard",
                                "duration": ms / 1000, "note": "30 秒试听；整首要原生 MusicKit 播放器"])
         }
-        let looked = await itunesLookup(ids: [id])
-        guard let t = looked.first, let purl = t["previewUrl"] as? String, !purl.isEmpty else {
-            return .json(200, ["code": 200, "url": "", "preview": true,
-                               "error": "这首歌没有试听地址（Apple Music 无公开整首流）"])
+        // r48-5：第 5 件——试听按店面顺序找：同一首歌在不同地区曲库里
+        // 的 id 不同、试听只在部分店面有（《最伟大的作品》：tw id
+        // 1632190510 只有 tw lookup 有试听，hk id 1721454344 只有
+        // hk/us lookup 有试听；旧代码只查 tw，hk id 那路直接回「没有
+        // 试听地址」、什么都播不了）。按搜索同款顺序 tw → hk → us
+        // 逐个找，先找到带试听地址的就用；都没有才报没有试听地址。
+        for cc in ["tw", "hk", "us"] {
+            let looked = await itunesLookup(ids: [id], country: cc)
+            if let t = looked.first, let purl = t["previewUrl"] as? String, !purl.isEmpty {
+                let ms = (t["duration"] as? NSNumber)?.intValue ?? 0
+                return .json(200, ["code": 200, "url": purl, "preview": true, "quality": "standard",
+                                   "duration": ms / 1000, "note": "30 秒试听；整首要原生 MusicKit 播放器"])
+            }
         }
-        let ms = (t["duration"] as? NSNumber)?.intValue ?? 0
-        return .json(200, ["code": 200, "url": purl, "preview": true, "quality": "standard",
-                           "duration": ms / 1000, "note": "30 秒试听；整首要原生 MusicKit 播放器"])
+        return .json(200, ["code": 200, "url": "", "preview": true,
+                           "error": "这首歌没有试听地址（Apple Music 无公开整首流）"])
     }
 
     private func lyric(_ req: HttpRequest) async throws -> HttpResponse {

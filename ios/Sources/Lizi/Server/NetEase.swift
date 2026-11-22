@@ -577,6 +577,15 @@ extension NetEaseService {
         case "song/url":
             let items = arr(data, "data").map { s -> [String: Any] in
                 let url = s["url"] as? String
+                // r48-8：会员歌匿名请求时上游回的不是 -110——实测《죽을 만큼
+                // 아파서》5400327 匿名调回 per-item code 404 +
+                // freeTrialPrivilege.cannotListenReason 1（需会员才能听），
+                // 只认 -110 会把这种真 VIP 拒绝也写成笼统 unavailable。
+                // code 与 cannotListenReason 透传给桥层，reason 在这里与
+                // 桥层同口径判定（见 NativeBridge.songURL 网易分支）。
+                let code = s["code"] as? Int ?? 0
+                let cannotListen = dict(s, "freeTrialPrivilege")["cannotListenReason"] as? Int ?? 0
+                let vipRefusal = url == nil && (code == -110 || cannotListen == 1)
                 return [
                     "id": s["id"] as Any,
                     "url": url as Any,
@@ -585,7 +594,9 @@ extension NetEaseService {
                     "type": s["type"] as Any,
                     "time": s["time"] as Any,
                     "fee": s["fee"] as? Int ?? 0,
-                    "reason": url != nil ? NSNull() : ((s["code"] as? Int) == -110 ? "vip" : "unavailable"),
+                    "code": code,
+                    "cannotListenReason": cannotListen,
+                    "reason": url != nil ? NSNull() : (vipRefusal ? "vip" : "unavailable"),
                     "freeTrialInfo": s["freeTrialInfo"] as Any,
                     "level": s["level"] as Any,
                 ]

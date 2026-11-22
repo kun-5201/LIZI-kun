@@ -334,12 +334,15 @@ actor KugouAPI {
     func androidProfile() async throws -> Profile {
         do {
             return try await androidProfileOnce()
-        } catch let e as APIError {
-            // RSA 体那路不通时回落 legacyProfile（同端点 POST form）。
-            if case .invalidResponse = e {
-                if let legacy = try? await legacyProfile() { return legacy }
-            }
-            throw e
+        } catch {
+            // r48-9：RSA 体那路被上游拒了（status 非 1 → .unavailable）时以前
+            // 直接抛掉，form 兜底只在 .invalidResponse 时才试——登录态保住了，
+            // 画像却永远拿不到（昵称剩「酷狗用户」、头像空、VIP 未知），正是
+            // 「登录了无法获取到用户信息」。RSA 路任何失败都试一次 form 兜底
+            // （同端点 POST form，plat/token/userid/clienttime + web 签名）；
+            // 两路都失败才往上抛，调用方按「断网 ≠ 登出」保登录态。
+            if let legacy = try? await legacyProfile() { return legacy }
+            throw error
         }
     }
 

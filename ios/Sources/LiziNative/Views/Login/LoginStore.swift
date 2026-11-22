@@ -66,6 +66,18 @@ final class LoginStore: ObservableObject {
     /// 登录态判断绝不拿它当「已登出」——断网 ≠ 登出。
     @Published private(set) var lastError: [String: String] = [:]
 
+    /// r48-8：哪些平台的状态接口已成功跑过一次（拿到响应、写进 states）。
+    /// 初始全是未登录的内存态不能当「已知未登录」——App 刚启动、status 还没
+    /// 回来时 isLoggedIn 全是 false；取链失败映射「登录提示」只在已刷过
+    /// 的平台上做（见 PlaybackStore.failureReasonForLoginPrompt），否则
+    /// 刚启动点首歌就会误弹登录。断网没跑通时不记（不知道 ≠ 未登录）。
+    private var refreshedPlatforms: Set<String> = []
+
+    /// 指定平台的状态是否已成功刷过一次（见 refreshedPlatforms）。
+    func hasRefreshed(platform: String) -> Bool {
+        refreshedPlatforms.contains(platform)
+    }
+
     private init() {}
 
     // MARK: - 读数（r23f 契约；全是同步读内存态，不发请求）
@@ -192,6 +204,7 @@ final class LoginStore: ObservableObject {
         }
         states[platform] = Self.parse(platform: platform, dict: d)
         lastError[platform] = ""
+        refreshedPlatforms.insert(platform) // r48-8：这次 status 跑通了
         // r31-membership：网易 bootstrap 是 profile → vipInfo 两步
         // （服务端 sessionVerify 里已连调）；vipInfo 没回来（vip 接口
         // 那一步失败）时在这里懒补一次，不等下次刷新。
@@ -218,6 +231,7 @@ final class LoginStore: ObservableObject {
                 isLoggedIn: store.isLoggedIn, nickname: store.profileName,
                 avatarURLString: store.avatarURLString, isVIP: store.isVIP,
                 isSuperVIP: store.isSuperVIP, hasResidualCookie: store.cookie != nil)
+            refreshedPlatforms.insert(platform) // r48-8：本机画像刷过了
         case "kugou":
             let store = KugouSessionStore.shared
             await store.refreshProfile()
@@ -225,6 +239,7 @@ final class LoginStore: ObservableObject {
                 isLoggedIn: store.isLoggedIn, nickname: store.profileName,
                 avatarURLString: store.avatarURLString, isVIP: store.isVIP,
                 isSuperVIP: store.isSuperVIP, hasResidualCookie: store.cookie != nil)
+            refreshedPlatforms.insert(platform) // r48-8：本机画像刷过了
         default:
             return false
         }

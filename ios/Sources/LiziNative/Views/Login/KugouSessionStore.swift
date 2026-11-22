@@ -141,6 +141,11 @@ final class KugouSessionStore: ObservableObject {
                 await signOut()
                 return
             }
+            // r48-9：画像两路（RSA 体 + form 兜底）都失败时记一笔诊断再保登录态——
+            // 以前这里静默保登录，用户只看到昵称剩「酷狗用户」+ 头像空 + VIP
+            // 未知，分不清「没试过画像」还是「画像接口拒了」；下次真机复现
+            // 直接从诊断日志看这一步。
+            DiagLog.shared.recordPlaybackStep("kugou profile failed, login kept userid=\(session.userid)")
             // r31-membership：画像失败但 token + userid 都在 → 保登录态，
             // 只把会员态标未知（isVIP nil、isSuperVIP false），不拿旧值冒充、
             // 不直接踢下线；下次 refreshProfile / 登录时再验。

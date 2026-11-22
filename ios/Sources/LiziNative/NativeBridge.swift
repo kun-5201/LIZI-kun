@@ -259,7 +259,53 @@ enum NativeBridge {
 
 /// 调各平台 song/url；返回实际档位（`actualQuality`），拿不到返回 url 为空的结果。
 /// 不走 LX、不走云盘（编排在 PlaybackStore）。
+/// r48-11：音频信息磁盘缓存（TTL 10 分钟）——取链结果（url + 音质/码率/
+/// 试听标记）落盘，10 分钟内重播同一首歌同一档位直接读本地，不再调取链。
+/// 流地址本身短命（网易 expi 约 20 分钟），TTL 只给 10 分钟；读时不刷新
+/// mtime（DiskCache touch:false），到期即废。播一半死了由
+/// PlaybackStore.handlePlaybackFailure 清掉（removeAudio），免得下次
+/// 重试又拿到同一条死链。只缓存平台腿（网易/QQ/酷狗/酷我/汽水/波点）；
+/// Apple Music（试听语义 + r48-5 地区检查在取链里，不进缓存）、本地、
+/// LX 腿（脚本自带取链、过期规则未知）不进。
 static func songURL(track: Track, quality: AudioQuality) async -> SongURLResult {
+    let cacheable = ["netease", "qq", "kugou", "kuwo", "qishui", "bodian"].contains(track.platform)
+    let audioKey = DiskCache.audioKey(platform: track.platform, id: track.platformKey, quality: quality.rawValue)
+    if cacheable,
+       let data = DiskCache.data(kind: .audio, key: audioKey, touch: false),
+       let cached = Self.audioResultFromData(data) {
+        return cached
+    }
+    let result = await songURLUncached(track: track, quality: quality)
+    if cacheable, result.url != nil, let data = Self.audioResultData(result) {
+        DiskCache.store(data, kind: .audio, key: audioKey)
+    }
+    return result
+}
+
+private static func audioResultData(_ r: SongURLResult) -> Data? {
+    var d: [String: Any] = ["url": r.url?.absoluteString ?? "", "via": r.via,
+                            "isTrial": r.isTrial, "isPreview": r.isPreview,
+                            "bitrate": r.bitrate, "clipStartMs": r.clipStartMs]
+    if let q = r.actualQuality { d["quality"] = q.rawValue }
+    if let s = r.servedLabel { d["servedLabel"] = s }
+    return try? JSONSerialization.data(withJSONObject: d)
+}
+
+private static func audioResultFromData(_ data: Data) -> SongURLResult? {
+    guard let d = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let urlString = d["url"] as? String,
+          let url = URL(string: urlString) else { return nil }
+    return SongURLResult(url: url,
+                         actualQuality: (d["quality"] as? String).flatMap(AudioQuality.init(rawValue:)),
+                         servedLabel: d["servedLabel"] as? String,
+                         isTrial: d["isTrial"] as? Bool ?? false,
+                         isPreview: d["isPreview"] as? Bool ?? false,
+                         reason: "", via: d["via"] as? String ?? "platform",
+                         bitrate: d["bitrate"] as? Int ?? 0,
+                         clipStartMs: d["clipStartMs"] as? Int ?? 0)
+}
+
+private static func songURLUncached(track: Track, quality: AudioQuality) async -> SongURLResult {
 let platform = track.platform
 let key = track.platformKey
 let param = quality.requestParam(platform: platform)
@@ -280,8 +326,13 @@ let served = (item["level"] as? String) ?? ""
 // 作实证——level 只认上游宣称时，宣称与实际文件不符就挂假徽章
 //（要了 dolby、实际只给了 320k mp3 时 level 仍可能报 dolby）。
 if urlString.isEmpty {
+// r48-8：normalize 已把 per-item code 与 cannotListenReason 透传下来
+// （以前 normalize 不传 code，这里的 -110 判定是死代码、网易失败原因
+// 永远是 unavailable）。匿名 VIP 歌回 code 404 + cannotListenReason 1，
+// 同样是服务端明确说「需会员」，与 -110 同按 vip 计。
 let code = (item["code"] as? NSNumber)?.intValue ?? 0
-return SongURLResult(reason: code == -110 ? "vip" : "unavailable", via: "platform")
+let cannotListen = (item["cannotListenReason"] as? NSNumber)?.intValue ?? 0
+return SongURLResult(reason: (code == -110 || cannotListen == 1) ? "vip" : "unavailable", via: "platform")
 }
 let streamURL = Upstream.url(from: urlString).map { Upstream.upgradedAudioURL($0) }
 let streamType = (item["type"] as? String) ?? ""
@@ -678,11 +729,28 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
     static func lyrics(for track: Track) async -> ParsedLyrics {
         let platform = track.platform
         let key = track.platformKey
+        // r48-11：歌词磁盘缓存（30 天 TTL）——官方歌词原文落盘，二次直接读
+        // 本地解析，不再调官方接口；官方空时不写（LRCLIB 兜底结果不进缓存）。
+        let lyricKey = DiskCache.lyricKey(platform: platform, id: key)
+        var skipOfficialFetch = false
+        if let cached = DiskCache.data(kind: .lyric, key: lyricKey),
+           let raw = try? JSONSerialization.jsonObject(with: cached) as? [String: String] {
+            let cachedParsed = LyricsParser.parse(lyric: raw["lyric"] ?? "", yrc: raw["yrc"] ?? "",
+                                                  tlyric: raw["tlyric"] ?? "", ytlrc: raw["ytlrc"] ?? "")
+            if !cachedParsed.lines.isEmpty { return cachedParsed }
+            // r48-11（自查补）：缓存的官方原文非空、但解析不出行（上游回了
+            // 损坏文本）时不直接回空——跳过官方重取（原文已在盘里，重取
+            // 还是同一份），直接走下面的 LRCLIB 兜底，与首次取数同款。
+            skipOfficialFetch = true
+        }
         let meta: [String: String] = ["s": track.title, "name": track.title,
                                       "artist": track.artist,
                                       "album": track.album,
                                       "duration": "\(track.durationMs / 1000)"]
         var d: [String: Any]?
+        if skipOfficialFetch {
+            d = nil
+        } else {
         switch platform {
         case "netease":
             d = await call(path: "/api/lyric", query: ["id": key])
@@ -706,11 +774,18 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
         default:
             d = nil
         }
+        }
         let lyric = (d?["lyric"] as? String) ?? ""
         let yrc = (d?["yrc"] as? String) ?? ""
         let tlyric = (d?["tlyric"] as? String) ?? ""
         let ytlrc = (d?["ytlrc"] as? String) ?? ""
         var parsed = LyricsParser.parse(lyric: lyric, yrc: yrc, tlyric: tlyric, ytlrc: ytlrc)
+        // r48-11：官方回了内容才写盘（空结果不写，不缓存「没词」）。
+        if !(lyric.isEmpty && yrc.isEmpty && tlyric.isEmpty && ytlrc.isEmpty),
+           let data = try? JSONSerialization.data(withJSONObject: ["lyric": lyric, "yrc": yrc,
+                                                                   "tlyric": tlyric, "ytlrc": ytlrc]) {
+            DiskCache.store(data, kind: .lyric, key: lyricKey)
+        }
         if parsed.lines.isEmpty,
            let fb = await Lrclib.fetch(artist: track.artist, track: track.title,
                                        album: track.album, duration: track.durationMs / 1000) {

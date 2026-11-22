@@ -100,7 +100,7 @@ struct PlayerView: View {
     /// 横屏底图渐变 + 横竖屏全部元素颜色都走它，竖屏不再另取。
     @State private var playerTone = AlbumTone.fallback
 
-    /// r28：登录弹窗目标（取链失败原因是登录时弹登录入口，目前只有酷狗）。
+    /// r28：登录弹窗目标（取链失败原因是登录时弹登录入口；r48-8 起六平台通用，Apple Music 除外）。
     /// 由 `store.loginPromptPlatform`（PlaybackStore，String?）或失败红字
     /// 点按置位；sheet 的 onDone 调 `store.dismissLoginPrompt()` 清信号。
     @State private var loginTarget: LoginSheetTarget?
@@ -158,7 +158,7 @@ struct PlayerView: View {
         }
         // 禁缩放：SwiftUI 默认没有捏合缩放；这里明确不加任何缩放手势。
         .navigationBarHidden(true)
-        // r28：取链失败原因是登录时（目前只有酷狗）弹登录入口。
+        // r28：取链失败原因是登录时弹登录入口（r48-8 起六平台通用，Apple Music 除外）。
         // onChange 只在信号变化时触发；红字点按是另一条置位路径（见
         // statusCapsules），信号已立但本页后挂载时也能点红字补弹。
         .onChange(of: store.loginPromptPlatform) { platform in
@@ -1181,7 +1181,7 @@ struct PlayerView: View {
                 .foregroundStyle(Color.red.opacity(0.85))
                 .padding(.top, squeeze ? 2 : 4)
                 // r28：只有取链失败原因是登录（loginPromptPlatform 非空，
-                // 目前只有酷狗）时点红字才弹登录入口；其它失败原因点按无
+                // r48-8 起六平台通用）时点红字才弹登录入口；其它失败原因点按无
                 // 动作。内层手势优先于外层 titleOnlyBlock 的点歌名开队列，
                 // 点红字只弹登录，不会同时打开队列。
                 .onTapGesture {

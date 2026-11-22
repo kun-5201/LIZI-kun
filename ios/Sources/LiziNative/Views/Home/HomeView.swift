@@ -750,6 +750,12 @@ struct HomeView: View {
                 // （dividerDragging 只在竖向拖动里置 true，松手清掉；
                 // minOS 16.2 可用，本项目已有 LyricsPanelView 同款用法）。
                 .scrollDisabled(dividerDragging)
+                // r48-7：第 7 件——首页下拉刷新：向下拉、松手后重新拉取当前
+                // 模式的内容（HomeViewModel.refreshCurrentSource，走现有
+                // 取数链路 force 重拉；ListeningRankView 同款 .refreshable
+                // 用法）。竖屏横屏共用这一个外层 ScrollView，两向都能用；
+                // 不丢在播的歌、不换模式、不重置带子位置（见 refreshCurrentSource）。
+                .refreshable { await viewModel.refreshCurrentSource() }
                 // r44（第 2 件）：横屏 ScrollView 左右忽略安全区、扩到整屏宽，
                 // Hero/面板才能出血到屏边；竖屏不扩。顶栏是 ScrollView 的兄弟，
                 // 不受影响。真机验证见交回。

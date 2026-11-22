@@ -1071,8 +1071,10 @@ final class PlaybackStore: ObservableObject {
             // 取链全失败：直接报错（r31：提示音兜底已删，失败即静默报错，不出声）。
             isLoading = false
             isPlaying = false
-            errorMessage = result?.reason ?? "unavailable"
-            lastFetchReason = result?.reason ?? "unavailable"
+            // r48-8：会员歌失败且未登录该平台时改成登录提示（见 failureReasonForLoginPrompt）。
+            let mappedReason = failureReasonForLoginPrompt(track: track, reason: result?.reason ?? "unavailable")
+            errorMessage = mappedReason
+            lastFetchReason = mappedReason
             // r31-videoreward：reason vip 时记一次服务端拒绝（本地资格立即失效）。
             noteVideoReward(track: track, result: result)
             // r28：酷狗取链报 login 时立登录提示信号（播放页据此弹二维码
@@ -1178,6 +1180,25 @@ final class PlaybackStore: ObservableObject {
             ids.append(sid)
         }
         guard !ids.isEmpty, ids[0] == storeID else { return false }
+        // r48-5：第 5 件——地区曲库校验：《最伟大的作品》两个店面 id
+        // （1632190510 tw / 1721454344 hk）在 cn 曲库里都是 404（VM
+        // 用现抠网页 token 实测 catalog API），只在 tw/hk 其一有；
+        // 设备 Apple ID 是大陆时系统播放器按设备地区解析 store id，
+        // prepareToPlay 注定失败——有会员也播不了整首，不是订阅校验
+        // 的问题（r33/r34/r36 三轮修的都是订阅门，那条路 r36 已拆，
+        // 订阅校验只留作显示）。先按设备地区查曲库可得性：明确不在
+        // 时跳过注定失败的整首尝试、直接走试听兜底（songUrl 已按
+        // tw→hk→us 找试听，hk id 那路之前连试听都没有），并记一笔
+        // 诊断；查不到（没 token/没网/地区未知/端点回 null）时按原样
+        // 试播，不拦播放。只动 Apple Music 这一路。注意：这段必须在
+        // player.pause() 之前——回 false 时调用方走试听链，AVPlayer
+        // 那边不用先停。
+        if let sf = await AppleMusicAuth.deviceStorefrontCode(),
+           let d = await NativeBridge.call(path: "/api/applemusic/available", query: ["id": storeID, "storefront": sf]),
+           let available = d["available"] as? Bool, !available {
+            DiagLog.shared.recordPlaybackStep("am region-blocked storefront=\(sf) id=\(track.id) storeID=\(storeID)")
+            return false
+        }
         // 切引擎：先停 AVPlayer 那边（两个播放器绝不同时出声）。
         player.pause()
         player.replaceCurrentItem(with: nil)
@@ -1344,6 +1365,10 @@ final class PlaybackStore: ObservableObject {
     /// 3) 再失败直接报错（errorMessage 显示真正原因，保持静默，不出声）。
     private func handlePlaybackFailure(gen: Int) async {
         guard gen == currentPlayGeneration, let track = currentTrack else { return }
+        // r48-11：播一半死了，先清掉这首歌的音频信息缓存——缓存的流地址
+        // 可能是条死链（过期/下架），不清掉下次重试又拿到同一条、再死一次；
+        // 重试走正常取链重新拿地址。只清磁盘音频缓存，不动内存态与队列。
+        DiskCache.removeAudio(platform: track.platform, id: track.platformKey)
         // 1) 代理兜底（直链失败可能是 CDN 临时抽风 / CORS 抖动）。
         if !proxyTried, let url = currentAssetURL, url.scheme != AudioProxyLoader.scheme {
             proxyTried = true
@@ -1424,12 +1449,34 @@ final class PlaybackStore: ObservableObject {
         autoAdvanceSkips = 0
         isLoading = false
         isPlaying = false
-        errorMessage = lastFetchReason.isEmpty ? "unavailable" : lastFetchReason
+        // r48-8：同上，会员歌失败且未登录该平台时改成登录提示。
+        let mappedReason = failureReasonForLoginPrompt(track: track, reason: lastFetchReason.isEmpty ? "unavailable" : lastFetchReason)
+        errorMessage = mappedReason
+        lastFetchReason = mappedReason
         // r31-videoreward：全档重试耗尽仍是 vip 拒绝 → 本地资格立即失效（服务端为准）。
         if lastFetchReason == "vip" {
             VideoRewardStore.shared.noteVIPRefusal(platform: track.platform)
         }
         DiagLog.shared.recordPlaybackStep("play FAIL all tiers source=\(track.platform) id=\(track.id) reason=\(lastFetchReason)")
+    }
+
+    /// r48-8：会员歌失败时，未登录该平台就改成登录提示（不是笼统 unavailable / vip）。
+    /// - 只有服务端明确说需会员（reason vip / auth-required）才映射；其它原因
+    ///   （deleted/region/network）不动，不把每种失败都变成登录弹窗。
+    /// - Apple Music 不走这条：它的播放靠设备订阅 + 店面（见 r48-5），
+    ///   LoginStore 里 applemusic 的 loggedIn 只是开发者 token 是否有效，
+    ///   不是会员态；映射了会误弹。
+    /// - 只在状态已刷过（LoginStore.hasRefreshed）的平台上映射：App 刚启动、
+    ///   status 还没回来时内存态全是未登录，映射了会误弹。
+    /// 返回映射后的原因；映射成立时同时立 loginPromptPlatform（播放页据此
+    /// 自动弹登录入口 + 点红字也能弹，r28 同款机制，原只用于酷狗）。
+    private func failureReasonForLoginPrompt(track: Track, reason: String) -> String {
+        guard reason == "vip" || reason == "auth-required" else { return reason }
+        guard track.platform != "applemusic" else { return reason }
+        guard LoginStore.shared.hasRefreshed(platform: track.platform) else { return reason }
+        guard !LoginStore.shared.isLoggedIn(platform: track.platform) else { return reason }
+        loginPromptPlatform = track.platform
+        return "login"
     }
 
     // MARK: - 取链编排器
@@ -1508,48 +1555,46 @@ final class PlaybackStore: ObservableObject {
         if track.platform == "netease" {
             await LoginStore.shared.ensureVIPInfo(platform: "netease")
         }
-        // r31-membership：酷狗按会员分流——已登录且会员态已知为非会员时
-        // 不走官方腿，全走 LX 自定义音源（音质按 LX 返回的实际音质，
-        // 「解除限制」口径：返回什么播什么、显示什么，见 lxSongURL）；
-        // 会员 / 会员态未知 / 未登录时走原编排（未知时官方腿先试，拿不到
-        // 再 LX 兜底，不把会员误判成非会员挡在门外）。云盘是用户自己的
-        // 文件，不属官方曲库，不随会员分流。分流只决定腿，不决定档位：
-        // 任何「本地会员旗为假就跳过高档请求」的逻辑都不存在（全仓已查，
-        // 见 verification/r31-membership.cjs §7）。
-        let kugouNonMemberLXOnly = track.platform == "kugou"
-            && LoginStore.shared.isLoggedIn(platform: "kugou")
-            && LoginStore.shared.vipKnown(platform: "kugou")
-            && !LoginStore.shared.isVip(platform: "kugou")
+        // r48-2：酷狗 VIP 无法播放——r31 的「已知非会员走 LX-only」分流已删：
+        // 本地 VIP 误判（画像字段 + union 都没认出用户的 VIP 类型时
+        // vip=false，算「已知非会员」）会把官方腿整个跳过、只走 LX；
+        // LX 对 VIP/付费歌常拿不到链，免费歌能播、VIP 歌全死——用户报的
+        // 正是这个症状（「跟自定义源撞一起了」：App 把 VIP 用户也送去了
+        // LX-only）。官方腿先试永远不亏：真非会员时官方对 VIP 歌本来就
+        // 不给地址，仍会落到云盘/LX；误判的 VIP 则能拿到官方地址。
+        // 已确认的 VIP，官方腿已给可用地址时不再问 LX（见下 kugouIsVip
+        // 早返）：LX 的档位是脚本自报（r31：tier 只是脚本在该档调用成功，
+        // 不是流的真实档位），自报高档会把可用的官方 VIP 链顶掉、播一条
+        // 死链。云盘是用户自己的文件，不随会员分流。分流只决定腿，不决定
+        // 档位：任何「本地会员旗为假就跳过高档请求」的逻辑都不存在。
         var lastReason = ""
         switch mode {
         case .automatic:
             // r32：用户长期优先级官方 → 云盘 → LX（用户 09:22 定）：
             // 官方腿先，拿到且档位低于请求档时升级，升级闭包先问云盘
             // 再问 LX（照 .official 分支同款写法）；再云盘腿；最后 LX 腿。
-            // 酷狗已知非会员不走官方腿（分流原样保留），云盘是用户自己
-            // 的文件，不随会员分流。
+            // r48-2：官方腿不再跳过（已知非会员的分流已删，见上）。
             // r34 落雪强势兜底：升级闭包里落雪回了有效地址就强占（见
             // upgradeIfLower strongLX）——官方已拿到低档地址时，落雪的
             // 地址不再被档位比较丢掉；顺序仍是官方 → 云盘 → 落雪。
-            if !kugouNonMemberLXOnly,
-               let platform = await platformLeg(track: track, gen: gen, skips: skips, quality: requested) {
+            if let platform = await platformLeg(track: track, gen: gen, skips: skips, quality: requested) {
                 lastReason = platform.reason
                 if platform.url != nil {
-                    // r36-kugou-vip：已确认的酷狗会员，官方腿的结果不吃
-                    // LX 强占——strongLX 是 r34 为救官方试听地址加的
-                    // （官方试听档位虚高反而赢、落雪整首被扔）；酷狗
+                    // r36-kugou-vip + r48-2：已确认的酷狗会员，官方腿的结果
+                    // 直接用、不再问 LX——strongLX 是 r34 为救官方试听地址
+                    // 加的（官方试听档位虚高反而赢、落雪整首被扔）；酷狗
                     // 官方腿从不产试听标记（服务端 songUrl 从不设 preview），
-                    // 会员官方地址按档位比高低，落雪只有档位更高时才赢。
-                    // 已知非会员走不到这里（分流已挡），会员态未知时
-                    // 保持强占不变。kugouIsVip 从分流结果反推，不再另问
-                    // 一次（本文件会员查询只分流处一处；已登录 + 会员态
-                    // 已知 + 没被分流挡住 ⟺ 已确认的酷狗会员）。
+                    // 会员官方地址就是全曲，档位低也播；LX 自报高档顶掉它
+                    // 只会播死链。已知非会员 / 会员态未知时保持强占不变
+                    // （strongLX = !kugouIsVip）。kugouIsVip 直接问三态
+                    // （已登录 + 会员态已知 + isVip），不再经分流反推。
                     // 放在 .automatic 分支内，不动分支外的 resolveURL
                     // 其余部分（r32 §3d 锁定）。
                     let kugouIsVip = track.platform == "kugou"
                         && LoginStore.shared.isLoggedIn(platform: "kugou")
                         && LoginStore.shared.vipKnown(platform: "kugou")
-                        && !kugouNonMemberLXOnly
+                        && LoginStore.shared.isVip(platform: "kugou")
+                    if kugouIsVip { return platform }
                     return await upgradeIfLower(platform, requested: requested, strongLX: !kugouIsVip) {
                         if let cloud = await self.cloudLeg(track: track, gen: gen, skips: skips, quality: requested) {
                             return cloud
@@ -1566,10 +1611,18 @@ final class PlaybackStore: ObservableObject {
             }
         case .official:
             // 账号腿先（平台 → 云盘），拿不到时走 LX。
-            if !kugouNonMemberLXOnly,
-               let platform = await platformLeg(track: track, gen: gen, skips: skips, quality: requested) {
+            // r48-2：官方腿不再跳过（已知非会员的分流已删，见上）。
+            if let platform = await platformLeg(track: track, gen: gen, skips: skips, quality: requested) {
                 lastReason = platform.reason
                 if platform.url != nil {
+                    // r48-2：已确认的酷狗会员，官方腿的结果直接用、不再问
+                    // LX（同 .automatic 分支的早返；LX 自报高档顶掉可用
+                    // 的官方 VIP 链只会播死链）。
+                    let kugouIsVip = track.platform == "kugou"
+                        && LoginStore.shared.isLoggedIn(platform: "kugou")
+                        && LoginStore.shared.vipKnown(platform: "kugou")
+                        && LoginStore.shared.isVip(platform: "kugou")
+                    if kugouIsVip { return platform }
                     return await upgradeIfLower(platform, requested: requested) {
                         // r31 第三推改顺序：升级先问云盘再问 LX（用户长期优先级）。
                         if let cloud = await self.cloudLeg(track: track, gen: gen, skips: skips, quality: requested) {
@@ -1590,8 +1643,9 @@ final class PlaybackStore: ObservableObject {
             if let lx = await lxLeg(track: track, gen: gen, skips: skips, quality: requested) {
                 return lx
             }
-            if !kugouNonMemberLXOnly,
-               let platform = await platformLeg(track: track, gen: gen, skips: skips, quality: requested) {
+            // r48-2：官方腿不再跳过（已知非会员的分流已删，见上；LX 先的
+            // 用户选择不动，官方腿只作 LX 拿不到时的兜底）。
+            if let platform = await platformLeg(track: track, gen: gen, skips: skips, quality: requested) {
                 lastReason = platform.reason
                 if platform.url != nil { return platform }
             }

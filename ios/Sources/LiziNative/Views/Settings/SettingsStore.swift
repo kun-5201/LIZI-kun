@@ -85,6 +85,42 @@ final class SettingsStore: ObservableObject {
         return UserDefaults.standard.bool(forKey: qualityDowngradeNoticeKey)
     }
 
+    // MARK: - 本地缓存上限（r48-12/13）
+    // r48-12：缓存上限开关——默认 16GB、用户可调、重启保留。
+
+    /// 本地缓存上限的键（DiskCache.limitKey 同键）：封面 + 歌词 + 音频信息
+    /// 三路共用一个池。默认 **16384 MB（16GB）**，开箱即是；用户可调，
+    /// 最小 512MB、最大 16GB；存在 UserDefaults，重启保留。
+    static let coverDiskCacheLimitKey = DiskCache.limitKey
+    /// 缓存上限档位（MB）：512MB / 1GB / 2GB / 4GB / 8GB / 16GB。
+    static let coverDiskCacheLimitOptions = [512, 1024, 2048, 4096, 8192, 16384]
+
+    /// 读缓存上限（MB，静态口，供 DiskCache 读）：非法/缺失回默认 16GB，
+    /// 夹到 [512, 16384]。
+    static func storedCoverDiskCacheLimitMB() -> Int {
+        let raw = UserDefaults.standard.object(forKey: coverDiskCacheLimitKey) as? Int
+        let mb = raw ?? DiskCache.defaultLimitMB
+        return min(max(mb, DiskCache.minLimitMB), DiskCache.maxLimitMB)
+    }
+
+    /// 缓存上限显示串（512 MB / 1 GB / 2 GB / 4 GB / 8 GB / 16 GB）。
+    static func coverDiskCacheLimitText(_ mb: Int) -> String {
+        mb >= 1024 ? "\(mb / 1024) GB" : "\(mb) MB"
+    }
+
+    /// 本地缓存上限（MB；默认 16GB；调小后多出的缓存立即清掉，调大不丢已有缓存）。
+    // r48-12：didSet 写 UserDefaults + 调 pruneIfNeeded（调小清多余、调大保留）。
+    @Published var coverDiskCacheLimitMB: Int = SettingsStore.storedCoverDiskCacheLimitMB() {
+        didSet {
+            let clamped = min(max(coverDiskCacheLimitMB, DiskCache.minLimitMB), DiskCache.maxLimitMB)
+            if clamped != coverDiskCacheLimitMB { coverDiskCacheLimitMB = clamped; return }
+            UserDefaults.standard.set(coverDiskCacheLimitMB, forKey: Self.coverDiskCacheLimitKey)
+            // 调小上限后多出的缓存立即按 LRU 清掉（DiskCache.pruneIfNeeded
+            // 按当前上限清到 80% 水位）；调大只改上限，已有缓存一律保留。
+            DiskCache.pruneIfNeeded()
+        }
+    }
+
     /// 全局默认档（默认 exhigh；9 档全列，不探测、不设限——R3 已删，
     /// 选什么档都直发音源，返回什么播什么）。
     @Published var audioQuality: AudioQuality = SettingsStore.storedAudioQuality() {

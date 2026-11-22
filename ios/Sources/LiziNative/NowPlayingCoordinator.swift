@@ -278,18 +278,26 @@ final class NowPlayingCoordinator: ObservableObject {
         let key = AnimatedArtworkManager.key(forCoverURL: urlString)
         lastCoverKey = key
         var image: UIImage?
-        // 先走图片代理（进程内调 Proxies，含 mzstatic 白名单 + Referer）。
-        let proxyReq = HttpRequest(method: "GET", path: "/api/img",
-                                   query: ["url": urlString], headers: [:], body: Data())
-        let proxyResp = await Proxies.proxyImage(proxyReq)
-        if (200...299).contains(proxyResp.status) {
-            image = UIImage(data: proxyResp.body)
+        // r48-11：磁盘缓存优先——上次加载过直接读本地，不联网；联网取到再写盘。
+        if let cached = DiskCache.data(kind: .cover, key: DiskCache.coverKey(for: url)) {
+            image = UIImage(data: cached)
+        }
+        if image == nil {
+            // 先走图片代理（进程内调 Proxies，含 mzstatic 白名单 + Referer）。
+            let proxyReq = HttpRequest(method: "GET", path: "/api/img",
+                                       query: ["url": urlString], headers: [:], body: Data())
+            let proxyResp = await Proxies.proxyImage(proxyReq)
+            if (200...299).contains(proxyResp.status) {
+                image = UIImage(data: proxyResp.body)
+                if image != nil { DiskCache.store(proxyResp.body, kind: .cover, key: DiskCache.coverKey(for: url)) }
+            }
         }
         if image == nil {
             // r24：走 Proxies.directImageData——同一个门、6s 上限、入口 https
             // 归一；旧写法 URLSession.shared.data(from:) 默认 60s。
             if let data = await Proxies.directImageData(url) {
                 image = UIImage(data: data)
+                if image != nil { DiskCache.store(data, kind: .cover, key: DiskCache.coverKey(for: url)) }
             }
         }
         // 第 21 轮第 3 件：零尺寸图（坏数据解出来 0x0）按下载失败处理，

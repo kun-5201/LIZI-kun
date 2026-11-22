@@ -454,6 +454,38 @@ struct HomeView: View {
         (playback.currentTrack ?? viewModel.lastTrack)?.coverURL
     }
 
+    /// r45-fix：分隔条拖动手势——从 body 里抽出来单独成声明。r45 首轮
+    /// 构建时编译器报 HomeView.swift:679 类型检查超时（整条 body 大
+    /// 表达式已到临界）；抽出来后 body 与手势各查各的。行为一字未动：
+    /// 拖动改 Hero/面板比例、松手即停写当前方向的 key。
+    /// onEnded 里的 UserDefaults.set 也先拆成 let 再传（同款超时点，
+    /// 不再把三元表达式直接塞进 set 的参数里）。
+    private var dividerDragGesture: some Gesture {
+        DragGesture(minimumDistance: 6)
+            .onChanged { value in
+                if dragStartHeroH == nil { dragStartHeroH = heroH }
+                guard abs(value.translation.height) >= abs(value.translation.width) else { return }
+                dividerDragging = true
+                let startHeroH = dragStartHeroH ?? heroH
+                let newHeroH = min(max(startHeroH + value.translation.height, minHeroH), maxHeroH)
+                let newFraction = newHeroH / contentH
+                if isLandscape {
+                    heroFractionLandscape = newFraction
+                } else {
+                    heroFractionPortrait = newFraction
+                }
+            }
+            .onEnded { _ in
+                dividerDragging = false
+                dragStartHeroH = nil
+                // 松手即停：只写当前方向的 key，不回弹、
+                // 不吸附、不贴靠档位；拖动中不写 UserDefaults。
+                let fractionToSave = Double(isLandscape ? heroFractionLandscape : heroFractionPortrait)
+                let keyToSave = isLandscape ? Self.heroFractionLandscapeKey : Self.heroFractionPortraitKey
+                UserDefaults.standard.set(fractionToSave, forKey: keyToSave)
+            }
+    }
+
     var body: some View {
         GeometryReader { outer in
             // r20 顶栏修复：topBar 原来是 ScrollView 里的第一行，往下滚就滚出
@@ -640,32 +672,9 @@ struct HomeView: View {
                                 // r44（第 4 件）：手柄跟 live 间隙走；横屏全屏时夹到 ≥0
                                 // （手柄贴屏顶 0–28pt 可抓，与面板顶重叠 28pt，见交回）。
                                 .offset(y: max(0, gapTopLive + heroH + gapMidLive / 2 - 14))
-                                .gesture(
-                                    DragGesture(minimumDistance: 6)
-                                        .onChanged { value in
-                                            if dragStartHeroH == nil { dragStartHeroH = heroH }
-                                            guard abs(value.translation.height) >= abs(value.translation.width) else { return }
-                                            dividerDragging = true
-                                            let startHeroH = dragStartHeroH ?? heroH
-                                            let newHeroH = min(max(startHeroH + value.translation.height, minHeroH), maxHeroH)
-                                            let newFraction = newHeroH / contentH
-                                            if isLandscape {
-                                                heroFractionLandscape = newFraction
-                                            } else {
-                                                heroFractionPortrait = newFraction
-                                            }
-                                        }
-                                        .onEnded { _ in
-                                            dividerDragging = false
-                                            dragStartHeroH = nil
-                                            // 松手即停：只写当前方向的 key，不回弹、
-                                            // 不吸附、不贴靠档位；拖动中不写 UserDefaults。
-                                            UserDefaults.standard.set(
-                                                Double(isLandscape ? heroFractionLandscape : heroFractionPortrait),
-                                                forKey: isLandscape ? Self.heroFractionLandscapeKey : Self.heroFractionPortraitKey
-                                            )
-                                        }
-                                )
+                                // r45-fix：手势抽到 dividerDragGesture（见 body 上方），
+                                // body 里只剩引用，不再整条大表达式一起查。
+                                .gesture(dividerDragGesture)
                                 .accessibilityLabel("调整 Hero 与面板高度")
                                 .accessibilityHint("上下拖动改变两块高度，松手即停")
                                 .accessibilityAdjustableAction { direction in
@@ -676,10 +685,10 @@ struct HomeView: View {
                                     } else {
                                         heroFractionPortrait = next
                                     }
-                                    UserDefaults.standard.set(
-                                        Double(next),
-                                        forKey: isLandscape ? Self.heroFractionLandscapeKey : Self.heroFractionPortraitKey
-                                    )
+                                    // r45-fix：同款拆分——key 先拆成 let 再传 set，
+                                    // 不把三元表达式直接塞进参数里。
+                                    let keyToSave = isLandscape ? Self.heroFractionLandscapeKey : Self.heroFractionPortraitKey
+                                    UserDefaults.standard.set(Double(next), forKey: keyToSave)
                                 }
                         }
 

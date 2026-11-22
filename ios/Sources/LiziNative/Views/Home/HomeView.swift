@@ -642,9 +642,16 @@ struct HomeView: View {
                                 viewHeight: outer.size.height,
                                 height: heroH,
                                 titleSize: titleSize,
-                                viewModel: viewModel,
+                                // r45-fix：参数顺序必须跟 HeroCardView 的声明顺序一致
+                                // （width/viewHeight/height/titleSize/bleedLeading/
+                                // bleedTrailing/viewModel；memberwise init 按声明
+                                // 顺序传参）。上一轮加 bleed 参数时把 viewModel 写在
+                                // 了 bleed 前面，三轮构建到这里才报
+                                // "argument 'bleedLeading' must precede 'viewModel'"——
+                                // 上一轮按新流程没单独编译过，这处一直没被编到。
                                 bleedLeading: bleedL, // r44（第 2 件）：卡内边距加 bleed，内容屏上位置不动
-                                bleedTrailing: bleedT
+                                bleedTrailing: bleedT,
+                                viewModel: viewModel
                             )
                             .padding(.horizontal, isLandscape ? 0 : 16) // r44（第 2 件）：横屏外边距 0（全出血）；竖屏 16 不动
 

@@ -370,6 +370,12 @@ final class NowPlayingCoordinator: ObservableObject {
     /// 每首只启动一次；失败也只启动一次（Route A 内部有重试一次，
     /// Route B 的否定缓存管重复查；重启动不会把视频变回来，只会多烧一轮）。
     private func kickAnimatedPrepares(for track: Track) {
+        // r45-2：开关关了 / iOS 26 以下时不准备——挂载（writeNowPlaying）
+        // 本来就只在 `if #available(iOS 26.0, *), animatedArtworkEnabled`
+        // 里挂动态视频，准备了也挂不上；之前这里不查，开关关掉、26
+        // 以下也每首歌全量跑路线 A 编码 + 路线 B 抓 token，白白烧电。
+        guard animatedArtworkEnabled else { return }
+        guard #available(iOS 26.0, *) else { return }
         guard artworkPrepareKickedTrackId != track.id else { return }
         guard store?.startedTrackId == track.id else { return }
         guard let animKey = lastCoverKey else { return }

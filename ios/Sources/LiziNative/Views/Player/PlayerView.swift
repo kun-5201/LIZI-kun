@@ -448,10 +448,13 @@ struct PlayerView: View {
         // （稿齿轮右缘 1231/1280），岛在右时取岛侧 59pt 兜底防重叠。
         let topLeading = 0.0375 * screenWidth
         let topTrailing = max(islandTrailing, 0.0414 * screenWidth)
-        // r39-3：封面按新稿 400px / 1280 宽 = 31.25% 屏宽（≈ 屏高 68%，
-        // 真机 874 宽约 273pt；r37 的 246pt、r38 的 284pt 作废）；
-        // 顶 / 左位置不动（左 15.625% 屏宽、顶 18.06% 屏高）。
-        let coverSize = 400 / 1280 * screenWidth
+        // r44：封面按批改大稿 v2（874×402pt 基准）改大：边长 =
+        // min(0.343×屏宽，0.746×屏高)，基准 300pt（横屏以屏高为准）；
+        // 左 50/874×屏宽、顶 51/402×屏高；r39-3 的 400/1280×屏宽
+        // （约 273pt）作废。注意：左 50pt 落在 59pt 岛侧安全区内，
+        // 岛在封面一侧时可能与灵动岛重叠——稿子就是这么画的，按稿子做，
+        // 风险见交回。
+        let coverSize = min(0.343 * screenWidth, 0.746 * screenHeight)
         // r37-2：顶栏三钮中心 y = 稿里 48/720 = 6.67% 屏高；钮径仍是 r36-5 的 Ø44
         // （44/1280 = 3.4375% 屏宽）。
         let topBarDiameter = 0.034375 * screenWidth
@@ -460,9 +463,10 @@ struct PlayerView: View {
             traditionalTopBar(width: screenWidth - topLeading - topTrailing, screenWidth: screenWidth, screenHeight: screenHeight)
                 .padding(.leading, topLeading)
                 .padding(.top, topBarTop)
-            // r39-3：封面改大后间距收窄到 0.03125×屏宽，右列仍从 50% 屏宽起
-            // （r37-2 位置不动：0.5 − 0.15625 − 0.3125 = 0.03125）。
-            HStack(alignment: .top, spacing: 0.03125 * screenWidth) {
+            // r44：封面与右列间距按大稿 40/874×屏宽；右列从 390/874×屏宽起
+            // （0.446×屏宽），宽 465/874×屏宽（0.532×屏宽），右缘 855/874
+            // （0.978×屏宽）；r39-3 的 0.03125×屏宽间距、右列从 50% 起作废。
+            HStack(alignment: .top, spacing: 40 / 874 * screenWidth) {
                 // r37-8：封面容器（固定 coverSize 方形）挂滑动切歌手势——
                 // 手势挂容器不挂图片，占位态（歌名文字占位）一样能滑；
                 // 阈值 0.3×边长、方向（左滑上一首 / 右滑下一首）与
@@ -482,14 +486,14 @@ struct PlayerView: View {
                     }
                 }
                 .frame(width: coverSize, height: coverSize)
-                .clipShape(RoundedRectangle(cornerRadius: coverSize * 18 / 400)) // r39-3：圆角按新稿 400 封面 18px（旧稿 360 封面 24px 作废）
+                .clipShape(RoundedRectangle(cornerRadius: coverSize * 18 / 400)) // r44：圆角因子 18/400 不变、随封面边长等比缩放（r39-3 的因子，基准封面 300pt 时约 13.5pt）
                 .contentShape(Rectangle())
                 .gesture(landscapeCoverSwipeGesture(coverSize: coverSize))
-                traditionalRightColumn(width: 0.375 * screenWidth, screenWidth: screenWidth, screenHeight: screenHeight, tier: compactTier)
+                traditionalRightColumn(width: 465 / 874 * screenWidth, screenWidth: screenWidth, screenHeight: screenHeight, tier: compactTier) // r44：右列宽 465/874×屏宽（基准 465pt）
             }
             .frame(width: screenWidth, alignment: .leading)
-            .padding(.leading, 0.15625 * screenWidth)
-            .padding(.top, 0.1806 * screenHeight)
+            .padding(.leading, 50 / 874 * screenWidth) // r44：封面左 50/874×屏宽（基准 50pt）
+            .padding(.top, 51 / 402 * screenHeight) // r44：封面顶 51/402×屏高（基准 51pt；右列顶与封面顶同高）
         }
         .frame(width: screenWidth, height: screenHeight, alignment: .topLeading)
         // r37-3：横屏整层忽略安全区——祖先一旦按安全区缩进本页，底图与返回键
@@ -599,53 +603,56 @@ struct PlayerView: View {
         }
     }
 
-    /// 传统横屏右列（r36 v2；r37-2 按修正版施工图重排；r39-3 按新稿
-    /// 1280×590 换算改大：歌名 56/590 屏高粗体 → 歌手 28 → 当前句 36 专辑强调色粗体
-    /// → 下一句 34 → 进度条（复用 PlayerProgressBar，可拖 + 点按
+    /// 传统横屏右列（r36 v2；r37-2 按修正版施工图重排；r44 按批改大稿 v2
+    /// 874×402pt 基准改大：歌名 60/402 屏高粗体 → 歌手 30 → 当前句 40 专辑强调色粗体
+    /// → 下一句 36 → 进度条（复用 PlayerProgressBar，可拖 + 点按
     ///   seek；填充/圆点走专辑强调色、轨道走专辑文字色，见 r39-2）→ 两端时间
-    ///   24（00:29 / 04:30，零补齐）→ 控制行五键 48 高（r36 原样真实现）。
-    /// 行间距与各行顶垫（6/16/12/22/10/16，/720 屏高）一律不动。
+    ///   26（00:29 / 04:30，零补齐）→ 控制行五键 48 高。r39-3 的
+    ///   56/28/36/34/24（/590）作废。
+    /// 行间距按大稿 y 换算（/402 屏高，SF 行高≈字号×1.21 推导，逐行顶与
+    /// 稿子差 ≤ 约 1pt）：歌名顶垫 9、歌手 3、当前句 8、下一句 5、
+    /// 进度条 −15（负值：进度条 32pt 触摸框顶须落在 262pt 才能让框底视觉条
+    /// 落在稿子 290pt，框顶与下一句行重叠约 15pt；框透明、歌词行无点按，
+    /// 视觉无冲突，见交回）、时间 9、控制行 3。
+    /// 纵向落点（基准）：歌名顶 60、歌手 135、当前句 180、下一句 233、
+    /// 进度条视觉条 290、时间 303、控制行 337–385（收在 Home Indicator 之上）。
     /// 无曲目时：歌名「未在播放」、歌手占位文案、歌词行空串占位、时间 00:00 /
     /// 00:00、控制行 disabled——区域结构不塌、不留白。
-    /// 纵向按稿图 y（720 稿）换算：歌名顶 150、歌手 215、当前句 285、
-    /// 下一句 335、进度条 410、时间 425、控制中心 500；行高按字号×1.2 计，
-    /// 间距取稿图行间净空（歌名→歌手 6、歌手→当前句 16、当前句→下一句 12、
-    /// 下一句→进度条 22、进度条→时间 10、时间→控制行 16，单位 /720 屏高）。
     private func traditionalRightColumn(width: CGFloat, screenWidth: CGFloat, screenHeight: CGFloat, tier: PlayerTokens.PlayerSizeTier) -> some View {
         let h = screenHeight
         return VStack(alignment: .leading, spacing: 0) {
             Text(traditionalTitleText)
-                .font(.system(size: 56 / 590 * h, weight: .bold)) // r39-3：歌名按新稿 56px 改大（真机约 38pt；52/720 作废）
+                .font(.system(size: 60 / 402 * h, weight: .bold)) // r44：歌名按大稿 v2 60pt 改大（/402 屏高；r39-3 的 56/590 作废）
                 .foregroundStyle(albumText) // r39-2：歌名走专辑文字色
                 .lineLimit(1)
                 .minimumScaleFactor(0.5)
                 .frame(width: width, alignment: .leading)
-                .padding(.top, 35 / 720 * h)
+                .padding(.top, 9 / 402 * h) // r44：歌名顶垫 9/402（顶 60pt）
             Text(traditionalArtistText)
-                .font(.system(size: 28 / 590 * h)) // r39-3：歌手按新稿 28px 改大（真机约 19pt；30/720 作废）
+                .font(.system(size: 30 / 402 * h)) // r44：歌手按大稿 v2 30pt 改大（r39-3 的 28/590 作废）
                 .foregroundStyle(albumSecondaryText) // r39-2：歌手走专辑次要文字色
                 .lineLimit(1)
                 .minimumScaleFactor(0.5)
                 .frame(width: width, alignment: .leading)
-                .padding(.top, 6 / 720 * h)
-            traditionalLyricLine(text: traditionalCurrentLyric, size: 36 / 590 * h, color: albumAccent, weight: .bold) // r39-3：当前句按新稿 36px 改大（真机约 24.5pt；34/720 作废）
-                .padding(.top, 16 / 720 * h)
-            traditionalLyricLine(text: traditionalNextLyric, size: 34 / 590 * h, color: albumSecondaryText) // r39-2：下一句走专辑次要文字色；r39-3：按新稿 34px 改大（真机约 23pt；30/720 作废）
-                .padding(.top, 12 / 720 * h)
+                .padding(.top, 3 / 402 * h) // r44：歌手顶垫 3/402（顶 135pt）
+            traditionalLyricLine(text: traditionalCurrentLyric, size: 40 / 402 * h, color: albumAccent, weight: .bold) // r44：当前句按大稿 v2 40pt 改大（r39-3 的 36/590 作废）
+                .padding(.top, 8 / 402 * h) // r44：当前句顶垫 8/402（顶 180pt）
+            traditionalLyricLine(text: traditionalNextLyric, size: 36 / 402 * h, color: albumSecondaryText) // r39-2：下一句走专辑次要文字色；r44：按大稿 v2 36pt 改大（r39-3 的 34/590 作废）
+                .padding(.top, 5 / 402 * h) // r44：下一句顶垫 5/402（顶 233pt）
             PlayerProgressBar(tier: tier, fillColor: albumAccent, trackColor: albumText.opacity(0.78), dotColor: albumAccent) // r39-2：进度条填充/圆点走专辑强调色，轨道走专辑文字色（不透明度 0.78 与改前白 0.78 一致）
                 .frame(width: width)
-                .padding(.top, 22 / 720 * h)
+                .padding(.top, -15 / 402 * h) // r44：进度条负顶垫 −15/402——32pt 触摸框顶落在 262pt，框底视觉条（PlayerProgressBar 底对齐）落在稿子 290pt；框顶与下一句行重叠约 15pt，框透明、歌词行无点按，视觉无冲突
             HStack {
                 Text(landscapeTimeText(store.progress))
                 Spacer()
                 Text(landscapeTimeText(store.duration))
             }
-            .font(.system(size: 24 / 590 * h)) // r39-3：两端时间按新稿 24px 改大（真机约 16pt；22/720 作废）
+            .font(.system(size: 26 / 402 * h)) // r44：两端时间按大稿 v2 26pt 改大（r39-3 的 24/590 作废）
             .foregroundStyle(albumSecondaryText) // r39-2：两端时间走专辑次要文字色
             .frame(width: width)
-            .padding(.top, 10 / 720 * h)
+            .padding(.top, 9 / 402 * h) // r44：时间顶垫 9/402（顶 303pt）
             traditionalControlRow(width: width, screenWidth: screenWidth, screenHeight: h)
-                .padding(.top, 16 / 720 * h)
+                .padding(.top, 3 / 402 * h) // r44：控制行顶垫 3/402（顶 337pt）
         }
         .frame(width: width, alignment: .topLeading)
     }
@@ -702,24 +709,24 @@ struct PlayerView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// 传统横屏控制行（r36 v2；r39-3 按新稿 1280×590 换算改大到 48 高）：
-    /// 五键收拢一组（中心距 92px =
-    /// 0.071875 × 屏宽，稿里五键中心 x≈640/750/837/930/1015，
-    /// 总宽 5×92 = 460px ≤ 右列宽 640px），居中放：喜欢 | 上一首 |
-    /// 暂停（大）| 下一首 | 模式。行高 / 暂停 / 其余图标字号一律 48/590 屏高
-    /// （真机约 32.7pt；r36 的 42/30（720 稿）作废；新稿上一首/下一首三角
-    /// 40px，字号与字形高有别，见交回）。
+    /// 传统横屏控制行（r36 v2；r44 按批改大稿 v2 改大：五键中心距 80pt
+    /// （80/874 × 屏宽），行高 48pt（48/402 × 屏高），图标/暂停字号 28pt
+    /// （28/402 × 屏高；稿子图标半尺寸 s=14pt → 字形约 28pt）；
+    /// r39-3 的中心距 92px（0.071875×屏宽）、行高/字号 48/590 屏高作废。
+    /// 居中排布不动（稿子是左对齐，任务书只定了 80pt 步进、未定左偏移，
+    /// 保持居中、见交回）：喜欢 | 上一首 |
+    /// 暂停（大）| 下一首 | 模式。
     /// 全部专辑强调色图标（稿里同款红，r39-2 起走 albumAccent，不写死红）；
     /// 暂停是大号裸条（没有白圆底，与
     /// PlayerControlRow 的白圆大播放键不同）；没有队列入口、没有弹幕键
     /// （原生本来就没有弹幕键）；无曲目时整行 disabled。
     private func traditionalControlRow(width: CGFloat, screenWidth: CGFloat, screenHeight: CGFloat) -> some View {
-        let pitch = 0.071875 * screenWidth
-        // r39-3：控制行改大到 48 高——行高 / 暂停 / 其余图标字号一律按新稿
-        // 48px / 590 画布换算（真机约 32.7pt；r36 的 42/30（720 稿）作废）。
-        let iconSize = 48 / 590 * screenHeight
-        let pauseSize = 48 / 590 * screenHeight
-        let rowHeight = 48 / 590 * screenHeight
+        let pitch = 80 / 874 * screenWidth // r44：五键中心距 80/874×屏宽（基准 80pt）
+        // r44：控制行 48 高、图标/暂停字号 28pt（均按大稿 v2：48/402、
+        // 28/402 × 屏高；r39-3 的 48/590 屏高作废）。
+        let iconSize = 28 / 402 * screenHeight
+        let pauseSize = 28 / 402 * screenHeight
+        let rowHeight = 48 / 402 * screenHeight
         return HStack(spacing: 0) {
             traditionalControlCell(pitch: pitch, height: rowHeight) {
                 Button(action: { store.toggleLike() }) {

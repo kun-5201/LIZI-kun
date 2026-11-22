@@ -67,7 +67,7 @@ final class HomeViewModel: ObservableObject {
     /// 新建 HomeViewModel，不持久化时 selectedSource 默认回 .daily，
     /// 播完/回首页就跳回每日推荐。
     private static let sourceKey = "lizi.native.hall.source"
-    private static let lastTrackKey = "lizi.native.hall.lastTrack"
+    static let lastTrackKey = "lizi.native.hall.lastTrack"
     /// 跑马带速度：壳版 localStorage['lizi.hall.marq.speed'] 同款语义，
     /// 0–100，默认 24；可调 UI 放 P3，这里只读值。
     private static let marqSpeedKey = "lizi.native.hall.marq.speed"
@@ -842,6 +842,14 @@ final class HomeViewModel: ObservableObject {
               let saved = try? JSONDecoder().decode(SavedLastTrack.self, from: data) else { return }
         lastTrack = saved.track
         lastPlayedAt = saved.at
+    }
+
+    /// r45-5：给 PlaybackStore 读上次播放（退出重进恢复队列用）——
+    /// 键与结构与 notePlayed/loadLastTrack 同一份，不另起键。
+    static func savedLastTrack() -> Track? {
+        guard let data = UserDefaults.standard.data(forKey: Self.lastTrackKey),
+              let saved = try? JSONDecoder().decode(SavedLastTrack.self, from: data) else { return nil }
+        return saved.track
     }
 }
 

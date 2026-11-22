@@ -109,8 +109,12 @@ final class AppleMusicPlayer {
     }
 
     /// 暂停（队列保留，resume 可续播）。
+    /// r45-2：暂停时停掉进度轮询——旧代码只在 stop() 里停，暂停后
+    /// 0.5s Timer 一直跑、持续推进度，白白烧电（resume() 会重开，
+    /// 见 startProgressTimer 先停后开）。
     func pause() {
         player.pause()
+        stopProgressTimer()
     }
 
     /// 停止（清队列状态；不触发 onPlaybackEnded）。

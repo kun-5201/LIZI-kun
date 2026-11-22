@@ -38,6 +38,13 @@ struct HeroCardView: View {
     var height: CGFloat? = nil
     /// 模板 v2 标题字号：r28 起 26（39.6s 视频实测；旧 42/46 已作废）。
     var titleSize: CGFloat = 26
+    /// r44（第 2 件）：横屏全宽出血时卡内左右边距的补偿（安全区 + 16，
+    /// HomeView 传；默认 0，竖屏/非出血态不动），内容屏上位置不动。
+    var bleedLeading: CGFloat = 0
+    var bleedTrailing: CGFloat = 0
+
+    /// r44（第 2 件）：是否处于全宽出血态（任一侧 bleed > 0）。
+    private var isBleeding: Bool { bleedLeading > 0 || bleedTrailing > 0 }
 
     @EnvironmentObject var playback: PlaybackStore
     @EnvironmentObject var nav: AppNavigation
@@ -159,12 +166,15 @@ struct HeroCardView: View {
                     }
                 }
             }
-            .padding(.horizontal, 24)
+            .padding(.leading, 24 + bleedLeading) // r44（第 2 件）：横屏出血时内边距加 bleed，内容屏上位置不动
+            .padding(.trailing, 24 + bleedTrailing)
             .padding(.vertical, 20)
         }
         .frame(width: width, height: cardHeight)
-        .clipShape(RoundedRectangle(cornerRadius: 17)) // 模板 v2 实测圆角约 17pt（壳版 3px，模板为准）
-        .shadow(color: .black.opacity(0.5), radius: 35, x: 0, y: 30)
+        // r44（第 2 件）：横屏全宽出血时圆角 17→0（否则圆角缺口破坏全出血）、
+        // 阴影透明度 0.5→0（否则侧边阴影在屏边露出来）；竖屏不动。
+        .clipShape(RoundedRectangle(cornerRadius: isBleeding ? 0 : 17)) // 模板 v2 实测圆角约 17pt（壳版 3px，模板为准）
+        .shadow(color: .black.opacity(isBleeding ? 0 : 0.5), radius: 35, x: 0, y: 30)
         .contentShape(Rectangle())
         // r20 双击进播放页：双击优先、单击兜底的排他组合，一只手势包办单 / 双击。
         // - `TapGesture(count: 2).exclusively(before: TapGesture(count: 1))`：

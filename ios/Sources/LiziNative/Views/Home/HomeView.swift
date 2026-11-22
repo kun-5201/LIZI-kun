@@ -546,25 +546,51 @@ struct HomeView: View {
             // 顶空 1），内容总高 flatCard + 212 ≤ 封顶，公式不动；r43-1：横屏模型
             // flatCard 改 158，内容 370 ≤ 封顶 426，封顶仍是上界、不脱节，公式不动。
             let panelContentH: CGFloat = flatCard + 217
-            let panelH = min(contentH - heroH, panelContentH)
+            // r44（第 4 件）：横屏面板铺满全屏——collapseT 随 Hero 收缩坍缩顶栏
+            // 与两处间隙：heroH ≥ maxHeroH/2（88pt）时为 0（布局与现况像素一致），
+            // heroH → 0 时 → 1（顶栏高 64→0、gapTop 26→0、gapMid 20→0），
+            // 面板高改走「屏高 − 坍缩后顶栏/间隙/Hero」不再被 contentH = 292 封顶，
+            // heroH = 0 时面板 = 整屏 402pt；竖屏 collapseT 恒 0，走原值。
+            // 坍缩段面板增速约 2.25 倍（Hero 收 1pt 面板长约 2.25pt），手柄仍 1:1 跟手，
+            // 见交回。
+            let collapseT: CGFloat = isLandscape ? max(0, 1 - heroH / (maxHeroH / 2)) : 0
+            let topBarHLive: CGFloat = topBarH * (1 - collapseT)
+            let gapTopLive: CGFloat = gapTop * (1 - collapseT)
+            let gapMidLive: CGFloat = gapMid * (1 - collapseT)
+            let panelH = isLandscape
+                ? outer.size.height - (topBarHLive + gapTopLive + heroH + gapMidLive)
+                : min(contentH - heroH, panelContentH)
             let blockW = outer.size.width - 32
+            // r44（第 2 件）：横屏首页全宽出血——fullW = 整屏宽（100% 屏宽，
+            // outer.size.width + 左右安全区），bleed = 安全区 + 16（卡边旧在屏边
+            // 75pt 处，卡内边距加 bleed 后内容屏上位置不动）；竖屏为 0，走原值。
+            let fullW = outer.size.width + outer.safeAreaInsets.leading + outer.safeAreaInsets.trailing
+            let bleedL: CGFloat = isLandscape ? outer.safeAreaInsets.leading + 16 : 0
+            let bleedT: CGFloat = isLandscape ? outer.safeAreaInsets.trailing + 16 : 0
             VStack(spacing: 0) {
                 topBar(topPad: topPad, leadingPad: isLandscape ? outer.safeAreaInsets.leading + 16 : 16)
+                    // r44（第 4 件）：横屏 Hero 收起时顶栏随 collapseT 坍缩渐隐
+                    // （高 64→0，下缘裁切；竖屏 collapseT = 0，高 64 不动）。
+                    .frame(height: topBarHLive, alignment: .top)
+                    .clipped()
+                    .opacity(isLandscape ? 1 - collapseT : 1)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         // r28：竖屏 Hero + 面板 + 本地音乐按壳版视频排
                         // （顶栏 95 + 间距 14 + Hero 152 + 间隙 27 + 面板 407，
                         // 本地音乐露在首屏；旧「两块拼满、本地音乐不露首屏」
                         // 已作废，见文件头 r28 节）。
-                        VStack(alignment: .leading, spacing: gapMid) {
+                        VStack(alignment: .leading, spacing: gapMidLive) { // r44（第 4 件）：间隙随 collapseT 坍缩；竖屏 = gapMid 不动
                             HeroCardView(
-                                width: blockW,
+                                width: isLandscape ? fullW : blockW, // r44（第 2 件）：横屏全宽出血；竖屏 blockW 不动
                                 viewHeight: outer.size.height,
                                 height: heroH,
                                 titleSize: titleSize,
-                                viewModel: viewModel
+                                viewModel: viewModel,
+                                bleedLeading: bleedL, // r44（第 2 件）：卡内边距加 bleed，内容屏上位置不动
+                                bleedTrailing: bleedT
                             )
-                            .padding(.horizontal, 16)
+                            .padding(.horizontal, isLandscape ? 0 : 16) // r44（第 2 件）：横屏外边距 0（全出血）；竖屏 16 不动
 
                             // 铺色面板（壳版 `#hall-plat`）：平台条 → 来源内容
                             // （每日推荐 = 环/跑马带，其余来源 = rail 卡片跑马带），
@@ -575,7 +601,9 @@ struct HomeView: View {
                             // r21 起环的平面态就是每日跑马带，HomeView 不再单独挂
                             // DailyMarqueeView（两处并存会叠两条一样的带）。
                             dailyPanel(
-                                width: blockW,
+                                width: isLandscape ? fullW : blockW, // r44（第 2 件）：横屏全宽出血；竖屏 blockW 不动
+                                bleedLeading: bleedL, // r44（第 2 件）：面板内边距加 bleed，内容屏上位置不动
+                                bleedTrailing: bleedT,
                                 height: panelH,
                                 isLandscape: isLandscape,
                                 tier: tier,
@@ -588,9 +616,9 @@ struct HomeView: View {
                             // 是 231 行的级联，不是这行本身写错；写明
                             // Edge.Set 后即使类型再出问题也不会连带误报，
                             // 布局与数值与原来完全一致。
-                            .padding(Edge.Set.horizontal, 16)
+                            .padding(Edge.Set.horizontal, isLandscape ? 0 : 16) // r44（第 2 件）：横屏外边距 0（全出血）；竖屏 16 不动
                         }
-                        .padding(.top, gapTop)
+                        .padding(.top, gapTopLive) // r44（第 4 件）：顶间距随 collapseT 坍缩；竖屏 = gapTop 不动
                         // r24 分界手柄（见文件头）：叠在 Hero 底边 / 面板顶边
                         // 接缝处，中心在 gapTop + heroH + gapMid/2（竖屏
                         // gapMid = 27，手柄居中压在 27pt 间隙正中、上下各探进
@@ -608,8 +636,10 @@ struct HomeView: View {
                         // 约 0.5pt 的窄条里会被手柄先接到，见交回说明）。
                         .overlay(alignment: .top) {
                             HomeResizeHandle()
-                                .frame(width: blockW, height: 28)
-                                .offset(y: gapTop + heroH + gapMid / 2 - 14)
+                                .frame(width: isLandscape ? fullW : blockW, height: 28) // r44（第 2 件）：横屏与两卡同宽（全宽）；竖屏 blockW 不动
+                                // r44（第 4 件）：手柄跟 live 间隙走；横屏全屏时夹到 ≥0
+                                // （手柄贴屏顶 0–28pt 可抓，与面板顶重叠 28pt，见交回）。
+                                .offset(y: max(0, gapTopLive + heroH + gapMidLive / 2 - 14))
                                 .gesture(
                                     DragGesture(minimumDistance: 6)
                                         .onChanged { value in
@@ -672,6 +702,10 @@ struct HomeView: View {
                             }
                         }
                         .padding(.top, 24)
+                        // r44（第 2 件）：横屏 ScrollView 扩到整屏宽后，本地音乐
+                        // 加左右安全区边距（屏上 59–815pt 位置不动）；竖屏不加。
+                        .padding(.leading, isLandscape ? outer.safeAreaInsets.leading : 0)
+                        .padding(.trailing, isLandscape ? outer.safeAreaInsets.trailing : 0)
                         // r35-5：底部留白固定 `homeBottomPad` = 50（16 净空 +
                         // 34 Home Indicator，底部安全区已忽略，见 ignoresSafeArea；
                         // 滑到底时本地音乐导入钮离 Home Indicator 还有 16pt 净空，
@@ -683,6 +717,10 @@ struct HomeView: View {
                 // （dividerDragging 只在竖向拖动里置 true，松手清掉；
                 // minOS 16.2 可用，本项目已有 LyricsPanelView 同款用法）。
                 .scrollDisabled(dividerDragging)
+                // r44（第 2 件）：横屏 ScrollView 左右忽略安全区、扩到整屏宽，
+                // Hero/面板才能出血到屏边；竖屏不扩。顶栏是 ScrollView 的兄弟，
+                // 不受影响。真机验证见交回。
+                .ignoresSafeArea(edges: isLandscape ? [.leading, .trailing] : [])
                 // r35-5：r31 的底部留白重算已删（见文件头 r35 节）：底边距
                 // 固定 50，不再量内容实高补行程；面板顶到顶部的路改走
                 // 分界手柄（r35-4）。
@@ -699,6 +737,23 @@ struct HomeView: View {
             .overlay {
                 if ringModel.ringPhase != .closed {
                     HomeRingOverlayView(model: ringModel)
+                }
+            }
+            // r44（第 5 件）：排行榜/精选等用的 railRingModel 与榜单详情用的
+            // rankSongsRingModel 原来没有覆盖层——开环后没有任何 RingTouchView
+            // 承接换手拖动：松手后 ringDragging = false，新手指落在平面带上时
+            // stripTouchBegan 因 phase != .closed 直接返回、ringDragMoved 又被
+            // ringDragging 守卫挡住，环冻住不动，只能等 1 秒自动收回再重开，
+            // 这就是「转着转着就停了、滑不动了」。与每日环同款，各补一个覆盖层；
+            // 同一时间只显示一个来源，同一时刻最多一个环处于展开态，不叠加。
+            .overlay {
+                if railRingModel.ringPhase != .closed {
+                    HomeRingOverlayView(model: railRingModel)
+                }
+            }
+            .overlay {
+                if rankSongsRingModel.ringPhase != .closed {
+                    HomeRingOverlayView(model: rankSongsRingModel)
                 }
             }
             // r31-imagebg：首页/大厅背景层（默认 = 原来的纸色；静态图片 /
@@ -787,6 +842,8 @@ struct HomeView: View {
     /// 之前写的 SizeTier 不存在。
     private func dailyPanel(
         width: CGFloat,
+        bleedLeading: CGFloat = 0, // r44（第 2 件）：横屏全宽出血时面板内左/右边距补偿（安全区 + 16，默认 0）
+        bleedTrailing: CGFloat = 0, // r44（第 2 件）：同上
         height: CGFloat,
         isLandscape: Bool,
         tier: PlayerTokens.PlayerSizeTier,
@@ -854,7 +911,11 @@ struct HomeView: View {
                     rankDetailTracks = []
                 }
         }
-        .padding(10)
+        // r44（第 2 件）：横屏全宽出血时内边距左右加 bleed（内容屏上位置不动），
+        // 上下仍 10；竖屏 bleed = 0，走原值。
+        .padding(.vertical, 10)
+        .padding(.leading, 10 + bleedLeading)
+        .padding(.trailing, 10 + bleedTrailing)
         // r31-landscape：顶对齐——环内容比横屏面板窗高（内容 302 >
         // 窗口 46.5），frame 默认居中会把平台条顶出窗外；顶对齐后
         // 条钉在面板顶、超出的环内容从底边裁掉（模板原意「齐底边裁断」，
@@ -867,14 +928,15 @@ struct HomeView: View {
                 startPoint: .topLeading, endPoint: .bottomTrailing
             )
         )
-        .clipShape(RoundedRectangle(cornerRadius: LiziTokens.radius22))
+        // r44（第 2 件）：横屏全宽出血时圆角 22→0（否则圆角缺口破坏全出血）；竖屏不动。
+        .clipShape(RoundedRectangle(cornerRadius: (bleedLeading > 0 || bleedTrailing > 0) ? 0 : LiziTokens.radius22))
         // r30 来源小菜单浮层（壳版 #hall-src-menu 思路：挂在标题下、
         // 可溢出面板边缘；点菜单外任意处关，选来源后关）。
         // overlay 挂在 clipShape 之后，不被圆角裁掉；菜单卡本身是浅色卡、
         // 与面板取色无关，任何 tone 下都可读。
         .overlay(alignment: .topLeading) {
             if sourceMenuShown {
-                sourceMenuOverlay
+                sourceMenuOverlay(bleedLeading: bleedLeading)
             }
         }
     }
@@ -1102,7 +1164,10 @@ struct HomeView: View {
     /// 当前来源打勾；点菜单外任意处只关菜单。壳版 `#hall-src-menu`（public/index.html
     /// 约 250 行 + hall/option-wheel.js）同款思路：浮层挂在标题下、
     /// 内容由来源列表填、点选切换；原生不用滚轮，用点选列表。
-    private var sourceMenuOverlay: some View {
+    // r44（第 2 件）：来源菜单改成函数、接 bleedLeading——面板横屏变宽后
+    // 菜单 leading 同步加 bleed，位置不动（菜单在 body 的 GeometryReader 之外，
+    // 读不到 body 里的 bleedL，改由 dailyPanel 传进来）。
+    private func sourceMenuOverlay(bleedLeading: CGFloat) -> some View {
         ZStack(alignment: .topLeading) {
             // 点菜单外关：整块面板大小的透明层（菜单卡在它上面，
             // 卡上的点按走行按钮，不落到这里）。
@@ -1141,7 +1206,9 @@ struct HomeView: View {
             .clipShape(RoundedRectangle(cornerRadius: 14))
             .shadow(color: .black.opacity(0.25), radius: 12, x: 0, y: 4)
             // 面板内边距 10 + 条 48 + 间距 8 = 66，菜单顶贴在条下。
-            .padding(.leading, 10)
+            // r44（第 2 件）：横屏出血时 leading 加 bleedLeading（面板变宽后
+            // 菜单位置不动）；竖屏 bleedLeading = 0，走原值。
+            .padding(.leading, 10 + bleedLeading)
             .padding(.top, 66)
         }
     }
@@ -1397,7 +1464,11 @@ struct HomeView: View {
             let tracks = viewModel.openedTracks
             return tracks.map { track in
                 RailMarqueeCard(
-                    id: "track-\(track.platform)-\(track.id)",
+                    // r45-3：曲目卡 id 与曲目路同式（"platform:id"），不用
+                    // "track-platform-id"——环模型拿 playingKey 在通用卡里
+                    // 找在播曲目时才能对上，否则榜单详情 / 打开的集合里
+                    // 开环锚点永远回手指卡、点中态永远跟不上当前播。
+                    id: "\(track.platform):\(track.id)",
                     coverURL: track.coverURL,
                     title: track.title,
                     subtitle: track.artist,
@@ -1485,7 +1556,12 @@ struct HomeView: View {
                     return nil
                 case .track(let track):
                     return RailMarqueeCard(
-                        id: entry.id,
+                        // r45-3：曲目卡 id 与曲目路同式（"platform:id"），不用
+                        // entry.id 的 "track-platform-id"——环模型拿 playingKey
+                        // （"platform:id"）在通用卡里找在播曲目时才能对上，
+                        // 否则开环锚点与点中态永远找不到正在播的那首（各栏 /
+                        // 打开的集合里曲目卡不同步的根因）。集合卡的 id 不动。
+                        id: track.platform + ":" + track.id,
                         coverURL: track.coverURL,
                         title: track.title,
                         subtitle: track.artist,
@@ -1688,7 +1764,14 @@ struct HomeView: View {
         private var lastOffsetChange = Date()
         private var watchdogLoggedStuck = false
 
-        init() { start(); startWatchdog() }
+        // r45-2：退役——init 不再自动启动 link + 看门狗。RailMarqueeView
+        // 自 r43-2 起全仓没有任何实例化（marqueeDriver 也没有任何读处），
+        // 这个驱动从首页一打开就空转一条 120Hz CADisplayLink + 一条
+        // 0.1s 看门狗，纯烧电。类本身留着（RailSourceListView 的参数
+        // 还挂着它，不拆接线，只停空转）；将来真有视图再用时由视图
+        // 显式调 start()（内部方法）；startWatchdog() 是 private，
+        // 复活驱动时再把它改回内部方法。
+        init() {}
 
         deinit {
             displayLink?.invalidate()

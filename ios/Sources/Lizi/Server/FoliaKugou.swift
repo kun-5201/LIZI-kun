@@ -90,6 +90,15 @@ actor FoliaKugouService {
     private static let anonSearchUA = "Android14-1070-11070-201-0-SearchSong-wifi"
     /// legacy playInfo UA（Folia `kugouTransport.ts`）。
     private static let legacyUA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36"
+    /// 歌词专用 appid / clientver / UA（Folia `kugouLyricProvider.ts`
+    /// requestKugou(module 'Lyric')：appid 3116、clientver 11070——
+    /// 注意不是标准版 1005/20489，也不是 lite 的 11440；UA 里的
+    /// `Lyric` 模块名是签名外的另一路标识，别改成别的模块）。
+    /// r45-1：歌词鉴权常量（旧歌词走 gateway() 带 1005/20489，
+    /// lyrics.kugou.com 回 200 空体，全灭）。
+    private static let lyricAppid = "3116"
+    private static let lyricClientver = "11070"
+    private static let lyricUA = "Android14-1070-11070-201-0-Lyric-wifi"
     /// KRC XOR 密钥（上游 `util/util.js` decodeLyrics）。
     private static let krcKey: [UInt8] = [64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105]
     /// 封面标准尺寸（Folia `KUGOU_CANONICAL_COVER_SIZE = 1024`；
@@ -1546,38 +1555,87 @@ actor FoliaKugouService {
                            "source": "kugou", "error": "没有找到歌词"])
     }
 
-    /// 歌词两步：`search_lyric`（clearDefaultParams；appid / clientver
-    /// 取标准值 1005 / 20489）取首候选 → `lyric` download
-    ///（fmt krc；contenttype != 0 时 base64 直解，否则 KRC 解）。
+    /// r45-1：歌词专用请求（Folia `kugouLyricProvider.ts` requestKugou
+    /// (module 'Lyric') 同款；r45 前这里走 gateway()，带标准版
+    /// appid/clientver + 网关头 + Cookie，lyrics.kugou.com 回 200 空体、
+    /// 零候选——酷狗歌词全灭的根因，2026-11-22 VM 实测钉死）：
+    /// - 参数：调用方给的业务参数 + appid 3116 + clientver 11070；
+    ///   签名 = androidSignature（MD5 盐 + 按 key 排好序的 key=value 串
+    ///   + 盐，与 Folia signParams 同式同盐，GET 时 body 为空）。
+    /// - 头：Lyric UA + KG-Rec/KG-RC + KG-CLIENTTIMEMS（毫秒）+ mid
+    ///   （MD5(毫秒时间戳)）；不带 dfid / clienttime / kg-* 网关头，
+    ///   不带 Cookie，不带 token/userid——歌词端点不认网关那套。
+    /// - 不走 gateway()：gateway() 的默认参数/签名/头是网关接口用的，
+    ///   改它会动其他酷狗接口；歌词只用这一只函数。
+    private func lyricRequest(path: String, baseURL: String,
+                              params: [String: String]) async throws -> [String: Any]? {
+        let clientTimeMs = Int(Date().timeIntervalSince1970 * 1000)
+        let mid = Self.md5Hex(Data(String(clientTimeMs).utf8))
+        var allParams = params
+        allParams["appid"] = Self.lyricAppid
+        allParams["clientver"] = Self.lyricClientver
+        allParams["signature"] = Self.androidSignature(allParams, body: nil)
+        var comps = URLComponents(string: baseURL + path)
+        comps?.queryItems = allParams.map { URLQueryItem(name: $0.key, value: $0.value) }
+        guard let url = comps?.url else {
+            throw NSError(domain: "FoliaKugou", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "bad lyric url: \(path)"])
+        }
+        let headers: [String: String] = [
+            "User-Agent": Self.lyricUA,
+            "KG-Rec": "1", "KG-RC": "1",
+            "KG-CLIENTTIMEMS": String(clientTimeMs),
+            "mid": mid,
+        ]
+        let (data, _) = try await Upstream.fetch(url, headers: headers, timeout: 20)
+        return Upstream.jsonObject(data)
+    }
+
+    /// KRC 头：前 4 字节是 "krc1"（107, 114, 99, 49）。
+    private static func hasKrcHeader(_ bytes: Data) -> Bool {
+        bytes.count >= 4 && bytes[0] == 107 && bytes[1] == 114 && bytes[2] == 99 && bytes[3] == 49
+    }
+
+    /// r45-1：歌词两步（Folia `kugouLyricProvider.ts` fetchKugouLyrics
+    /// 同款）——`search_lyric` 取首候选 → `lyric` download 取内容；
+    /// KRC 解码后转 LRC/YRC。搜索与下载都走 lyricRequest()（Lyric
+    /// 鉴权），不再走 gateway()；album_audio_id 有才带；下载 client 是 mobi；
+    /// 下载走 https（Folia 桌面端用 http，VM 实测 https 回同一条内容，
+    /// iOS 走 https 避 ATS）；解码分支按 Folia decodeKugouDownloadedLyric
+    /// 对齐——contenttype == 2 或没有 krc 头才是明文，否则走 KRC 解
+    ///（旧写法 contenttype != 0 就当明文是错的：实测 contenttype 0 的
+    /// 那条就是 KRC）。krcDecode / krcKey 已验证是对的，别动。
     private func fetchKugouLyric(hash: String?, keyword: String?,
                                  durationMs: Int, albumAudioId: Int = 0) async throws -> (lrc: String, yrc: String)? {
         var params: [String: String] = [
-            "album_audio_id": String(albumAudioId), "appid": Self.stdAppid,
-            "clientver": Self.stdClientver, "duration": String(durationMs),
+            "duration": String(durationMs),
             "lrctxt": "1", "man": "no",
         ]
+        if albumAudioId != 0 { params["album_audio_id"] = String(albumAudioId) }
         if let hash { params["hash"] = hash }
         if let keyword, !keyword.isEmpty { params["keyword"] = keyword }
-        let search = try await gateway(path: "/v1/search", baseURL: "https://lyrics.kugou.com",
-                                       method: "GET", params: params, clearDefault: true)
+        guard let search = try await lyricRequest(path: "/v1/search",
+                                                  baseURL: "https://lyrics.kugou.com",
+                                                  params: params) else { return nil }
         var candidates: [[String: Any]] = []
-        if let arr = search.json?["candidates"] as? [[String: Any]] { candidates = arr }
-        else if let d = search.json?["data"] as? [String: Any],
+        if let arr = search["candidates"] as? [[String: Any]] { candidates = arr }
+        else if let d = search["data"] as? [String: Any],
                 let arr = d["candidates"] as? [[String: Any]] { candidates = arr }
         guard let best = candidates.first else { return nil }
         let id = Self.strField(best, "id")
         let accesskey = Self.strField(best, "accesskey")
         guard !id.isEmpty, !accesskey.isEmpty else { return nil }
-        let dl = try await gateway(path: "/download", baseURL: "https://lyrics.kugou.com",
-                                   method: "GET",
-                                   params: ["ver": "1", "client": "android", "id": id,
-                                            "accesskey": accesskey, "fmt": "krc", "charset": "utf8"])
-        let d = Self.dataDict(dl.json)
+        guard let dl = try await lyricRequest(path: "/download",
+                                              baseURL: "https://lyrics.kugou.com",
+                                              params: ["ver": "1", "client": "mobi", "id": id,
+                                                       "accesskey": accesskey, "fmt": "krc",
+                                                       "charset": "utf8"]) else { return nil }
+        let d = Self.dataDict(dl)
         guard let content = d["content"] as? String, !content.isEmpty else { return nil }
         let text: String?
-        if scNum(d["contenttype"]) != 0 {
-            text = Data(base64Encoded: content, options: .ignoreUnknownCharacters)
-                .flatMap { String(data: $0, encoding: .utf8) }
+        if let bytes = Data(base64Encoded: content, options: .ignoreUnknownCharacters),
+           scNum(d["contenttype"]) == 2 || !Self.hasKrcHeader(bytes) {
+            text = String(data: bytes, encoding: .utf8)
         } else {
             text = Self.krcDecode(content)
         }

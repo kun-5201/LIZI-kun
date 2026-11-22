@@ -194,6 +194,14 @@ final class PlaybackStore: ObservableObject {
     private var currentAssetURL: URL?
     private var audioSessionActivated = false
     private var wasPlayingBeforeInterruption = false
+    /// r45-4：当前在播这一代是不是自动进下一首起的（handleTrackEnded →
+    /// next(auto:) 一路传下来，startCurrentTrackPlay 里记）。取链 / 播
+    /// 放失败耗尽后，自动起的才跳歌续播；手动点播的失败照旧报错停住
+    /// （用户点了一首死链的歌，要看到原因，不能悄悄跳走）。
+    private var currentPlayAuto = false
+    /// r45-4：连续自动跳歌计数；3 首连死就停住报错，不把整条队列默默
+    /// 跳空（用户要看到失败原因）。成功起播 / 手动点播时清零。
+    private var autoAdvanceSkips = 0
     /// 首次进度回调是否已记过面包屑（每首歌在 startItem 里清零；它是
     /// “声音真的出来了”的唯一落盘证据——play called 只证明调了 play）。
     private var didRecordFirstTimeUpdate = false
@@ -307,6 +315,19 @@ final class PlaybackStore: ObservableObject {
             guard let self else { return }
             Task { @MainActor in self.handleInterruption(note) }
         }
+        // r45-4：输出路由变化（耳机/蓝牙拔掉）也要监听——之前完全没有，
+        // 系统把 AVPlayer 停掉后 isPlaying 还挂着 true，UI 显示在播、
+        // 实际没声，就是"播一会就自动停"的一种。
+        _ = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self else { return }
+            Task { @MainActor in self.handleRouteChange(note) }
+        }
+        // r45-5：退出重进恢复上次那首进展示态（队列 + 当前曲目 + 时长，
+        // 不起播、不取链）：播放页一进来就有数据，点播放再重新取链。
+        // 只恢复，不自动播——启动就出声是错的。
+        _ = restoreLastTrack()
     }
 
     // 注意：没有 deinit——PlaybackStore 是 App 生命周期单例（StateObject），
@@ -354,6 +375,48 @@ final class PlaybackStore: ObservableObject {
         @unknown default:
             break
         }
+    }
+
+    /// r45-4：输出路由变化（耳机/蓝牙拔掉）：系统会自己把 AVPlayer 停掉，
+    /// 但本 App 之前完全没监听——isPlaying 还挂着 true，UI 显示在播、
+    /// 实际没声，用户看到的就是"播一会就自动停"。只在旧设备拔掉时
+    /// 同步状态（不自动恢复：拔掉耳机后从扬声器突然出声是错的，用户
+    /// 自己按播放再续）；新设备接上什么都不做。
+    private func handleRouteChange(_ note: Notification) {
+        guard let reasonRaw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              let reason = AVAudioSession.RouteChangeReason(rawValue: reasonRaw),
+              reason == .oldDeviceUnavailable else { return }
+        guard isPlaying else { return }
+        if usingAppleMusicPlayer {
+            appleMusicPlayer?.pause()
+        } else {
+            player.pause()
+        }
+        isPlaying = false
+        DiagLog.shared.recordPlaybackStep("route old device unavailable, paused")
+    }
+
+    /// r45-5：从 UserDefaults 读上次播放（HomeViewModel.notePlayed 存的
+    /// 整首 Track，见 HomeViewModel.savedLastTrack），恢复成单首队列 +
+    /// 当前曲目展示态（progress 0、isPlaying false、不起播、不取链；
+    /// 点播放时 resume() 再走 startCurrentTrackPlay 重新取链，绝不
+    /// 用过期 URL）。返回 true = 恢复到了，false = 没存过上次播放。
+    /// 退出重进前 PlaybackStore 的队列/currentTrack 是纯内存态，
+    /// 播放页点大播放键调 resume()，currentTrack 为 nil 就静默 return——
+    /// 就是"退出重进后播不了、显示未在播放"的根因。
+    @discardableResult
+    private func restoreLastTrack() -> Bool {
+        guard let track = HomeViewModel.savedLastTrack() else { return false }
+        queue = [QueueItem(track: track)]
+        currentIndex = 0
+        currentTrack = track
+        duration = track.durationSeconds
+        progress = 0
+        isLiked = likedIds.contains(Self.likeKey(for: track))
+        isPlaying = false
+        isLoading = false
+        errorMessage = nil
+        return true
     }
 
     // MARK: - 队列
@@ -542,20 +605,25 @@ final class PlaybackStore: ObservableObject {
     /// 退回按曲目播，不静默失败。
     /// 起播的项若是待播的下一首，起播即摘掉待播标记（它已经是当前首了，
     /// 面板上不再打「下一首」徽章）。
-    func play(queueItem: QueueItem) {
+    /// r45-4：`auto` 一路传给 startCurrentTrackPlay（见 next(auto:)）。
+    func play(queueItem: QueueItem, auto: Bool = false) {
         guard let idx = queue.firstIndex(where: { $0.queueId == queueItem.queueId }) else {
             play(queueItem.track)
             return
         }
         currentIndex = idx
         playNextQueueIds.removeAll { $0 == queueItem.queueId }
-        startCurrentTrackPlay()
+        startCurrentTrackPlay(auto: auto)
     }
 
     /// 新点播的公共起播段（play(_:) / play(queueItem:) 共用；调用前
     /// currentIndex 必须已定位好）。代际 + 看门狗 + 起 playCurrent 任务。
-    private func startCurrentTrackPlay() {
+    private func startCurrentTrackPlay(auto: Bool = false) {
         guard let track = currentQueueTrack else { return }
+        // r45-4：记下这一代是不是自动进的；手动点播清掉连续跳歌计数
+        //（用户主动换歌，之前的连死 streak 不算到新歌头上）。
+        currentPlayAuto = auto
+        if !auto { autoAdvanceSkips = 0 }
         // r20 集成 L① + 第 22 轮第 5 件（Moumusic startPlaying 同款）：
         // 新点播先 advanceGeneration()：代际 +1，取消旧的在飞任务
         // （旧 resolve 被取消后立刻向上抛 CancellationError，不再攒出
@@ -593,15 +661,26 @@ final class PlaybackStore: ObservableObject {
     }
 
     /// 恢复播放（按当前引擎分流：AM 整首引擎 / AVPlayer）。
+    /// r45-5：currentTrack 为 nil 时不再静默 return——先恢复上次那首
+    /// 再播（没有上次记录才是真空态，那时才 return）；有曲目但没加载
+    /// 过 item 时（退出重进恢复的展示态）player.play() 是空转，重新
+    /// 取链起播。暂停后恢复（item 还在）仍走原来的 player.play()。
     func resume() {
-        guard currentTrack != nil else { return }
+        if currentTrack == nil {
+            guard restoreLastTrack() else { return }
+            startCurrentTrackPlay()
+            return
+        }
         activateSessionOnce()
         if usingAppleMusicPlayer {
             appleMusicPlayer?.resume()
+            isPlaying = true
+        } else if player.currentItem == nil {
+            startCurrentTrackPlay()
         } else {
             player.play()
+            isPlaying = true
         }
-        isPlaying = true
     }
 
     /// 暂停（锁屏系统卡保留暂停态；r28 已移除灵动岛，无活动可 end）。
@@ -627,11 +706,14 @@ final class PlaybackStore: ObservableObject {
     /// 下一首（r31：有待播的「下一首」时先播它——随机开着也不随机跳过，
     /// 单曲循环播完也先播它；没有待播时走原来的随机 / 顺序 / 全部循环）。
     /// 随机开时随机挑一首不一样的；循环关且到队尾时停。
-    func next() {
+    /// r45-4：`auto` = 是不是播完自动进的（handleTrackEnded / 自动跳歌
+    /// 传 true，下一首键 / 点卡传 false）；一路传给 playCurrent，取链 /
+    /// 播放失败耗尽后自动起的才跳歌续播，手动的不跳（见 currentPlayAuto）。
+    func next(auto: Bool = false) {
         guard !queue.isEmpty else { return }
         if let idx = nextPendingIndex() {
             currentIndex = idx
-            if queue.indices.contains(currentIndex) { play(queueItem: queue[currentIndex]) }
+            if queue.indices.contains(currentIndex) { play(queueItem: queue[currentIndex], auto: auto) }
             return
         }
         if isShuffled, queue.count > 1 {
@@ -647,16 +729,18 @@ final class PlaybackStore: ObservableObject {
             pause()
             return
         }
-        if queue.indices.contains(currentIndex) { play(queueItem: queue[currentIndex]) }
+        if queue.indices.contains(currentIndex) { play(queueItem: queue[currentIndex], auto: auto) }
     }
 
     /// 一首播完后的统一收尾（r31）：AVPlayer 播完与 AM 引擎播完都走这里，
     /// 两处行为一致——有待播的「下一首」时先播它（单曲循环也不拦它，
     /// 用户点了下一首就是要先听它）；没有待播时单曲循环重播当前首，
     /// 否则按 next() 的顺序 / 随机 / 全部循环走。
+    /// r45-4：播完自动进的都传 auto: true（下一首取链 / 播放失败耗尽
+    /// 后才跳歌续播，不直接停，见 playCurrent / handlePlaybackFailure）。
     func handleTrackEnded() {
         if hasPendingPlayNext {
-            next()
+            next(auto: true)
             return
         }
         if repeatMode == .one {
@@ -664,7 +748,7 @@ final class PlaybackStore: ObservableObject {
             resume()
             return
         }
-        next()
+        next(auto: true)
     }
 
     /// 上一首（进度超过 3 秒时先回到开头，照常见播放器做法；否则切上一首）。
@@ -930,6 +1014,17 @@ final class PlaybackStore: ObservableObject {
             return
         }
         guard let result, let url = result.url else {
+            // r45-4：自动进下一首时取链全失败——旧代码直接停，就是"播完
+            // 一首就停"的根因（下一首登录过期 / LX 403 / 超时，整场播
+            // 放就此断掉）。自动起的跳过这首死链的歌继续播下一首，
+            // 连续 3 首连死才停住报错；手动点播的失败照旧报错停住。
+            if currentPlayAuto, autoAdvanceSkips < 3 {
+                autoAdvanceSkips += 1
+                DiagLog.shared.recordPlaybackStep("resolve url FAIL auto-skip source=\(track.platform) id=\(track.id) reason=\(result?.reason ?? "unavailable") skips=\(autoAdvanceSkips)")
+                next(auto: true)
+                return
+            }
+            autoAdvanceSkips = 0
             // 取链全失败：直接报错（r31：提示音兜底已删，失败即静默报错，不出声）。
             isLoading = false
             isPlaying = false
@@ -943,6 +1038,8 @@ final class PlaybackStore: ObservableObject {
             DiagLog.shared.recordPlaybackStep("resolve url FAIL source=\(track.platform) id=\(track.id) reason=\(lastFetchReason)")
             return
         }
+        // r45-4：取链成功，连续自动跳歌计数清零（这一首是活的）。
+        autoAdvanceSkips = 0
         lastFetchVia = result.via
         lastFetchReason = result.reason
         actualQuality = result.actualQuality
@@ -1273,6 +1370,15 @@ final class PlaybackStore: ObservableObject {
         // 3) r31：提示音兜底已删——全档重试耗尽后不再合成/播放任何提示音，
         // 直接落到下面的失败终态（isPlaying = false + errorMessage = 真正
         // 原因，PlayerView 红字照常显示），保持静默。
+        // r45-4：自动进的歌播到一半死了、重试耗尽——同样跳下一首续播，
+        // 不直接停；连续 3 首连死才停住报错（与取链失败同口径）。
+        if currentPlayAuto, autoAdvanceSkips < 3 {
+            autoAdvanceSkips += 1
+            DiagLog.shared.recordPlaybackStep("play FAIL all tiers auto-skip source=\(track.platform) id=\(track.id) reason=\(lastFetchReason) skips=\(autoAdvanceSkips)")
+            next(auto: true)
+            return
+        }
+        autoAdvanceSkips = 0
         isLoading = false
         isPlaying = false
         errorMessage = lastFetchReason.isEmpty ? "unavailable" : lastFetchReason

@@ -621,6 +621,9 @@ import UIKit
 /// flatCard 仍是 tier 分档 180/190/209）。
 /// r43-1：第 1 件——横屏平面卡改 0.181×vw（874pt → 158pt），竖屏仍 tier 分档；
 /// 环卡按横竖屏取 0.246/0.393×vw（见 ringCardWidth），screenHeight 与 screenWidth 同路透传。
+/// r44（第 3 件）：竖屏环卡 0.393→0.398×vw（排行榜竖屏实测 160pt，全模式统一），
+/// 横屏 0.246×vw 不动；pitch 1.14→1.40、R 除数 0.762→0.42（见 ringPitch /
+/// ringRadius），竖屏 D≈178pt（间隙 +18pt）、横屏 D≈249pt（间隙 +63pt）。
 /// 触发（r40：改回 r24）：平面带横向拖动开环（10px 内不判方向；
 /// 竖向占优 |dy|>|dx|×1.25 才交还 ScrollView，上/下都一样）；
 /// r39-5 的上滑开环 + 横向手滚跑马带（flatOffsetX 1:1 跟手）作废。
@@ -943,13 +946,19 @@ final class HomeCoverRingModel: ObservableObject {
                             accessibilityLabel: "播放：\(t.title)")
     }
 
-    /// 在播曲目在当前列表里的下标（开环锚点用；不在列表里回 nil，
+    /// 在播曲目在当前列表里的下标（开环锚点 + 点中态跟随用；不在列表里回 nil，
     /// 开环回落手指卡/正中卡）。
-    /// r43-2：第 2 件——通用路没有“在播曲目在列表里”的概念（rail 卡是
-    /// 歌单/专辑/电台混合，`RailMarqueeCard.isCurrent` 也恒为 false），
-    /// 锚点一律回手指卡，不拿 playingKey 去套通用卡。
+    /// r45-3：通用路也有曲目卡（榜单详情 / 打开的集合 / 各栏里的曲目行），
+    /// 它们的卡 id 与曲目路同式（"platform:id"，见 HomeView marqueeCards /
+    /// openedTrackCards 的 r45-3 改动），直接按 id 找，不再分路；集合卡
+    /// （歌单/专辑/电台/榜单）的 id 带类型前缀，不会撞上曲目键。
+    /// r43-2 的旧注（通用路没有在播概念）随之作废：混合列表里的集合卡
+    /// 本来就没有在播曲目可对，找不着自然回 nil，不用再拿 isGeneric 挡。
     var playingIndex: Int? {
-        guard !isGeneric, let key = playingKey else { return nil }
+        guard let key = playingKey else { return nil }
+        if let cards = genericCards {
+            return cards.firstIndex { $0.id == key }
+        }
         return tracks.firstIndex { $0.platform + ":" + $0.id == key }
     }
 
@@ -989,6 +998,14 @@ final class HomeCoverRingModel: ObservableObject {
             selectedFlatIndex = nil // r39-4：内容换了（切平台/重拉），点中态清掉，不指到另一首上
             selectedRingIndex = nil // r39-5：第 5 件——环卡点中态同清
         }
+        // r45-3：点中态跟随当前播（切歌 / 自动播下一首后，上抬的卡必须是
+        // 正在播的那首，不能赖在上一首上——"滑动后卡片不同步"的一半根因：
+        // 旧代码只在点卡时写 selectedFlatIndex，切歌后从不动它，自动播
+        // 下一首后上抬还指着上一首）。在播曲目不在当前列表里时回 nil，
+        // 清掉上抬，不指错歌。放在内容换列表的清零之后：换了内容也按
+        // 新列表重算，不残留。点卡那一下也对得上：点中的卡成了当前播，
+        // playingIndex 就是点中的下标，同值，不闪。
+        selectedFlatIndex = playingIndex
         // r33-marquee：带宽兜底（与 rail 的 ensureSetWidth 同款）：
         // flatSetWidth 正常由 FlatSetWidthKey 偏好上报；偏好没到时 tickFlat
         // 的 setWidth > 0 守卫永远拦住、带子永远停。只在 flatSetWidth 小于
@@ -1042,16 +1059,14 @@ final class HomeCoverRingModel: ObservableObject {
     /// 卡高推导只在这里（与 `ringCardHeight` 同款单一位置）。
     var flatHeight: CGFloat { flatCard + Self.titleArtistHeight + Self.selectedLift }
 
-    /// r43-1：第 1 件——环卡宽按用户实拍比例：竖屏 0.393×vw（中心卡宽
-    /// 39.3% 屏宽，402pt → 158pt），横屏 0.246×vw（3D 中心卡约 25% 屏宽，
-    /// 874pt → 215pt）。r39-5 的 clamp(vw×0.24, 84, 112)（竖屏 96.5、
-    /// 横屏顶格 112）作废。横竖屏由 screenHeight 判（宽>高为横屏）；
-    /// screenHeight = 0（调用方没传）时回落旧公式，免得把未知方向误判成横屏。
-    /// screenWidth = 0 的 tier 回落（compact 141 / standard 149 / large 164，
-    /// 39.6s 新视频中心卡 275px/720px）仍在 ringCard 里，不动。
+    /// r44（第 3 件）：竖屏 0.393→0.398×vw（排行榜竖屏实测 160pt/39.8% 屏宽，
+    /// 全模式统一用排行榜那个大小）；横屏 0.246×vw 不动——实测屏宽约 753pt
+    /// （outer.size.width，安全区已扣），代码实际约 185pt，不是 r43 注释里
+    /// 按 vw=874 算的纸面 215pt，也不是用户实拍中途帧的 159pt（见交回）；
+    /// 横屏 0.246×vw 配合新 pitch/R 验算铺得开（见 ringPitch）。
     static func ringCardWidth(screenWidth: CGFloat, screenHeight: CGFloat = 0) -> CGFloat {
         if screenHeight > 0 {
-            return screenWidth > screenHeight ? screenWidth * 0.246 : screenWidth * 0.393
+            return screenWidth > screenHeight ? screenWidth * 0.246 : screenWidth * 0.398
         }
         return min(max(screenWidth * 0.24, 84), 112)
     }
@@ -1079,19 +1094,22 @@ final class HomeCoverRingModel: ObservableObject {
     /// 横屏 852pt（10 首）约 15.7°。asin 入参夹到 [-1, 1]（壳版同款）。
     /// 没传屏宽时回落 40°（与旧弦长半径配套，见 ringRadius）。
     /// 曲数为 0 时 step 无意义，回 40° 免得除零（visibleSlots 已空）。
+    /// r44（第 3 件）：pitch 1.40 + R 除数 0.42 后竖屏 step 仍 51.4°
+    /// （360/n 分支，n=7），横屏约 23.3°（asin 分支，10 首）——
+    /// D 不再是旧 100pt，见 ringPitch。
     var ringStep: CGFloat {
         guard screenWidth > 0, ringSlotCount > 0 else { return 40 }
         let asinDeg = 2 * asin(min(max(ringPitch / (2 * ringRadius), -1), 1)) * 180 / .pi
         return min(360 / CGFloat(ringSlotCount), asinDeg)
     }
 
-    /// 槽距 = 卡宽×1.14（r35：换回壳版 ring.js openRing 原式
-    /// pitch = cardW * 1.14；r31 的「视频实测 pitch≈卡宽」已被用户
-    /// 2026-11-21 真机报告推翻——环开着拖动旋转时相邻卡几乎相贴，
-    /// 旧 pitch 下静止间隙只有约 2.9pt、拖动中途重叠约 11pt；
-    /// 新 pitch 下静止间隙约 21pt、拖动中途也不相贴，见驱动 §R4–§R5
-    /// 镜像。只改 pitch 这一处，R / P / perPixel 由它派生）。
-    var ringPitch: CGFloat { ringCard * 1.14 }
+    /// 槽距 = 卡宽×1.40（r44 第 3 件：r43 把卡改大后 R 仍是旧卡宽下的值，
+    /// 相邻槽投影间距竖屏仅约 100pt、比 158pt 卡宽小 57pt，必然重叠；
+    /// 且只改 pitch 无效——step 被 360/n 分支压住，pitch 只经 cap 间接影响。
+    /// 与 ringRadius 除数 0.42 联动：竖屏 D≈178pt、间隙 +18pt、字行间隙 +27pt，
+    /// 横屏 D≈249pt、间隙 +63pt，三卡总跨 684pt 占面板内容宽 704pt 约 97%，
+    /// 铺得开；r35 的 1.14（壳版原式）作废——壳版卡小，r43 的大卡配不上）。
+    var ringPitch: CGFloat { ringCard * 1.40 } // r44：第 3 件——1.14→1.40
 
     /// 环容量 cap = clamp(round(2πR/pitch), 7, 64)（壳版 openRing 原式；
     /// r39-5：第 5 件——竖屏 402pt round(10.40) = 10，横屏 852pt round(22.99) = 23；
@@ -1101,15 +1119,18 @@ final class HomeCoverRingModel: ObservableObject {
     }
 
     /// 圆柱半径（r39-5：第 5 件——壳版 openRing 原式 R = max(Rview, cardW×0.8)，
-    /// Rview = (vw/2 − edgePad − cardW/2) / 0.762，edgePad = 14；
-    /// 竖屏 402pt ≈ 182pt，横屏 852pt ≈ 467pt。
-    /// 与弦长公式同值（step 取 asin 分支时 R = pitch/(2·sin(step/2))；
-    /// step 取 360/n 分支时两者差 <1pt，壳版以 Rview 为准）。
+    /// Rview = (vw/2 − edgePad − cardW/2) / 0.42，edgePad = 14；
+    /// r44 第 3 件：除数 0.762→0.42，与 ringPitch 1.40 联动——竖屏 R≈255pt、
+    /// 横屏 R≈645pt（实测屏宽约 753pt）；旧 0.762 是按 94pt 小卡算的，
+    /// 配 r43 的大卡竖屏 R 仅 142pt、相邻槽角被 360/n 压到 51.4°、投影间距
+    /// 仅 100pt，卡必然重叠。新 R 下竖屏/横屏均走 asin 分支（step 51.4°/23.3°，
+    /// D 对条目数稳定）；拖动跟手速度 ringPerPixel 与 R 无关（恒 1.45pt/px），
+    /// 改 R 不影响拖动速度。
     /// 没传屏宽时回落旧弦长公式（r35：pitch 换回卡宽×1.14 后标准档
     /// 169.86/(2·sin20°) ≈ 248pt，compact ≈ 235pt，large ≈ 273pt）。
     var ringRadius: CGFloat {
         if screenWidth > 0 {
-            let rView = (screenWidth / 2 - 14 - ringCard / 2) / 0.762
+            let rView = (screenWidth / 2 - 14 - ringCard / 2) / 0.42 // r44：第 3 件——0.762→0.42
             return max(rView, ringCard * 0.8)
         }
         return ringPitch / (2 * sin(ringStep * .pi / 360))

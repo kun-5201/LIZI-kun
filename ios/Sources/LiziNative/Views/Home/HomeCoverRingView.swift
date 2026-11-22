@@ -721,6 +721,21 @@ final class HomeCoverRingModel: ObservableObject {
     /// 环卡宽 / 平面卡宽的横屏分支都读它；0 = 调用方没传，环卡回落
     /// 旧公式、平面卡回落 tier 分档。
     @Published var screenHeight: CGFloat = 0
+    /// r46-1：第 1 件——环几何的真屏宽/高基准（UIScreen.main.bounds.size，
+    /// 不走调用方同步的 geo：首页/播放器的 geo 在用户机上被系统垫到
+    /// 约 750pt（r44 注：实测屏宽约 753pt；PlayerView.swift 文件底 r22a：
+    /// geo 安全区被垫高到 124），按 geo 算横屏环卡只有约 185pt；用户实拍
+    /// 中心卡 153pt——185 的卡在展开中途帧（entryT≈0.33）正是 153pt，
+    /// 而 215 的卡再怎么展开也不会小于 159pt（215×0.74），所以实测
+    /// 153pt 本身就证明了环卡不是 215、是 geo 下的 185pt，展开动画
+    /// 与弹簧没有坏（竖屏实拍 160pt = 0.398×402 恰好，也证明展开能跑完）。
+    /// 真屏 874 → 环卡 0.246×874 = 215pt（用户 21:37 确认的改大稿），
+    /// 竖屏真屏 = geo = 402 → 160pt 不动。只用于环几何（ringCard /
+    /// ringRadius / ringStep 守卫 / hitTestRingCard 的 panelRect 回落）；
+    /// 平面卡 flatCard 不动、仍走 geo 的 screenWidth/screenHeight。
+    /// 模型是 @MainActor，UIScreen.main.bounds 在主线程读，安全。
+    var ringBasisWidth: CGFloat { UIScreen.main.bounds.size.width }
+    var ringBasisHeight: CGFloat { UIScreen.main.bounds.size.height }
     /// 面板是否为深场（调用方按专辑取色 field 同步，见 HomeView AlbumTone）：
     /// 深场时平面卡歌名/歌手/提示用白字，浅场用墨字。默认 true
     /// （默认 tone #5b5bd6/#b04f8c/#2f6f8f 是深场，见 AlbumTone.default）。
@@ -916,7 +931,7 @@ final class HomeCoverRingModel: ObservableObject {
     static let dragResumeDwell: Double = 1.2     // 平面带拖动松手后停多久再走
     // r28：与上面 resumeMs=1200 对上（39.6s 视频规格：松手 1200ms 后恢复；
     // 之前 dragResumeDwell=1.0，resumeMs 白定义了没人用）。
-    static let closeResumeMs: Double = 220       // 收回后多久恢复自动走
+    static let closeResumeMs: Double = 2000      // r46-6：第 6 件——收回后 2 秒再恢复自动走（旧 220ms：环一关带子立刻漂离环中心那张卡，用户还得重滚回去找；壳版 220ms 作废，见交回）
     static let swipeDownExit: CGFloat = 90       // 环里下滑超 90px 退出
 
     // MARK: 内容（r26-3D：永远是当前平台的每日推荐；队列优先已删）
@@ -1064,6 +1079,9 @@ final class HomeCoverRingModel: ObservableObject {
     /// （outer.size.width，安全区已扣），代码实际约 185pt，不是 r43 注释里
     /// 按 vw=874 算的纸面 215pt，也不是用户实拍中途帧的 159pt（见交回）；
     /// 横屏 0.246×vw 配合新 pitch/R 验算铺得开（见 ringPitch）。
+    /// r46-1：第 1 件——调用方现在传真屏宽（ringBasisWidth）进来：横屏
+    /// 0.246×874 = 215pt 是渲染实值（用户 21:37 确认的改大稿），
+    /// 竖屏 0.398×402 = 160pt 不动；旧「geo 下 185pt」的说法随之作废。
     static func ringCardWidth(screenWidth: CGFloat, screenHeight: CGFloat = 0) -> CGFloat {
         if screenHeight > 0 {
             return screenWidth > screenHeight ? screenWidth * 0.246 : screenWidth * 0.398
@@ -1072,8 +1090,11 @@ final class HomeCoverRingModel: ObservableObject {
     }
 
     /// 环卡宽（r39-5：第 5 件——有实测屏宽时按 ringCardWidth 现算；没传屏宽时
-    /// 回落旧 tier 分档；r43-1：横竖屏按 screenHeight 取 0.246/0.393×vw）。
+    /// 回落旧 tier 分档；r43-1：横竖屏按 screenHeight 取 0.246/0.393×vw；
+    /// r46-1：第 1 件——屏宽取真屏基准 ringBasisWidth（横屏 215pt、竖屏 160pt），
+    /// 不再取 geo 的 screenWidth（横屏只有约 750pt，卡只有约 185pt）。
     var ringCard: CGFloat {
+        if ringBasisWidth > 0 { return Self.ringCardWidth(screenWidth: ringBasisWidth, screenHeight: ringBasisHeight) }
         if screenWidth > 0 { return Self.ringCardWidth(screenWidth: screenWidth, screenHeight: screenHeight) }
         switch tier {
         case .compact: return 141
@@ -1098,7 +1119,7 @@ final class HomeCoverRingModel: ObservableObject {
     /// （360/n 分支，n=7），横屏约 23.3°（asin 分支，10 首）——
     /// D 不再是旧 100pt，见 ringPitch。
     var ringStep: CGFloat {
-        guard screenWidth > 0, ringSlotCount > 0 else { return 40 }
+        guard ringBasisWidth > 0, ringSlotCount > 0 else { return 40 } // r46-1：第 1 件——守卫改走真屏基准（与 ringCard/ringRadius 同源）
         let asinDeg = 2 * asin(min(max(ringPitch / (2 * ringRadius), -1), 1)) * 180 / .pi
         return min(360 / CGFloat(ringSlotCount), asinDeg)
     }
@@ -1126,11 +1147,13 @@ final class HomeCoverRingModel: ObservableObject {
     /// 仅 100pt，卡必然重叠。新 R 下竖屏/横屏均走 asin 分支（step 51.4°/23.3°，
     /// D 对条目数稳定）；拖动跟手速度 ringPerPixel 与 R 无关（恒 1.45pt/px），
     /// 改 R 不影响拖动速度。
+    /// r46-1：第 1 件——半径按真屏宽：横屏 R = (874/2−14−215/2)/0.42 ≈ 751pt
+    /// （旧 geo 下约 645pt 作废），竖屏 R≈255pt 不动。
     /// 没传屏宽时回落旧弦长公式（r35：pitch 换回卡宽×1.14 后标准档
     /// 169.86/(2·sin20°) ≈ 248pt，compact ≈ 235pt，large ≈ 273pt）。
     var ringRadius: CGFloat {
-        if screenWidth > 0 {
-            let rView = (screenWidth / 2 - 14 - ringCard / 2) / 0.42 // r44：第 3 件——0.762→0.42
+        if ringBasisWidth > 0 { // r46-1：第 1 件——半径按真屏宽
+            let rView = (ringBasisWidth / 2 - 14 - ringCard / 2) / 0.42 // r44：第 3 件——0.762→0.42
             return max(rView, ringCard * 0.8)
         }
         return ringPitch / (2 * sin(ringStep * .pi / 360))
@@ -1527,7 +1550,8 @@ final class HomeCoverRingModel: ObservableObject {
     }
 
     /// 收回：430ms（点空白 220ms 快收），收完 phase=.closed，平面带
-    /// 220ms 后恢复自动走（壳版 finishClose 同款）。
+    /// 2 秒后恢复自动走（r46-6：第 6 件——旧 220ms 壳版 finishClose 同款作废：
+    /// 环一关带子立刻漂离环中心卡，用户还得重滚回去）。
     func closeRing(quick: Bool = false) {
         guard ringPhase == .open else { return }
         ringPhase = .closing
@@ -1843,6 +1867,10 @@ final class HomeCoverRingModel: ObservableObject {
         guard itemCount > 0, flatSetWidth > 0, stripSize.width > 0, // r43-2：第 2 件——条目数，曲目路与旧 tracks 同值
               overlayOpacity >= 0.99 else { return }
         let k = ringCenterTrackIndex
+        // r46-5：第 5 件——高亮跟环中心走（转环只同步显示位置、不换播歌：
+        // 点卡播歌时 playTrack、切歌时 syncInputs 会按在播曲目重写，属正常回落；
+        // 写在偏移守卫之前：偏移已对齐时也要更新高亮，不能提前 return 掉）。
+        selectedFlatIndex = k
         let target = stripSize.width / 2 - flatCard / 2 - CGFloat(k) * flatPitch
         let next = normalizedFlat(target)
         guard abs(next - flatOffsetX) > 0.01 else { return }
@@ -2108,7 +2136,8 @@ final class HomeCoverRingModel: ObservableObject {
     /// 面板外拦截删掉（侧卡溢出面板到屏边，溢出部分看得见、点得到）。
     func hitTestRingCard(at point: CGPoint, screenWidth: CGFloat, screenHeight: CGFloat? = nil, topEdge: CGFloat = 95) -> Int? {
         _ = topEdge
-        let panel = panelRect(screenWidth: screenWidth)
+        _ = screenWidth // r46-1：第 1 件——回落中心改走真屏基准（下行），调用方传的覆盖层 geo 宽（约 750pt）不再用
+        let panel = panelRect(screenWidth: ringBasisWidth) // r46-1：第 1 件——stripCenter 没量到时才走这条回落，中心按真屏宽/2（437pt）
         let cx = panel.centerX
         var best: (index: Int, world: CGFloat)?
         for slot in visibleSlots() {
@@ -3205,6 +3234,15 @@ final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
             if dragStarted {
                 dragStarted = false
                 model.ringDragEnded()
+            } else if (model.ringPhase == .open || model.ringPhase == .closing),
+                      let idx = model.hitTestRingCard(at: CGPoint(x: startX, y: startY), screenWidth: bounds.width, screenHeight: bounds.height, topEdge: topEdge) {
+                // r46-7：第 7 件——晃一下就抬手（pan 认出来了、tap 没触发、
+                // 模型又没判成拖动）：按落点（startX/startY，用户的本意）
+                // 试一次点卡——落点在卡上就播歌 + 收环（与点按同款）；
+                // 落点不在卡上才走旧路（补 1s 收回定时器，环不永远开着）。
+                // 命中盒与渲染同公式（stripCenter 活量 + projectedX），
+                // 转环后点任意可见卡都落得到盒里。
+                onTapCard?(idx)
             } else {
                 // r33，第 3 条：没拖起来（<5px 晃一下就抬手）也要补一个
                 // 松手收回——touchesBegan 已经取消了待执行的收回定时器，
@@ -3260,7 +3298,12 @@ final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
 
     @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
         guard let model, recognizer.state == .ended else { return }
-        guard model.ringPhase == .open else { return }
+        // r46-7：第 7 件——.closing 也接受：松手 1s 后环开始 430ms 收回淡出，
+        // 淡出期内卡片还看得见，旧守卫（只认 .open）把这段点按整个吞掉——
+        // 转完环、看一眼再点，环已在收，点按无反应。tapRingCard 里的
+        // closeRing 在 .closing 时是 no-op（见 closeRing 守卫），收回继续走、
+        // 不会闪回；点中的卡照常播歌。
+        guard model.ringPhase == .open || model.ringPhase == .closing else { return }
         let location = recognizer.location(in: self)
         if let idx = model.hitTestRingCard(at: location, screenWidth: bounds.width, screenHeight: bounds.height, topEdge: topEdge) {
             onTapCard?(idx)

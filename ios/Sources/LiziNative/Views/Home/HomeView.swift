@@ -627,7 +627,12 @@ struct HomeView: View {
                 topBar(topPad: topPad, leadingPad: isLandscape ? outer.safeAreaInsets.leading + 16 : 16)
                     // r44（第 4 件）：横屏 Hero 收起时顶栏随 collapseT 坍缩渐隐
                     // （高 64→0，下缘裁切；竖屏 collapseT = 0，高 64 不动）。
-                    .frame(height: topBarHLive, alignment: .top)
+                    // r46-2：第 2 件——框高 = topPad + topBarHLive：顶栏视图本身
+                    // 高 topPad(31) + 64 = 95pt（topBar() 的 .padding(.top, topPad)
+                    // 在内），只框 64pt 会把齿轮/搜索/品牌下半 31pt 裁掉
+                    // （竖屏实拍暗像素在 63.7pt 断掉）；横屏 topPad=0，框高不变，
+                    // collapse 64→0 保持。
+                    .frame(height: topPad + topBarHLive, alignment: .top)
                     .clipped()
                     .opacity(isLandscape ? 1 - collapseT : 1)
                 ScrollView {

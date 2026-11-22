@@ -376,6 +376,11 @@ struct HomeView: View {
     /// 已随 searchQueueBlock 删掉；r38-1：搜索队列改由「正在播放」模式承载，
     /// 不再进每日推荐那排卡片）。
     @StateObject private var rankSongsRingModel = HomeCoverRingModel()
+    /// r43-2：第 2 件——rail 四栏（精选/我喜欢的音乐/我的歌单/电台）+ 排行榜目录
+    /// 共用的环状态机（独立实例，与每日推荐 ringModel / 榜单详情
+    /// rankSongsRingModel 各用各的；同一时间只显示一个来源，entriesView 与
+    /// openedView 切换时靠 cards 变化重同步，见 HomeCoverRingView.syncInputs）。
+    @StateObject private var railRingModel = HomeCoverRingModel()
     /// r31：rail 来源跑马带驱动（`RailMarqueeDriver`，CADisplayLink + dt，
     /// 与环平面带同款）。归 HomeView 所有：dailyPanel 的
     /// `.id(viewModel.selectedSource)` 只重建 sourceContent，驱动不重建，
@@ -527,8 +532,8 @@ struct HomeView: View {
             let heroH = contentH * fraction
             // r28：面板高按内容封顶（壳版视频：面板约 336–407pt，本地音乐露在
             // 首屏；旧「两块拼满整屏」已作废）。内容高 = 内边距 20 + 条 48 +
-            // 间距 8 + 内容区（每日内容：底座内边距 20 + 带 flatCard+58
-            // + 间距 6 + 提示行 27 = flatCard+111，再加 r30 栏头撤掉后
+            // 间距 8 + 内容区（每日内容：底座内边距 20 + 带 flatCard+53（r43-3：带高
+            // flatCard+52+1，原 +58）+ 间距 6 + 提示行 27 = flatCard+106，再加 r30 栏头撤掉后
             // 多出的 30pt 余量）= flatCard + 217（标准档 407；
             // compact 397、large 426；公式不动，只改账）。
             // 横屏面板 140 本来就小于内容高，封顶不触发。拖大 Hero 后面板按
@@ -537,8 +542,9 @@ struct HomeView: View {
             // r37-1：搜索歌单带已删（见文件头 r37-1 节）——搜索队列直接显示在
             // 每日推荐那排卡片里，不再另占一块带子，封顶不用再给它抬高；
             // r36 的 searchBeltExtraH（flatCard + 198）已删，封顶回到
-            // flatCard + 217。r39-4：第 4 件带高改成 flatCard + 58
-            // （两行字 52 + 点中上抬顶空 6），内容总高仍 ≤ 封顶，公式不动。
+            // flatCard + 217。r43-3：带高改成 flatCard + 53（两行字 52 + 点中上抬
+            // 顶空 1），内容总高 flatCard + 212 ≤ 封顶，公式不动；r43-1：横屏模型
+            // flatCard 改 158，内容 370 ≤ 封顶 426，封顶仍是上界、不脱节，公式不动。
             let panelContentH: CGFloat = flatCard + 217
             let panelH = min(contentH - heroH, panelContentH)
             let blockW = outer.size.width - 32
@@ -573,7 +579,8 @@ struct HomeView: View {
                                 height: panelH,
                                 isLandscape: isLandscape,
                                 tier: tier,
-                                screenWidth: outer.size.width // r39-5：第 5 件——实测屏宽，环几何按它算
+                                screenWidth: outer.size.width, // r39-5：第 5 件——实测屏宽，环几何按它算
+                                screenHeight: outer.size.height // r43-1：第 1 件——实测屏高，判横竖屏用
                             )
                             // r22l 编译修：231 行 tier 类型错导致这行
                             // dailyPanel 调用的结果类型推不出来，`.horizontal`
@@ -783,7 +790,8 @@ struct HomeView: View {
         height: CGFloat,
         isLandscape: Bool,
         tier: PlayerTokens.PlayerSizeTier,
-        screenWidth: CGFloat // r39-5：第 5 件——实测屏宽，见 sourceContent
+        screenWidth: CGFloat, // r39-5：第 5 件——实测屏宽，见 sourceContent
+        screenHeight: CGFloat // r43-1：第 1 件——实测屏高，判横竖屏用
     ) -> some View {
         // r23h：条钉在面板顶，见本函数头注释。
         VStack(spacing: 8) {
@@ -832,7 +840,7 @@ struct HomeView: View {
             // 文件头注释）。
             // 来源切换不走翻页手势：菜单点选即切；面板内竖滑归外层
             // ScrollView 滚整页，横向拖动开环（r40，改回 r24）。
-            sourceContent(tier: tier, screenWidth: screenWidth)
+            sourceContent(tier: tier, screenWidth: screenWidth, screenHeight: screenHeight)
                 .id(viewModel.selectedSource)
                 .transition(.opacity)
                 // r36 v4：切来源 / 切平台时退出榜单详情（榜单是按平台的，
@@ -885,12 +893,12 @@ struct HomeView: View {
     /// 时 250ms 后才亮 spinner（viewModel.rankSpinnerVisible），
     /// 250ms 内是空白占位、不闪；旧榜在加载中先留着（loadRankBoards
     /// 只在回来后才换 rankBoards）。
-    private func rankSourceContent(isDark: Bool, tier: PlayerTokens.PlayerSizeTier, screenWidth: CGFloat) -> some View { // r39-5：第 5 件——实测屏宽透传给环
+    private func rankSourceContent(isDark: Bool, tier: PlayerTokens.PlayerSizeTier, screenWidth: CGFloat, screenHeight: CGFloat) -> some View { // r39-5：第 5 件——实测屏宽透传给环；r43-1：屏高同路透传
         Group {
             if let board = selectedRankBoard {
-                rankDetailContent(board: board, isDark: isDark, tier: tier, screenWidth: screenWidth)
+                rankDetailContent(board: board, isDark: isDark, tier: tier, screenWidth: screenWidth, screenHeight: screenHeight)
             } else {
-                rankBoardListContent(isDark: isDark, tier: tier)
+                rankBoardListContent(isDark: isDark, tier: tier, screenWidth: screenWidth, screenHeight: screenHeight)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -911,7 +919,7 @@ struct HomeView: View {
     /// 酷狗 10 页×100、酷我 10 页×200；见 NativeBridge.playlistAllTracks）。
     /// 加载中只亮 spinner（无文字）；空榜（拉不到/0 首）给诚实空态一行，
     /// 不是操作提示。
-    private func rankDetailContent(board: RankBoard, isDark: Bool, tier: PlayerTokens.PlayerSizeTier, screenWidth: CGFloat) -> some View { // r39-5：第 5 件——实测屏宽透传给环
+    private func rankDetailContent(board: RankBoard, isDark: Bool, tier: PlayerTokens.PlayerSizeTier, screenWidth: CGFloat, screenHeight: CGFloat) -> some View { // r39-5：第 5 件——实测屏宽透传给环；r43-1：屏高同路透传
         VStack(alignment: .leading, spacing: 8) {
             // v4 顶栏：左榜单名，右「‹ 榜单」返回 + 放大镜搜索。
             HStack(spacing: 12) {
@@ -945,7 +953,8 @@ struct HomeView: View {
                     panelIsDark: isDark,
                     coverOnly: true,
                     hideEntryHint: true,
-                    screenWidth: screenWidth // r39-5：第 5 件（成员初始化器顺序：screenWidth 是末位存储属性，调用点必须放最后）
+                    screenWidth: screenWidth, // r39-5：第 5 件
+                    screenHeight: screenHeight // r43-1：第 1 件（成员初始化器顺序：screenHeight 是末位存储属性，调用点必须放最后）
                 )
             } else if rankDetailLoading {
                 HStack {
@@ -971,9 +980,14 @@ struct HomeView: View {
         }
     }
 
-    /// 榜单目录（未点进某张榜单时）：当前平台的榜单列表——横向 ScrollView
-    /// 全排出来（r37-5，旧跑马带见本函数内注释）；没榜的平台只画诚实文案，
-    /// 不发请求。
+    /// 榜单目录（未点进某张榜单时）：当前平台的榜单列表——接 3D 环
+    /// （r43-2：第 2 件，与 rail 四栏同一套 `HomeCoverRingView` + 共用
+    /// railRingModel；榜单卡点按仍是选中榜单进详情，详情已有环）。
+    /// r37-5 的成果保住了：环靠拖动旋转能翻到全部榜单——环槽位取模
+    /// （`visibleSlots` 的 mod(anchorIndex + s, n)）不截断条目，
+    /// cap（竖屏约 7、横屏约 11）只定槽距、不定条目上限；网易 65 个、
+    /// 酷狗 56 个、QQ 30 个榜单全靠转环翻到，横向 ScrollView 随之撤掉。
+    /// 没榜的平台只画诚实文案，不发请求。
     /// r37-5（排行榜一次只露 2 张卡）：根因在 UI 不在取数——
     /// NativeBridge.rankBoards 回全量榜单（网易 65 个、QQ 30 个、酷狗 56 个、
     /// 酷我 bangMenu 全量，无任何 prefix(2)/截断），旧写法却把榜单塞进
@@ -984,21 +998,22 @@ struct HomeView: View {
     /// 跑马带；卡片仍是 RailMarqueeCardView（r39-4：卡下两行字，榜单名 +
     /// 副信息；点卡进详情的路由不动），驱动不再参与榜单目录（共享 railMarqueeDriver 的
     /// setWidth stale 问题随之绕开）。
-    private func rankBoardListContent(isDark: Bool, tier: PlayerTokens.PlayerSizeTier) -> some View {
-        let cardWidth: CGFloat = tier == .compact ? 180 : tier == .standard ? 190 : 209
-        return VStack(alignment: .leading, spacing: 8) {
+    /// r43-2：第 2 件——ScrollView 撤掉的理由：环的平面带本身就是横向带
+    /// （24px/s 自动走 + 拖动转环），榜单全量都在环上、不再只露头 2 张；
+    /// 榜单目录与 rail 四栏共用 railRingModel（同一时间只显示一个来源）。
+    private func rankBoardListContent(isDark: Bool, tier: PlayerTokens.PlayerSizeTier, screenWidth: CGFloat, screenHeight: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
             if !viewModel.rankBoards.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 16) {
-                        ForEach(rankCards) { card in
-                            RailMarqueeCardView(card: card, width: cardWidth, isDark: isDark)
-                        }
-                    }
-                }
-                // r39-4：第 4 件——卡下两行字高 52（榜单名 16 + 间距 7 +
-                // 副信息 14 + 行高余量，与环平面带 flatHeight 的两行字同值），
-                // 带高 = 卡宽 + 52；卡宽/卡高/间距不动。
-                .frame(height: cardWidth + HomeCoverRingModel.titleArtistHeight)
+                HomeCoverRingView(
+                    model: railRingModel,
+                    cards: rankCards.map(\.ringCard),
+                    marqueeSpeed: viewModel.marqSpeedPxPerSecond,
+                    tier: tier,
+                    panelIsDark: isDark,
+                    coverOnly: true,
+                    screenWidth: screenWidth, // r39-5：第 5 件——实测屏宽，环几何按它算
+                    screenHeight: screenHeight // r43-1：第 1 件——实测屏高，判横竖屏用
+                )
             } else if viewModel.rankSpinnerVisible {
                 // 250ms 后仍在加载：spinner（与 rail 各栏 loadingView 同款
                 // 尺寸，见 RailSourceListView）。
@@ -1050,24 +1065,32 @@ struct HomeView: View {
     @ViewBuilder
     private func sourceContent(
         tier: PlayerTokens.PlayerSizeTier,
-        screenWidth: CGFloat // r39-5：第 5 件——实测屏宽，见 dailyPanel
+        screenWidth: CGFloat, // r39-5：第 5 件——实测屏宽，见 dailyPanel
+        screenHeight: CGFloat // r43-1：第 1 件——实测屏高，判横竖屏用
     ) -> some View {
         switch viewModel.selectedSource {
         case .daily:
-            dailyRingContent(tier: tier, screenWidth: screenWidth)
+            dailyRingContent(tier: tier, screenWidth: screenWidth, screenHeight: screenHeight)
         case .nowPlaying: // r38-1
-            nowPlayingRingContent(tier: tier, screenWidth: screenWidth)
+            nowPlayingRingContent(tier: tier, screenWidth: screenWidth, screenHeight: screenHeight)
         case .rank:
-            rankSourceContent(isDark: panelTone.isDark, tier: tier, screenWidth: screenWidth)
+            rankSourceContent(isDark: panelTone.isDark, tier: tier, screenWidth: screenWidth, screenHeight: screenHeight)
         case .featured, .liked, .created, .radio:
             // r31：卡宽与环平面带同档（compact 180 / standard 190 / large 209，
             // 见 HomeCoverRingModel.flatCard），7 个来源卡片同尺寸；
             // isDark 跟面板取色走；跑马带驱动归 HomeView 所有（切来源不重建）。
+            // r43-2：第 2 件——4 栏改走 3D 环（HomeCoverRingView + railRingModel，
+            // 见 RailSourceListView.entriesView/openedView）；tier 与屏宽/高
+            // 同路透传给环（r43-1 的 screenHeight 在末位）。
             RailSourceListView(
                 viewModel: viewModel,
                 cardWidth: tier == .compact ? 180 : tier == .standard ? 190 : 209,
                 isDark: panelTone.isDark,
-                marqueeDriver: railMarqueeDriver
+                marqueeDriver: railMarqueeDriver,
+                tier: tier,
+                screenWidth: screenWidth,
+                screenHeight: screenHeight,
+                ringModel: railRingModel
             )
         }
     }
@@ -1140,14 +1163,15 @@ struct HomeView: View {
     /// r37-1：卡片封面-only（`coverOnly: true`，见 HomeCoverRingView），
     /// 点卡播歌、跑马带、3D 环开环一律不动。
     /// r39-4：第 4 件起 coverOnly 不再藏卡下两行字——平面带卡下恢复歌名 +
-    /// 演唱者（`FlatRingCard`，只加这两个，不加专辑名），点中的卡整体上抬 6pt。
+    /// 演唱者（`FlatRingCard`，只加这两个，不加专辑名），点中的卡整体上抬 1pt（r43-3）。
     /// r38-1：每日推荐永远只显示 `viewModel.daily`——r37-1 的 searchQueue
     /// 覆盖已删：搜完点歌立起的队列不再挤占今日推荐那排卡片，改由菜单
     /// 「正在播放」模式承载（见 nowPlayingRingContent）；queueTitle 传 nil，
     /// 环本身、跑马带、3D 环、点卡播歌一律不动。
     private func dailyRingContent(
         tier: PlayerTokens.PlayerSizeTier,
-        screenWidth: CGFloat // r39-5：第 5 件——实测屏宽，见 dailyPanel
+        screenWidth: CGFloat, // r39-5：第 5 件——实测屏宽，见 dailyPanel
+        screenHeight: CGFloat // r43-1：第 1 件——实测屏高，判横竖屏用
     ) -> some View {
         HomeCoverRingView(
             model: ringModel,
@@ -1160,7 +1184,8 @@ struct HomeView: View {
             panelIsDark: panelTone.isDark,
             queueTitle: nil, // r38-1：每日推荐不带队列标题
             coverOnly: true,
-            screenWidth: screenWidth // r39-5：第 5 件（成员初始化器顺序：screenWidth 是末位存储属性，调用点必须放最后）
+            screenWidth: screenWidth, // r39-5：第 5 件
+            screenHeight: screenHeight // r43-1：第 1 件（成员初始化器顺序：screenHeight 是末位存储属性，调用点必须放最后）
         )
     }
 
@@ -1173,7 +1198,8 @@ struct HomeView: View {
     /// 同款样式，见 HomeCoverRingView.emptyView）。
     private func nowPlayingRingContent(
         tier: PlayerTokens.PlayerSizeTier,
-        screenWidth: CGFloat // r39-5：第 5 件——实测屏宽，见 dailyPanel
+        screenWidth: CGFloat, // r39-5：第 5 件——实测屏宽，见 dailyPanel
+        screenHeight: CGFloat // r43-1：第 1 件——实测屏高，判横竖屏用
     ) -> some View {
         HomeCoverRingView(
             model: ringModel,
@@ -1186,7 +1212,8 @@ struct HomeView: View {
             panelIsDark: panelTone.isDark,
             queueTitle: playback.queueTitle,
             coverOnly: true,
-            screenWidth: screenWidth // r39-5：第 5 件（成员初始化器顺序：screenWidth 是末位存储属性，调用点必须放最后）
+            screenWidth: screenWidth, // r39-5：第 5 件
+            screenHeight: screenHeight // r43-1：第 1 件（成员初始化器顺序：screenHeight 是末位存储属性，调用点必须放最后）
         )
     }
 
@@ -1195,6 +1222,10 @@ struct HomeView: View {
     /// 「用户创建的歌单」改名「我的歌单」）改成与每日推荐同款的横向卡片跑马带
     /// （`RailMarqueeView`），不再是竖向列表。r30 的列表行（曲目 =
     /// TrackRowView 56pt 行，歌单/电台 = 56pt 横行）已删：
+    /// r43-2：第 2 件——4 栏的跑马带改成与每日推荐同一套 3D 环
+    /// （`HomeCoverRingView` + 共用 railRingModel，见 entriesView/openedView；
+    /// 平面带 + 3D 环 + 手势链全复用环的，不另写一套；`RailMarqueeView` /
+    /// `RailMarqueeDriver` 原样留着不动，驱动留待环真机验证后另行退役）。
     /// - 曲目卡 = 封面 + 卡下两行字（r39-4：歌名 + 演唱者；环平面带 FlatRingCard
     ///   同款形状，卡宽与环同档），点一张播一首（setQueue 整份曲目）；
     /// - 歌单/专辑/电台卡 = 该集合本身（r39-4：卡下两行字，名字 + 副信息），
@@ -1237,7 +1268,20 @@ struct HomeView: View {
         /// 面板深场（调用方按专辑取色 field 传；卡片字色跟它走，与环卡同款）。
         let isDark: Bool
         /// 跑马带驱动（归 HomeView 所有，切来源不重建，见文件头 r31 节）。
+        /// r43-2：第 2 件——驱动本身不动（任务禁改项）；entriesView/openedView
+        /// 已改走环（自带模型驱动），驱动只剩 RailMarqueeView 挂着、
+        /// 目前无调用方，留待环真机验证后另行退役，不在本轮动它。
         @ObservedObject var marqueeDriver: RailMarqueeDriver
+        /// r43-2：第 2 件——尺寸档（环的 flatCard/ringCard 按它 + 屏宽/高算，
+        /// 调用方按 tier 传，与每日环同路）。
+        let tier: PlayerTokens.PlayerSizeTier
+        /// r43-2：第 2 件——实测屏宽/高（环几何按它算，与每日环同路透传）。
+        let screenWidth: CGFloat
+        let screenHeight: CGFloat
+        /// r43-2：第 2 件——rail 四栏共用的环状态机（HomeView 的 railRingModel，
+        /// 与每日 ringModel / 榜单详情 rankSongsRingModel 各用各的；
+        /// entriesView 与 openedView 切换时靠 cards 变化重同步）。
+        @ObservedObject var ringModel: HomeCoverRingModel
 
         private var page: HomeRailPage { viewModel.selectedSource }
         private var platform: String { viewModel.selectedPlatform }
@@ -1327,17 +1371,20 @@ struct HomeView: View {
                 } else if let reason = viewModel.openedEmptyReason {
                     emptyView(reason: reason)
                 } else {
-                    RailMarqueeView(
-                        cards: openedTrackCards,
-                        cardWidth: cardWidth,
-                        isDark: isDark,
-                        driver: marqueeDriver,
-                        speed: viewModel.marqSpeedPxPerSecond
+                    // r43-2：第 2 件——打开的集合改走 3D 环（与 entriesView 同一套
+                    // HomeCoverRingView + 共用 railRingModel；卡片 = 打开的全部
+                    // 歌曲，点一张播一首的 onTap 原样透传；返回头/加载/失败/空态/
+                    // 「查看全部」一律不动，环只换掉原来那条 RailMarqueeView）。
+                    HomeCoverRingView(
+                        model: ringModel,
+                        cards: openedTrackCards.map(\.ringCard),
+                        marqueeSpeed: viewModel.marqSpeedPxPerSecond,
+                        tier: tier,
+                        panelIsDark: isDark,
+                        coverOnly: true,
+                        screenWidth: screenWidth, // r39-5：第 5 件——实测屏宽，环几何按它算
+                        screenHeight: screenHeight // r43-1：第 1 件——实测屏高，判横竖屏用
                     )
-                    // r39-4：第 4 件——卡下两行字高 52（标题 16 + 间距 7 +
-                    // 副标题 14 + 行高余量，与环平面带 flatHeight 的两行字同值），
-                    // 带高 = 卡宽 + 52；卡宽/卡高/间距不动。
-                    .frame(height: cardWidth + HomeCoverRingModel.titleArtistHeight)
                     Spacer(minLength: 0)
                     openedViewAllButton
                 }
@@ -1399,17 +1446,22 @@ struct HomeView: View {
                 return true
             }.count
             return VStack(alignment: .leading, spacing: 0) {
-                RailMarqueeView(
-                    cards: cards,
-                    cardWidth: cardWidth,
-                    isDark: isDark,
-                    driver: marqueeDriver,
-                    speed: viewModel.marqSpeedPxPerSecond
+                // r43-2：第 2 件——4 栏改走 3D 环（与每日推荐同一套
+                // HomeCoverRingView + 共用 railRingModel；平面带 + 3D 环 +
+                // 手势链全复用环的，不另写一套；入口提示行默认显示，与每日
+                // 推荐一致，不传 hideEntryHint；卡片 = marqueeCards 原样转
+                // 通用卡，点按行为（曲目 setQueue / 歌单面板内打开或进详情 /
+                // 专辑面板内打开 / 电台进详情）原样透传；「查看全部」不动）。
+                HomeCoverRingView(
+                    model: ringModel,
+                    cards: cards.map(\.ringCard),
+                    marqueeSpeed: viewModel.marqSpeedPxPerSecond,
+                    tier: tier,
+                    panelIsDark: isDark,
+                    coverOnly: true,
+                    screenWidth: screenWidth, // r39-5：第 5 件——实测屏宽，环几何按它算
+                    screenHeight: screenHeight // r43-1：第 1 件——实测屏高，判横竖屏用
                 )
-                // r39-4：第 4 件——卡下两行字高 52（标题 16 + 间距 7 +
-                // 副标题 14 + 行高余量，与环平面带 flatHeight 的两行字同值），
-                // 带高 = 卡宽 + 52；卡宽/卡高/间距不动。
-                .frame(height: cardWidth + HomeCoverRingModel.titleArtistHeight)
                 Spacer(minLength: 0)
                 viewAllButton(total: total)
             }
@@ -1581,6 +1633,16 @@ struct HomeView: View {
         /// 默认 false，渲染与原来一字不差）。
         var isCurrent: Bool = false
         var onTap: () -> Void
+
+        /// r43-2：第 2 件——rail 卡 → 通用环卡（id/coverURL/title/subtitle/onTap
+        /// 原样透传；isCurrent 只剩默认 false、渲染不动，不带过来）。
+        /// 放这里是因为 `RailMarqueeCard` 是 HomeView 的 private 嵌套类型，
+        /// HomeCoverRingView.swift 看不见它（extension 不能嵌套在类型里，
+        /// 所以不用 `extension HomeRingCard` 的写法）。
+        var ringCard: HomeRingCard {
+            HomeRingCard(id: id, coverURL: coverURL, title: title,
+                         subtitle: subtitle, onTap: onTap)
+        }
     }
 
     /// r31：rail 跑马带驱动（与 HomeCoverRingModel 的平面带驱动同款：

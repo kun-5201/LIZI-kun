@@ -104,7 +104,8 @@ struct PlaylistDetailView: View {
                         tier: PlayerTokens.sizeTier(for: UIScreen.main.bounds.size, topInset: 0),
                         panelIsDark: false,
                         hideEntryHint: true,
-                        screenWidth: geo.size.width // r39-5：第 5 件——实测宽，不回落旧分档（成员初始化器顺序：screenWidth 是末位存储属性，调用点必须放最后）
+                        screenWidth: geo.size.width, // r39-5：第 5 件——实测宽，不回落旧分档
+                        screenHeight: geo.size.height // r43-1：第 1 件——实测高，判横竖屏用（成员初始化器顺序：screenHeight 是末位存储属性，调用点必须放最后）
                     )
                     .padding(.horizontal, 16)
                     .padding(.top, 12)

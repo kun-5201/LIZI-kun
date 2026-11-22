@@ -428,20 +428,10 @@ import UIKit
 ///    跟同一批跑。收回不用改：closeRing 时覆盖层已挂着
 ///    （HomeView 挂载条件是 ringPhase != .closed，open 与 closing 都挂），
 ///    closeT/overlayOpacity 有 from 态，430ms/220ms 插值正常跑。
-/// 联动（用户 10:11/10:12 第 1 条，环跟着下面那排卡片走）：环与带子共用
-/// 同一个当前索引（`ringCenterTrackIndex`）。拖动环时带子实时跟过去
-/// （ringDragMoved 里 `syncFlatOffsetToRingCenter`：带子中心对准环当前那首；
-/// 弹簧吸附阶段由覆盖层 onChange(of: angle) 跟过去）；环收回后带子从这首
-/// 继续自动滚，开关环不丢位置。环的位置本来就从带子派生（ringCenterY =
-/// stripCenter.y、横向 panel.centerX，r31；实测环中心 = 带子中心 + tiltDrop
-/// 约 20pt，对得上），本轮不动锚点。开环时不同步带子（0.26s 淡出里跳变会闪），
-/// 锚点仍是在播曲目/手指卡（用户 22:33 定稿）。冲突说明：带子自动滚时环
-/// 跟着转——环开着时带子是冻住的（tickFlat 的 ringPhase == .closed 守卫），
-/// 想让环边开边跟带子转就得让环自己转起来，与「环本身不自动转」的既有规矩
-/// 冲突，按用户 10:11 的冲突条款以既有规矩为准；且 24px/s 折到环上只有
-/// 约 4.7°/秒，1 秒保持期内只漂约 5°，放开也看不见——联动落在开环锚点 +
-/// 拖动跟随 + 收回交接三处，连续跟随留给以后一轮（angle 改从 flatOffsetX
-/// 派生是大重构，不在本轮做）。
+/// 联动（用户 10:11/10:12 第 1 条，环跟着下面那排卡片走）：r51 已按套壳
+/// 逻辑拆掉——拖动环时带子不再实时跟过去（`syncFlatOffsetToRingCenter`
+/// 已删），环收回后带子从旧位置接着滚；开环锚点仍是在播曲目/手指卡
+/// （用户 22:33 定稿），不动。
 /// r33-marquee 的修补（syncInputs 带宽兜底、flat 看门狗 Timer、
 /// startFlatWatchdog）一字不动；HomeView.swift、HomeViewModel.swift、
 /// NativeBridge.swift、PlayerView.swift、Apple Music 相关文件一行不动；
@@ -642,6 +632,33 @@ import UIKit
 /// 壳版 1 − easeInCubic(closeT)；旧 .easeOut 先快后慢、与壳版反向）。
 /// 入口提示（r40：改回横向拖动口径，「左右拖动展开 3D 环 · 拖动旋转」，
 /// arrow.left.and.right 图标；旧的上滑口径已删）。
+///
+/// r51（2026-11-23，第 1 件 + D5，3D 跟随按套壳逻辑改，只动本文件）：
+/// 拆掉原生 r33/r47-2/r48-3 自加的三条跟随链，改回套壳语义（套壳
+/// public/m/ring.js：只有 Hero 跟歌、在播卡打高亮、跑马带 24px/s 自滚；
+/// 环锚点是手指那张卡；环内点卡播歌后 close('play')，finishClose
+/// 只设 flat.resumeAt = now()+220ms，带子从旧位置接着滚、不居中；
+/// 切内容 setItems → resetFlat 从头显示）：
+/// - 删 `centerFlatOnSelected` 函数 + 两处调用（syncInputs 跟随块、
+///   playTrack 点卡居中）：点卡只写 selectedFlatIndex（上抬/高亮标记），
+///   不动 flatOffsetX；
+/// - 删 syncInputs 的 r48-3 跟随块（切歌不再写 flatOffsetX、不再留
+///   2s dwell；`selectedFlatIndex = playingIndex` 的 r45-3 标记保留，
+///   只标记不动位置；内容换了仍 flatOffsetX=0 从头显示）；
+/// - 删 `syncFlatOffsetToRingCenter` 函数 + 三处调用（ringDragMoved、
+///   ringDragEnded 末尾、覆盖层 onChange(of: angle) 弹簧阶段）：转环
+///   只转环，带子停在旧位置；r46-5 的高亮跟环中心走随之作废，高亮只跟
+///   在播曲目；
+/// - 收环 dwell：closeResumeMs 2000 → 220ms（壳版 finishClose:653 同款；
+///   松手恢复 resumeMs=1200 对照壳版 ring.js:57 RESUME_MS=1200，不动）。
+/// - D5：删 `centerCardIndex()`、`isRingDragging`（无读取方）、
+///   `panelRect` 的 halfWidth、`ringCenterY`/`hitTestRingCard` 的
+///   topEdge 参数（体内 `_ = topEdge`）；RingTouchView 自带的 topEdge
+///   属性不在 D5 范围内，保留。
+/// - 不动：Hero 跟歌、平面带 24px/s 自滚、开环锚点（playingIndex 优先、
+///   手指卡回落，r26-3D 用户定稿；本轮拆清单未列锚点，未改）、点卡播歌、
+///   r47-4 正在播放模式置顶（在 HomeView/HomeViewModel，不在本文件）、
+///   r50 三件、其他切歌逻辑；显示原样不动，只修跟随语义。
 
 // MARK: - r43-2：通用环卡（第 2 件，首页全模式适配 3D）
 
@@ -702,10 +719,7 @@ final class HomeCoverRingModel: ObservableObject {
     /// 在播曲目的身份键（`platform:id`；r26-3D 开环锚点用，不驱动渲染，
     /// 故不用 @Published；调用方经 syncInputs 同步 playback.currentTrack）。
     var playingKey: String?
-    /// r48-3：第 3 件——上次已跟到带子上的在播曲目键（syncInputs 里跟随
-    /// 用：只在「在播曲目换了」或「内容换了」时跟一次，平时不动带子；
-    /// 跟随实际生效（尺寸量到了）才记，没生效不记、下次 sync 再试）。
-    var lastFollowedPlayingKey: String?
+    // r51：第 1 件——lastFollowedPlayingKey 已删：它只为 r48-3 跟随块服务，跟随块已拆（见 syncInputs），不再记。
     @Published var isLoadingDaily = false
     /// 每日推荐 spinner 是否可见（r35-9，P0-2：250ms 后仍未回来才亮；
     /// 视图只认这面旗子亮 spinner，不认 isLoadingDaily）。
@@ -853,10 +867,8 @@ final class HomeCoverRingModel: ObservableObject {
     /// 展开时的锚点卡下标（手指下最近的那张，壳版 nearestFlatIdx）。
     var anchorIndex = 0
     var ringDragging = false
-    /// 正在拖动环（手指按下且在转环，或开环手指未抬起）。
-    /// r36-8：它原来驱动覆盖层「拖动时顶部再暗一档」那层（已删，壳版没有）；
-    /// 现在没有视图读它，只保留作拖动状态（诊断/以后用）。
-    @Published var isRingDragging = false
+    // r51（D5）：isRingDragging 已删——全仓无读取方（只剩四处写入：openRing/closeRing/ringDragStart/ringDragEnded，
+    // 随之一并删）；它原来驱动的「拖动时顶部再暗一档」那层 r36-8 已删，壳版 ring.js 里也没有拖动加暗。
     /// 开环时手指的纵坐标（平面带本地坐标），环里下滑退出用（>90px）。
     var ringOpenY: CGFloat = 0
     var ringStartAngle: CGFloat = 0
@@ -903,11 +915,7 @@ final class HomeCoverRingModel: ObservableObject {
         Int((-angle / ringStep).rounded())
     }
 
-    /// 环当前中心曲目在列表里的下标（r33 联动用：环与带子共用的当前索引）。
-    var ringCenterTrackIndex: Int {
-        guard itemCount > 0 else { return 0 } // r43-2：第 2 件——条目数，曲目路与旧 tracks 同值
-        return mod(anchorIndex + ringCenterSlot, itemCount)
-    }
+    // r51：`ringCenterTrackIndex` 已删——`syncFlatOffsetToRingCenter` 已拆，本属性无调用方（r33 联动用）。
 
     // MARK: 常量（壳版 ring.js 原值，见文件头）
 
@@ -935,7 +943,7 @@ final class HomeCoverRingModel: ObservableObject {
     static let dragResumeDwell: Double = 1.2     // 平面带拖动松手后停多久再走
     // r28：与上面 resumeMs=1200 对上（39.6s 视频规格：松手 1200ms 后恢复；
     // 之前 dragResumeDwell=1.0，resumeMs 白定义了没人用）。
-    static let closeResumeMs: Double = 2000      // r46-6：第 6 件——收回后 2 秒再恢复自动走（旧 220ms：环一关带子立刻漂离环中心那张卡，用户还得重滚回去找；壳版 220ms 作废，见交回）
+    static let closeResumeMs: Double = 220       // r51：第 1 件——收环 dwell 改回套壳 220ms（壳版 ring.js finishClose:653 `flat.resumeAt = now() + 220`；r46-6 的 2000ms 作废）。松手恢复仍是 resumeMs=1200，对照壳版 ring.js:57 RESUME_MS=1200，一字不动。
     static let swipeDownExit: CGFloat = 90       // 环里下滑超 90px 退出
 
     // MARK: 内容（r26-3D：永远是当前平台的每日推荐；队列优先已删）
@@ -1036,29 +1044,11 @@ final class HomeCoverRingModel: ObservableObject {
         if flatSetWidth < CGFloat(itemCount) * (flatCard + flatGap), itemCount > 0 { // r43-2：第 2 件——卡数，曲目路与旧 tracks.count 同值
             flatSetWidth = CGFloat(itemCount) * (flatCard + flatGap)
         }
-        // r48-3：第 3 件——带子跟到在播/被选的那首（全模式）：
-        // 旧代码只改 selectedFlatIndex（上抬）不改 flatOffsetX——切歌、
-        // 切模式、恢复后带子还停在旧位置（切到「正在播放」就从头显示，
-        // 用户 01:15 截图：Hero 在播《阿拉斯加海湾》，带子却停在
-        // DAY BY DAY / 你在看孤独的风景）。只在「在播曲目换了」或
-        // 「内容换了」时跟一次：平时 sync() 只推状态，不动带子——用户
-        // 正拖着带子浏览时不抢；环开着时不动（带子藏着，跟随由转环的
-        // 同步链管）；正拖着带子时不动。跟到后留 2s dwell（与 r46-6
-        // 收环后同值），让用户看清被选卡再接着滚。不播（playingKey 为
-        // 空）时不跟、不乱跳。尺寸没量到时不记 lastFollowed，下次 sync
-        // 再试，不丢跟随。
-        if let key = playingKey, let pi = playingIndex,
-           (key != lastFollowedPlayingKey || itemIDs != oldIDs),
-           ringPhase != .open, !flatDragging,
-           itemCount > 0, flatSetWidth > 0, stripSize.width > 0,
-           (0..<itemCount).contains(pi) {
-            centerFlatOnSelected(pi)
-            flatDwellUntil = Date().addingTimeInterval(Self.closeResumeMs / 1000)
-            flatDwellReason = "follow-playing" // r48-3
-            lastFollowedPlayingKey = key
-        } else if playingKey == nil {
-            lastFollowedPlayingKey = nil
-        }
+        // r51：第 1 件——r48-3 跟随块已拆（改回套壳语义）：切歌/自动播下一首
+        // 不再写 flatOffsetX、不再留 2s dwell；syncInputs 只推状态，带子停在
+        // 旧位置接着滚。上方 `selectedFlatIndex = playingIndex`（r45-3）保留：
+        // 只标记在播卡上抬/高亮，不动位置。内容换了仍走上面的 ids-changed
+        // 分支 flatOffsetX=0 从头显示（壳版 setItems → resetFlat 同款）。
     }
 
     // MARK: 尺寸（视频实测，见文件头分档表）
@@ -1409,12 +1399,7 @@ final class HomeCoverRingModel: ObservableObject {
         return abs(x - centerX) <= flatCard / 2
     }
 
-    /// 平面带正中间那张卡的下标（r28：入口按钮已删，本函数暂无调用方，留作备用）。
-    func centerCardIndex() -> Int {
-        guard itemCount > 0 else { return 0 } // r43-2：第 2 件——条目数，曲目路与旧 tracks 同值
-        let cx = stripSize.width > 0 ? stripSize.width / 2 : flatCard / 2
-        return anchorNearestFlatCard(x: cx)
-    }
+    // r51（D5）：centerCardIndex() 已删——全仓无调用方（r28 起即暂无调用方，留作备用；本次确认仍无调用方后删除）。
 
     // MARK: 平面带触摸状态机（壳版 ring.js onPressMove strip 分支，
     // 由 StripTouchView 的 UIPanGestureRecognizer 驱动；x/y 均为平面带本地坐标）
@@ -1537,7 +1522,7 @@ final class HomeCoverRingModel: ObservableObject {
         selectedRingIndex = nil // r39-5：第 5 件——重开环清掉上次点中的环卡上抬
         ringPhase = .open
         ringDragging = false // 上次拖动若被系统打断残留了 true，先清掉再起新拖动
-        isRingDragging = false
+        // r51（D5）：isRingDragging 写入已删（属性已删，无读取方）。
         ringOpenY = y
         closeGeneration += 1
         entryGeneration += 1
@@ -1577,8 +1562,8 @@ final class HomeCoverRingModel: ObservableObject {
     }
 
     /// 收回：430ms（点空白 220ms 快收），收完 phase=.closed，平面带
-    /// 2 秒后恢复自动走（r46-6：第 6 件——旧 220ms 壳版 finishClose 同款作废：
-    /// 环一关带子立刻漂离环中心卡，用户还得重滚回去）。
+    /// 220ms 后恢复自动走（r51：第 1 件——改回壳版 finishClose 同款
+    /// resumeAt=now()+220ms；r46-6 的 2s 作废）。
     func closeRing(quick: Bool = false) {
         guard ringPhase == .open else { return }
         ringPhase = .closing
@@ -1586,7 +1571,7 @@ final class HomeCoverRingModel: ObservableObject {
         closeGeneration += 1
         entryGeneration += 1 // r33，第 5 条：还没跑的 deferred 展开动画作废
         ringDragging = false
-        isRingDragging = false
+        // r51（D5）：isRingDragging 写入已删（属性已删，无读取方）。
         closeT = 0
         let ms = quick ? Self.quickCloseMs : Self.closeMs
         withAnimation(.timingCurve(0.32, 0, 0.67, 0, duration: ms / 1000)) {
@@ -1657,7 +1642,7 @@ final class HomeCoverRingModel: ObservableObject {
         stopRingSpring() // r36-8：弹簧没跑完就上手抓——先停弹簧再跟手，
         // 不然 display link 还在推角、手指也在推角，两边打架就是一顿一顿。
         ringDragging = true
-        isRingDragging = true
+        // r51（D5）：isRingDragging 写入已删（属性已删，无读取方）。
         ringStartAngle = angle
         ringStartX = x
         ringDragStartY = y ?? ringOpenY
@@ -1678,9 +1663,8 @@ final class HomeCoverRingModel: ObservableObject {
               now.timeIntervalSince(ringSamples[0].time) > Self.sampleMs {
             ringSamples.removeFirst()
         }
-        // r33 联动：拖动环时下面那排跟着动——带子偏移实时跟环中心走
-        // （同一当前索引；环收回后带子从这首继续自动滚，开关环不丢位置）。
-        syncFlatOffsetToRingCenter()
+        // r51：第 1 件——拖环不再同步带子（r33 联动已拆，改回套壳语义：环只转环，
+        // 带子停在旧位置；收环 220ms 后从旧位置接着滚）。
         // r33，第 2 条：中心槽位变了就预取新中心前后各 5 槽的封面。
         let cs = ringCenterSlot
         if cs != lastPrefetchCenterSlot {
@@ -1707,7 +1691,7 @@ final class HomeCoverRingModel: ObservableObject {
         // 换手后环再也滑不动。清旗在前，任何退出路径都到不了“旗子卡住”
         // 这一种死法；后面的速度/弹簧/收回仍只在 .open 时算。
         ringDragging = false
-        isRingDragging = false
+        // r51（D5）：isRingDragging 写入已删（属性已删，无读取方）。
         guard ringPhase == .open else { return }
         // r39-5：第 5 件——壳版 releaseRing 的 n≤1 分支——只有一张卡时 angle 钉 0、
         // 不算速度、不起弹簧，直接排 1s 收回（正在播放队列只有 1 首时命中）。
@@ -1774,17 +1758,15 @@ final class HomeCoverRingModel: ObservableObject {
             startRingSpring(target: targetAngle, velocity: v)
         }
         // r33，第 2 条：弹簧落点那首前后各 5 槽的封面提前取（落点槽位在
-        // 弹簧动画里才走到，onChange(of: angle) 的带子同步会跟过去；
-        // 封面预取按落点槽位先走，不等弹簧走完）。
+        // 弹簧动画里才走到；封面预取按落点槽位先走，不等弹簧走完）。
+        // r51：第 1 件——onChange(of: angle) 的带子同步已删，弹簧只转环、不动带子。
         let targetSlot = Int((-targetAngle / ringStep).rounded())
         if targetSlot != lastPrefetchCenterSlot {
             lastPrefetchCenterSlot = targetSlot
             prefetchRingCovers(aroundCenterSlot: targetSlot)
         }
-        // r47-2：第 2 件——松手即把带子同步到环中心：恰好落槽无弹簧时 angle
-        // 不再变，覆盖层 onChange(of: angle) 的同步到不了；拖动中已同步过
-        // 时这里是空操作（偏移已对齐，守卫直接 return）。
-        syncFlatOffsetToRingCenter()
+        // r51：第 1 件——松手补同步已拆（r47-2 的收尾同步作废，改回套壳语义）：
+        // 松手只排 1s 收回，不动带子；带子停在旧位置，收环 220ms 后接着滚。
         scheduleHoldClose()
     }
 
@@ -1858,6 +1840,8 @@ final class HomeCoverRingModel: ObservableObject {
     }
 
     // MARK: 环 ↔ 平面带联动（r33，用户 10:11/10:12：环跟着下面那排卡片走）
+    // r51：第 1 件——联动的「带子同步」一半已拆（见下 syncFlatOffsetToRingCenter /
+    // centerFlatOnSelected 删除注）；本节只剩封面预取 prefetchRingCovers。
 
     /// 环封面预取（r33，第 2 条）：环每转到新槽位才起取图的话，4 并发门
     /// （CoverFetchGate，见 Proxies.swift）约 2 张/秒的吞吐追不上 4 张/秒
@@ -1884,46 +1868,13 @@ final class HomeCoverRingModel: ObservableObject {
         }
     }
 
-    /// 把平面带的偏移同步到环中心（r33 联动：环与带子共用同一个当前索引）：
-    /// 带子中心对准环当前那首。拖动环时带子实时跟过去（ringDragMoved 调），
-    /// 弹簧吸附时由覆盖层的 onChange(of: angle) 跟过去；环收回后带子从这首
-    /// 继续自动滚（closeResumeMs 后 tickFlat 接着走），开关环不丢位置。
-    /// 开环时不同步——带子在 0.26s 淡出里跳变会闪一下；环中心开环锚点
-    /// （在播曲目/手指卡）与带子中心本来就允许不同，拖起来再合流。
-    /// 带子宽还没量到（stripSize = 0）时跳过，不写脏偏移。
-    /// 覆盖层没淡入满（overlayOpacity < 0.99，刚开环 0.26s 内）也不动——
-    /// 带子还没藏好，中心差几首时一次跳几百 pt 会闪给用户看；淡入满后
-    /// 带子已不可见，随便跳。弹簧阶段同步时淡入早已满，不受影响。
-    func syncFlatOffsetToRingCenter() {
-        guard itemCount > 0, flatSetWidth > 0, stripSize.width > 0, // r43-2：第 2 件——条目数，曲目路与旧 tracks 同值
-              overlayOpacity >= 0.99 else { return }
-        let k = ringCenterTrackIndex
-        // r46-5：第 5 件——高亮跟环中心走（转环只同步显示位置、不换播歌：
-        // 点卡播歌时 playTrack、切歌时 syncInputs 会按在播曲目重写，属正常回落；
-        // 写在偏移守卫之前：偏移已对齐时也要更新高亮，不能提前 return 掉）。
-        selectedFlatIndex = k
-        let target = stripSize.width / 2 - flatCard / 2 - CGFloat(k) * flatPitch
-        let next = normalizedFlat(target)
-        guard abs(next - flatOffsetX) > 0.01 else { return }
-        flatOffsetX = next
-    }
-
-    /// r47-2：第 2 件——点环卡播歌后把平面带停在被选的那首上（不从头显示）。
-    /// 视频实测：拖环、点卡、收环后带子回到旧中心卡，而不是被选的那首。
-    /// 缺口：syncInputs 只改 selectedFlatIndex（上抬）不改 flatOffsetX；
-    /// 拖环时的 syncFlatOffsetToRingCenter 有 overlayOpacity ≥ 0.99 的守卫，
-    /// 快拖 / 恰好落槽无弹簧时一次都没跑到，收环后带子就停在旧位置。
-    /// 点卡是明确选择：收环淡出里带子不可见，偏移跳变看不见；收完 2s
-    /// dwell 后 tickFlat 从被选卡的位置继续走，不从头显示。
-    /// 公式与 syncFlatOffsetToRingCenter 同款（卡 k 居中），只差 k 是点中的
-    /// 下标、不要 overlayOpacity 守卫（点卡时带子正在淡出/已藏好）。
-    func centerFlatOnSelected(_ index: Int) {
-        guard itemCount > 0, flatSetWidth > 0, stripSize.width > 0,
-              (0..<itemCount).contains(index) else { return }
-        let target = stripSize.width / 2 - flatCard / 2 - CGFloat(index) * flatPitch
-        flatOffsetX = normalizedFlat(target)
-        selectedFlatIndex = index
-    }
+    // r51：第 1 件——`syncFlatOffsetToRingCenter` 与 `centerFlatOnSelected`
+    // 两个函数已整段删除（改回套壳语义）：环不再写 flatOffsetX，点卡不再居中；
+    // 三处调用（ringDragMoved、ringDragEnded 末尾、覆盖层 onChange 弹簧阶段）
+    // 与两处调用（syncInputs 跟随块、playTrack）随之一并删。r46-5 的
+    // 「高亮跟环中心走」随之作废——高亮只跟在播曲目（syncInputs 的
+    // `selectedFlatIndex = playingIndex`，r45-3；playTrack 的点中标记）。
+    // prefetchRingCovers（封面预取）保留，不动。
 
     // MARK: 点播
 
@@ -1938,15 +1889,9 @@ final class HomeCoverRingModel: ObservableObject {
     func playTrack(at index: Int, store: PlaybackStore) {
         guard (0..<itemCount).contains(index) else { return } // r43-2：第 2 件——条目下标，曲目路与旧 tracks.indices 同值
         selectedFlatIndex = index // r39-4：点中的卡整体上抬 1pt（r43-3；FlatRingCard 的 isSelected）
-        // r48-3：第 3 件——点卡就把带子停在被选的那首上（全模式、平带/环
-        // 通用）：r47-2 只修了环里点卡（tapRingCard → centerFlatOnSelected），
-        // 平带点卡不居中（r47 交接 D5 的已知缺口）；通用路点卡也一样
-        // （曲目卡点播后带子停在那首上；集合卡点后换内容，syncInputs 按
-        // 新内容归零/跟到在播曲目，这里的居中会被覆盖，不抢）。放
-        // setQueue/onTap 之前：点下去立刻居中，不等异步的 currentTrack
-        // 回来再跟（点已在播的那张时 currentTrack 根本不变，syncInputs
-        // 的跟随到不了，全靠这里）。
-        centerFlatOnSelected(index)
+        // r51：第 1 件——点卡居中已拆（r48-3 / r47-2 的 centerFlatOnSelected 作废，改回套壳语义）：
+        // 点卡只标记 selectedFlatIndex（上抬/高亮），不动 flatOffsetX；带子停在旧位置，
+        // 收环 220ms 后从旧位置接着滚。集合卡点后换内容仍走 syncInputs 的从头显示（flatOffsetX=0）。
         // r43-2：第 2 件——通用路：点按走卡自带的 onTap（调用方填好的原行为），
         // 不走 setQueue（歌单/专辑/电台卡本来就不是曲目，拼不出队列）。
         if isGeneric {
@@ -2120,7 +2065,7 @@ final class HomeCoverRingModel: ObservableObject {
     /// 只剩变暗中心用：变暗光晕的中心 = 环视觉中心 = 中心卡的卡中心
     /// （= stripCenter.y，见 ringCardCenterYLocal 的推导，再 −3pt 是旧的
     /// 量取余量，见下）。stripCenter 还没量到时回落屏高 ×0.62
-    /// （r24 同款）；`topEdge` 不再用于夹取，保留参数免得改调用点。
+    /// （r24 同款；r51 D5：`topEdge` 参数已删，体内原只有 `_ = topEdge`）。
     /// r31 的教训仍在：不要把 ring.js 的 cy 上下限夹取搬回来——Hero 拖大后
     /// 带心远超旧上限，夹取就是把环钉在固定高度、与带子脱节。
     /// 横竖屏判定（r47-3：第 3 件——syncInputs 同步进来的实测屏宽/高；
@@ -2147,8 +2092,8 @@ final class HomeCoverRingModel: ObservableObject {
         return min(max(y, top), bottom)
     }
 
-    func ringCenterY(screenHeight: CGFloat, topEdge: CGFloat) -> CGFloat {
-        _ = topEdge
+    // r51（D5）：topEdge 参数已删——体内只有 `_ = topEdge`，无读取方；调用点同步去掉该实参。
+    func ringCenterY(screenHeight: CGFloat) -> CGFloat {
         // r47-3：第 3 件——横屏时变暗中心跟夹取后的环中心走（与卡片同位置，
         // 不然压暗洞与卡片错位、卡片被压暗）；竖屏原值不动。
         // ringCardCenterScreenY 的回落分支会调回 ringCenterY，但只在
@@ -2199,7 +2144,7 @@ final class HomeCoverRingModel: ObservableObject {
             // 跟渲染走，点按盒与眼睛看到的卡片位置一致。
             centerCardY = stripCenter.y - flatHeight / 2 + Self.selectedLift + flatCard / 2 + (ringCardHeight - ringCard) / 2
         } else {
-            centerCardY = ringCenterY(screenHeight: screenHeight, topEdge: 95)
+            centerCardY = ringCenterY(screenHeight: screenHeight) // r51（D5）：topEdge 实参随参数删除
         }
         // r47-3：第 3 件——横屏夹到屏内（见 clampedRingCenterY；竖屏原值不动）。
         // 命中测试与覆盖层渲染都走这里，夹取后两边同值，点按盒与卡片一致。
@@ -2208,16 +2153,14 @@ final class HomeCoverRingModel: ObservableObject {
 
     /// 面板横向范围（r31 真圆柱：halfWidth 不再用于裁切——r30 v5 图的
     /// 面板圆角裁切作废，实拍 f_050/f_060/f_070 里侧卡都溢出面板到屏边，
-    /// 环层改全屏宽；halfWidth 只保留作参考，不再拦点按、不再框环层）：
-    /// 面板外缘 = 带子外缘各扩 20pt（dailyPanel padding 10 + 本文件
-    /// body 的 VStack padding 10，见 HomeView.dailyPanel）；面板与带子
-    /// 同中心（stripCenter.x）。带子还没量到（stripSize = 0）时回落
-    /// 屏宽/2 − 16（f_001 面板左右边距约 16pt）。
-    /// - 返回：(面板中心 x，面板半宽)，liziHome 坐标。
-    func panelRect(screenWidth: CGFloat) -> (centerX: CGFloat, halfWidth: CGFloat) {
-        let cx = stripCenter.x > 0 ? stripCenter.x : screenWidth / 2
-        let half = stripSize.width > 0 ? stripSize.width / 2 + 20 : screenWidth / 2 - 16
-        return (cx, half)
+    /// 环层改全屏宽；r51 D5：halfWidth 已删，全仓无读取方，只保留作参考
+    /// 的那一份也已确认无人读——现只返回面板中心 x）：
+    /// 面板与带子同中心（stripCenter.x）。带子还没量到（stripCenter.x = 0）
+    /// 时回落屏宽/2（与旧 centerX 回落同值；旧的半宽回落「屏宽/2 − 16」
+    /// 随 halfWidth 一并删）。
+    /// - 返回：面板中心 x，liziHome 坐标。
+    func panelRect(screenWidth: CGFloat) -> CGFloat {
+        stripCenter.x > 0 ? stripCenter.x : screenWidth / 2
     }
 
     /// 点按命中：取包含该点、离正前方最近的卡（ring.js onPressUp 点选同款，
@@ -2231,11 +2174,10 @@ final class HomeCoverRingModel: ObservableObject {
     /// 旧的 screenWidth/2 与渲染锚点不是同一个，面板偏移时点按盒会错位），
     /// 横向位置与渲染同款 projectedX（透视投影后的位置，不是 R·sin），
     /// 面板外拦截删掉（侧卡溢出面板到屏边，溢出部分看得见、点得到）。
-    func hitTestRingCard(at point: CGPoint, screenWidth: CGFloat, screenHeight: CGFloat? = nil, topEdge: CGFloat = 95) -> Int? {
-        _ = topEdge
+    // r51（D5）：topEdge 参数已删——体内只有 `_ = topEdge`，无读取方；三个调用点同步去掉该实参。
+    func hitTestRingCard(at point: CGPoint, screenWidth: CGFloat, screenHeight: CGFloat? = nil) -> Int? {
         _ = screenWidth // r46-1：第 1 件——回落中心改走真屏基准（下行），调用方传的覆盖层 geo 宽（约 750pt）不再用
-        let panel = panelRect(screenWidth: ringBasisWidth) // r46-1：第 1 件——stripCenter 没量到时才走这条回落，中心按真屏宽/2（437pt）
-        let cx = panel.centerX
+        let cx = panelRect(screenWidth: ringBasisWidth) // r51（D5）：halfWidth 已删，panelRect 现直接返回中心 x；r46-1 回落同前：stripCenter 没量到时中心按真屏宽/2（437pt）
         var best: (index: Int, world: CGFloat)?
         for slot in visibleSlots() {
             let x = cx + projectedX(forWorld: slot.world)
@@ -2869,9 +2811,8 @@ struct HomeRingOverlayView: View {
             // r31：环锚点（变暗中心与环中心同点）——横向面板中心、
             // 纵向带子中心，见 ringCenterY / panelRect；面板动，锚点就动。
             // 旧的固定屏中心 (0.5, 0.48) 只在尺寸量不到时作回落。
-            let ringTopEdge: CGFloat = geo.size.width > geo.size.height ? 64 : 95
-            let ringCy = model.ringCenterY(screenHeight: geo.size.height, topEdge: ringTopEdge)
-            let ringCx = model.panelRect(screenWidth: geo.size.width).centerX
+            let ringCy = model.ringCenterY(screenHeight: geo.size.height) // r51（D5）：topEdge 实参随参数删除
+            let ringCx = model.panelRect(screenWidth: geo.size.width) // r51（D5）：halfWidth 已删，panelRect 现直接返回中心 x
             ZStack {
                 // 全屏径向变暗（r31：中心跟环走，不再是固定 50% / 48%；
                 // 三档 0.36/0.58/0.78 与半径不动）。
@@ -2925,9 +2866,10 @@ struct HomeRingOverlayView: View {
                 // 下滑退出（ring.js onOverlayDown + window pointer 监听同款）。
                 // 旧的 SwiftUI DragGesture + onTapGesture 已删（第 4 件根因：
                 // 两者叠在同一视图上，真机上拖动到不了模型）。
-                // r26-3D：topEdge 与命中测试同值（顶栏底边），命中测试用
-                // ringCardCenterScreenY（与渲染同公式），点按盒与眼睛
-                // 看到的卡片位置一致。
+                // r26-3D：命中测试用 ringCardCenterScreenY（与渲染同公式），
+                // 点按盒与眼睛看到的卡片位置一致。r51（D5）：hitTestRingCard
+                // 的 topEdge 参数已删；RingTouchView 自带的 topEdge 接口不在
+                // D5 范围内，保留，仍按横竖屏传 64/95。
                 RingTouchView(model: model, topEdge: geo.size.width > geo.size.height ? 64 : 95) { idx in
                     model.tapRingCard(trackIndex: idx, store: playback)
                 } onTapBlank: {
@@ -2940,13 +2882,9 @@ struct HomeRingOverlayView: View {
             .opacity(model.overlayOpacity)
         }
         .ignoresSafeArea()
-        // r33 联动：弹簧吸附阶段 angle 还在动（ringDragMoved 不再调），
-        // 每帧把带子偏移跟到环中心；拖动阶段 ringDragMoved 里已同步，
-        // 这里跳过（r36-8：第 4 条——每步触摸 angle 一变就再同步一次
-        // 带子是重复写 flatOffsetX，拖动里省掉这一份）。
-        .onChange(of: model.angle) { _ in
-            if !model.ringDragging { model.syncFlatOffsetToRingCenter() }
-        }
+        // r51：第 1 件——弹簧吸附阶段的带子同步已拆（r33 联动的 onChange(of: angle)
+        // 同步作废，改回套壳语义）：angle 只转环，不再写 flatOffsetX；带子停在
+        // 旧位置，收环 220ms 后接着滚。
     }
 
     /// 压暗层的开洞 mask（r36-8，第 1 条）：环卡带那一条上下 16pt 羽化、
@@ -3383,11 +3321,11 @@ final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
                 model.ringDragEnded()
                 if wobble, abs(model.angle - angleBefore) < model.ringStep * 0.25,
                    (model.ringPhase == .open || model.ringPhase == .closing),
-                   let idx = model.hitTestRingCard(at: location, screenWidth: bounds.width, screenHeight: bounds.height, topEdge: topEdge) {
+                   let idx = model.hitTestRingCard(at: location, screenWidth: bounds.width, screenHeight: bounds.height) { // r51（D5）：topEdge 实参随参数删除
                     onTapCard?(idx)
                 }
             } else if (model.ringPhase == .open || model.ringPhase == .closing),
-                      let idx = model.hitTestRingCard(at: CGPoint(x: startX, y: startY), screenWidth: bounds.width, screenHeight: bounds.height, topEdge: topEdge) {
+                      let idx = model.hitTestRingCard(at: CGPoint(x: startX, y: startY), screenWidth: bounds.width, screenHeight: bounds.height) { // r51（D5）：topEdge 实参随参数删除
                 // r46-7：第 7 件——晃一下就抬手（pan 认出来了、tap 没触发、
                 // 模型又没判成拖动）：按落点（startX/startY，用户的本意）
                 // 试一次点卡——落点在卡上就播歌 + 收环（与点按同款）；
@@ -3457,7 +3395,7 @@ final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
         // 不会闪回；点中的卡照常播歌。
         guard model.ringPhase == .open || model.ringPhase == .closing else { return }
         let location = recognizer.location(in: self)
-        if let idx = model.hitTestRingCard(at: location, screenWidth: bounds.width, screenHeight: bounds.height, topEdge: topEdge) {
+        if let idx = model.hitTestRingCard(at: location, screenWidth: bounds.width, screenHeight: bounds.height) { // r51（D5）：topEdge 实参随参数删除
             onTapCard?(idx)
         } else {
             onTapBlank?()

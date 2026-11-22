@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>影厅 · Folia</title>
+<script src="assets/508-three.min.js"></script>
+<style>
+  html,body{margin:0;height:100%;background:#0a0708;overflow:hidden}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
+  #hint{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:9;
+    font:500 11px/1.5 ui-monospace,Consolas,monospace;color:rgba(230,220,210,.35);
+    letter-spacing:.08em;pointer-events:none;transition:opacity .6s;white-space:nowrap}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">等待第一句…</div>
+<script>
+"use strict";
+/* ============================================================================
+   影厅（F17 · Folia cinema）// r51
+   ----------------------------------------------------------------------------
+   效果来源：Folia（AGPL-3.0，作者 chthollyphile）的 cinema 场景——坐在厅里
+   看荧幕：歌词贴荧幕，换歌换胶片，暂停落幕，厅灯取歌曲暗主题 accent。本文件
+   只学形态与流程（厅尺寸、座位机位、换片 1.7 秒、暂停 3 秒后落幕、厅灯混色
+   思路），按 Lizi 舞台承载协议（__c100）独立重写，未复制 Folia 源码；不依赖
+   React。
+   形态：阶梯座位厅 + 14:7.57 荧幕（歌词贴荧幕逐字点亮）+ 两侧丝绒幕布 +
+   顶部灯带（暖白与 accent 混色）+ 放映光束与尘埃 + 观众剪影。
+   播放联动：init 换歌换胶片（1.7 秒过渡）并重取厅灯色；tick 推时间；beat 让
+   光束亮度一跳；暂停超 3 秒先关快门、再合幕布、厅灯半亮，续播 1 秒内落灯开幕。
+   封面只走 /api/img 代理，不直连 CDN；取不到封面时厅灯用暖白灰光。
+   ========================================================================== */
+const S = { houseLights: false, curtainsOnPause: true, shake: true };
+window.__stagePanel = {
+  title: '影厅 · Folia',
+  hint: '坐在厅里看荧幕：歌词贴荧幕，换歌换胶片，暂停落幕。',
+  items: [
+    { key: 'houseLights', label: '开灯', type: 'switch', def: false },
+    { key: 'curtainsOnPause', label: '暂停落幕', type: 'switch', def: true },
+    { key: 'shake', label: '震动', type: 'switch', def: true }
+  ]
+};
+window.__liziShake = true;
+
+const cv = document.getElementById('c'), hint = document.getElementById('hint');
+const DPR_CAP = 1.5; // r51：Folia 高档 DPR 1.5 照抄思路，封顶 1.5
+let W = 0, H = 0, DPR = 1;
+
+let lines = [], song = null, accent = [150, 165, 255];
+let clockT = 0, clockAt = performance.now(), playing = false;
+let curIdx = -1, beatPulse = 0, reelMix = 1, reelMixT = 1;
+const now = () => clockT + (playing ? (performance.now() - clockAt) / 1000 : 0);
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, p) => a + (b - a) * p;
+const ease = (c, t, r, dt) => c + (t - c) * (1 - Math.exp(-r * dt));
+function hash(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967295; }
+function curIdxAt(t) { let idx = -1; for (let i = 0; i < lines.length; i++) { if (lines[i].t <= t + 0.001) idx = i; else break; } return idx; }
+function charsOf(line) {
+  if (line.chars && line.chars.length) return line.chars;
+  const cs = [...line.text], n = cs.length || 1;
+  return cs.map((c, i) => ({ c, t: line.t + (line.dur || 6) * i / n }));
+}
+/* 封面走 /api/img 代理（与 519 同款写法），不直连 CDN */
+function proxyImg(u) {
+  if (!u || typeof u !== 'string') return '';
+  return '/api/img?url=' + encodeURIComponent(u.indexOf('?') >= 0 ? u : u + '?param=640y640');
+}
+
+/* ================= three.js 厅 ================= */
+const renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: false });
+renderer.setClearColor(0x0a0708, 1);
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x0a0708, 22, 46);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 90);
+const SEAT = new THREE.Vector3(0, 4, 18);          // 座位机位：Folia 厅的座位点
+camera.position.copy(SEAT);
+let yaw = 0, pitch = 0;                            // 拖动转头（Folia：镜头不自动动）
+const SCREEN_W = 14, SCREEN_H = 7.57, SCREEN_Y = 4.885;
+
+function resize() {
+  DPR = Math.min(DPR_CAP, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  renderer.setPixelRatio(DPR);
+  renderer.setSize(W, H, false);
+  camera.aspect = W / H;
+  // 竖屏也要装下整块荧幕：按水平半角 0.75 反推垂直 fov，上限 85°
+  const fov = clamp(THREE.MathUtils.radToDeg(2 * Math.atan(0.75 / camera.aspect)), 36, 85);
+  camera.fov = fov; camera.updateProjectionMatrix();
+}
+resize();
+addEventListener('resize', resize);
+
+/* ---- 荧幕画布：只在当前行 / 唱到的字变化时重画 ---- */
+const scr = document.createElement('canvas'); scr.width = 1024; scr.height = 554;
+const sctx = scr.getContext('2d');
+const scrTex = new THREE.CanvasTexture(scr);
+scrTex.colorSpace = THREE.SRGBColorSpace;
+let reelCols = null;   // 封面左/中/右三段平均色（放映光用），取不到时 null → 灰光
+let lastSung = -2, lastDrawnIdx = -2;
+function drawScreen() {
+  const g = sctx, w = scr.width, h = scr.height;
+  const base = reelCols ? reelCols[1] : [38, 36, 34];
+  const grad = g.createLinearGradient(0, 0, w, 0);
+  const c0 = reelCols ? reelCols[0] : base, c2 = reelCols ? reelCols[2] : base;
+  grad.addColorStop(0, `rgb(${c0[0] | 0},${c0[1] | 0},${c0[2] | 0})`);
+  grad.addColorStop(0.5, `rgb(${base[0] | 0},${base[1] | 0},${base[2] | 0})`);
+  grad.addColorStop(1, `rgb(${c2[0] | 0},${c2[1] | 0},${c2[2] | 0})`);
+  g.fillStyle = '#0b0a0c'; g.fillRect(0, 0, w, h);
+  g.globalAlpha = 0.55; g.fillStyle = grad; g.fillRect(0, 0, w, h); g.globalAlpha = 1;
+  // 暗角
+  const vg = g.createRadialGradient(w / 2, h / 2, h * 0.35, w / 2, h / 2, h * 0.95);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.55)');
+  g.fillStyle = vg; g.fillRect(0, 0, w, h);
+  const t = now();
+  if (song && song.name) {
+    g.fillStyle = 'rgba(255,255,255,0.55)';
+    g.font = '600 24px "PingFang SC","Microsoft YaHei",system-ui,sans-serif';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(song.name + (song.artists ? '  ·  ' + song.artists : ''), w / 2, 52);
+  }
+  const line = lines[curIdx];
+  if (line) {
+    const chars = charsOf(line);
+    let sung = 0; for (const ch of chars) if (t >= ch.t) sung++;
+    lastSung = sung;
+    // 当前行：逐字点亮
+    let fs = 92;
+    g.font = `800 ${fs}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+    while (fs > 34 && g.measureText(line.text).width > w - 120) {
+      fs -= 4; g.font = `800 ${fs}px "PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+    }
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    const totalW = g.measureText(line.text).width;
+    let x = w / 2 - totalW / 2;
+    chars.forEach((ch, i) => {
+      const cw = g.measureText(ch.c).width;
+      const lit = i < sung;
+      g.fillStyle = lit ? '#ffffff' : 'rgba(255,255,255,0.32)';
+      if (lit) { g.shadowColor = 'rgba(255,240,200,0.9)'; g.shadowBlur = 18; }
+      g.fillText(ch.c, x + cw / 2, h * 0.52);
+      g.shadowBlur = 0;
+      x += cw;
+    });
+    // 进度细线
+    const dur = line.dur || 6;
+    g.fillStyle = 'rgba(255,255,255,0.25)'; g.fillRect(w * 0.2, h * 0.66, w * 0.6, 3);
+    g.fillStyle = '#ffd6a8'; g.fillRect(w * 0.2, h * 0.66, w * 0.6 * clamp((t - line.t) / dur, 0, 1), 3);
+    // 下一句
+    const nxt = lines[curIdx + 1];
+    if (nxt) {
+      g.fillStyle = 'rgba(255,255,255,0.45)';
+      g.font = '500 30px "PingFang SC",system-ui,sans-serif';
+      g.fillText(nxt.text, w / 2, h * 0.78);
+    }
+  } else {
+    g.fillStyle = 'rgba(255,255,255,0.5)';
+    g.font = '500 34px "PingFang SC",system-ui,sans-serif';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(lines.length ? '等待第一句…' : '这首没有歌词', w / 2, h * 0.52);
+  }
+  scrTex.needsUpdate = true;
+  lastDrawnIdx = curIdx;
+}
+drawScreen();
+
+/* ---- 厅体 ---- */
+const MAT = {
+  floor: new THREE.MeshStandardMaterial({ color: 0x1a1214, roughness: 0.95 }),
+  wall: new THREE.MeshStandardMaterial({ color: 0x241a1c, roughness: 0.9 }),
+  gold: new THREE.MeshStandardMaterial({ color: 0x8a6d2f, roughness: 0.45, metalness: 0.7 }),
+  velvet: new THREE.MeshStandardMaterial({ color: 0x6e0f1e, roughness: 0.85 }),
+  velvetDark: new THREE.MeshStandardMaterial({ color: 0x4a0a14, roughness: 0.9 }),
+  seat: new THREE.MeshStandardMaterial({ color: 0x3a1520, roughness: 0.9 }),
+  head: new THREE.MeshStandardMaterial({ color: 0x14100f, roughness: 1 }),
+  stage: new THREE.MeshStandardMaterial({ color: 0x171013, roughness: 0.9 }),
+};
+function box(w, h, d, mat, x, y, z) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.set(x, y, z); scene.add(m); return m;
+}
+box(19, 0.2, 30.5, MAT.floor, 0, -0.1, 15);            // 地面
+box(19, 10.6, 0.3, MAT.wall, 0, 5.3, -0.2);            // 后墙（荧幕墙）
+box(0.3, 10.6, 30.5, MAT.wall, -9.5, 5.3, 15);         // 侧墙
+box(0.3, 10.6, 30.5, MAT.wall, 9.5, 5.3, 15);          // 侧墙
+box(19, 0.3, 30.5, MAT.wall, 0, 10.6, 15);             // 天花
+box(16.5, 0.95, 2.2, MAT.stage, 0, 0.475, 1.0);        // 舞台
+// 荧幕 + 金框
+const screenMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(SCREEN_W, SCREEN_H),
+  new THREE.MeshBasicMaterial({ map: scrTex, toneMapped: false }));
+screenMesh.position.set(0, SCREEN_Y, 0.05); scene.add(screenMesh);
+box(SCREEN_W + 0.7, 0.35, 0.3, MAT.gold, 0, SCREEN_Y + SCREEN_H / 2 + 0.17, 0.1);
+box(SCREEN_W + 0.7, 0.35, 0.3, MAT.gold, 0, SCREEN_Y - SCREEN_H / 2 - 0.17, 0.1);
+box(0.35, SCREEN_H + 0.7, 0.3, MAT.gold, -SCREEN_W / 2 - 0.17, SCREEN_Y, 0.1);
+box(0.35, SCREEN_H + 0.7, 0.3, MAT.gold, SCREEN_W / 2 + 0.17, SCREEN_Y, 0.1);
+// 两侧丝绒幕布：合拢度 0 开（收在两侧）→ 1 闭（盖住荧幕）
+function makeCurtain(side) {
+  const geo = new THREE.PlaneGeometry(4.6, SCREEN_H + 1.2, 8, 1);
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {  // 竖褶
+    const x = pos.getX(i);
+    pos.setZ(i, Math.sin((x / 4.6 + 0.5) * Math.PI * 5) * 0.16);
+  }
+  geo.computeVertexNormals();
+  const m = new THREE.Mesh(geo, MAT.velvet);
+  m.position.set(side * 9.4, SCREEN_Y, 0.55); scene.add(m); return m;
+}
+const curtainL = makeCurtain(-1), curtainR = makeCurtain(1);
+function setCurtains(closed) {  // closed 0..1
+  for (const [m, side] of [[curtainL, -1], [curtainR, 1]]) {
+    m.position.x = side * lerp(9.4, 2.1, closed);
+    m.scale.x = lerp(0.45, 1.55, closed);
+  }
+}
+// 顶部灯带：暖白与 accent 混色（Folia：暖白 + 歌曲暗主题 accent 混 0.4）
+const coveMat = new THREE.MeshBasicMaterial({ color: 0xffd6a8, toneMapped: false });
+const coveL = box(15, 0.14, 0.14, coveMat, 0, 9.9, 0.6);
+const coveR = box(0.14, 0.14, 24, coveMat, -9.2, 9.9, 14);
+box(0.14, 0.14, 24, coveMat, 9.2, 9.9, 14);
+function coveColor() {  // 暖白 #ffd6a8 与 accent 按 0.4 混
+  return [lerp(255, accent[0], 0.4) | 0, lerp(214, accent[1], 0.4) | 0, lerp(168, accent[2], 0.4) | 0];
+}
+function applyCove() {
+  const c = coveColor();
+  coveMat.color.setRGB(c[0] / 255, c[1] / 255, c[2] / 255);
+}
+applyCove();
+// 壁灯
+const sconceMat = new THREE.MeshBasicMaterial({ color: 0xffc98a, toneMapped: false });
+const sconces = [];
+for (let i = 0; i < 5; i++) {
+  for (const side of [-1, 1]) {
+    const s = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 8), sconceMat);
+    s.position.set(side * 9.2, 4.6, 4 + i * 4.4); scene.add(s); sconces.push(s);
+  }
+}
+// 出口标志
+(function exitSign() {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 96;
+  const g = c.getContext('2d');
+  g.fillStyle = '#0a2a12'; g.fillRect(0, 0, 256, 96);
+  g.fillStyle = '#7dff9a'; g.font = '700 56px "PingFang SC",sans-serif';
+  g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('出 口', 128, 52);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 0.5),
+    new THREE.MeshBasicMaterial({ map: t, toneMapped: false }));
+  m.position.set(9.2, 2.9, 3.4); m.rotation.y = -Math.PI / 2; scene.add(m);
+})();
+// 座位 + 观众剪影（实例化，8 排 × 14 座）
+(function seats() {
+  const seatGeo = new THREE.BoxGeometry(0.52, 0.85, 0.5);
+  const headGeo = new THREE.SphereGeometry(0.17, 8, 6);
+  const spots = [];
+  for (let r = 0; r < 8; r++) {
+    const z = 6.5 + r * 1.45, y = 0.42 + r * 0.32;
+    const arc = 1 + r * 0.06;
+    for (let k = 0; k < 14; k++) {
+      const x = (k - 6.5) * 1.05 * arc;
+      if (Math.abs(x) > 7.6) continue;
+      if (Math.abs(x) > 3.2 && Math.abs(x) < 4.4) continue; // 过道
+      spots.push([x, y, z]);
+    }
+  }
+  const seats = new THREE.InstancedMesh(seatGeo, MAT.seat, spots.length);
+  const heads = new THREE.InstancedMesh(headGeo, MAT.head, spots.length);
+  const m4 = new THREE.Matrix4();
+  spots.forEach((p, i) => {
+    m4.makeTranslation(p[0], p[1], p[2]); seats.setMatrixAt(i, m4);
+    m4.makeTranslation(p[0], p[1] + 0.62, p[2] - 0.05); heads.setMatrixAt(i, m4);
+  });
+  scene.add(seats); scene.add(heads);
+})();
+// 放映光束 + 尘埃
+const beamMat = new THREE.MeshBasicMaterial({
+  color: 0xfff2cf, transparent: true, opacity: 0.05,
+  blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+const beamGeo = new THREE.ConeGeometry(3.4, 18.5, 24, 1, true);
+beamGeo.rotateX(-Math.PI / 2 - 0.06);
+const beam = new THREE.Mesh(beamGeo, beamMat);
+beam.position.set(0, 5.6, 9.2); scene.add(beam);
+const DUST_N = 320, dustPos = new Float32Array(DUST_N * 3);
+for (let i = 0; i < DUST_N; i++) {
+  dustPos[i * 3] = (Math.random() - 0.5) * 7;
+  dustPos[i * 3 + 1] = 1 + Math.random() * 7;
+  dustPos[i * 3 + 2] = 1 + Math.random() * 16;
+}
+const dustGeo = new THREE.BufferGeometry();
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+const dust = new THREE.Points(dustGeo, new THREE.PointsMaterial({
+  color: 0xffe9bb, size: 0.06, transparent: true, opacity: 0.6,
+  blending: THREE.AdditiveBlending, depthWrite: false }));
+scene.add(dust);
+// 灯光
+const amb = new THREE.AmbientLight(0xffffff, 0.16); scene.add(amb);
+const screenLight = new THREE.PointLight(0xffffff, 14, 26, 1.6);
+screenLight.position.set(0, SCREEN_Y, 3.5); scene.add(screenLight);
+const coveLight = new THREE.PointLight(0xffd6a8, 5, 30, 1.4);
+coveLight.position.set(0, 9, 12); scene.add(coveLight);
+
+/* ---- 换胶片：封面经 /api/img 取回，采样左/中/右三段色作放映光，1.7 秒过渡 ---- */
+const REEL_SECONDS = 1.7;
+let reelToken = 0;
+function loadReel(url) {
+  const token = ++reelToken;
+  reelMixT = 0; reelMix = 0;
+  if (!url) { reelCols = null; return; }
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  img.onload = function () {
+    if (token !== reelToken) return;
+    try {
+      const c = document.createElement('canvas'); c.width = 24; c.height = 8;
+      const g = c.getContext('2d', { willReadFrequently: true });
+      g.drawImage(img, 0, 0, 24, 8);
+      const d = g.getImageData(0, 0, 24, 8).data;
+      const sums = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 24; x++) {
+        const s = sums[Math.min(2, (x / 8) | 0)], o = (y * 24 + x) * 4;
+        s[0] += d[o]; s[1] += d[o + 1]; s[2] += d[o + 2];
+      }
+      const n = 8 * 8;
+      reelCols = sums.map((s) => {
+        let r = s[0] / n, gg = s[1] / n, b = s[2] / n;
+        const lum = 0.2126 * r + 0.7152 * gg + 0.0722 * b;
+        const vivid = (v) => Math.max(0, lum + (v - lum) * 1.3);
+        r = vivid(r); gg = vivid(gg); b = vivid(b);
+        if (lum < 13) { const k = Math.sqrt(13 / Math.max(lum, 1)); r *= k; gg *= k; b *= k; }
+        return [clamp(r, 0, 255), clamp(gg, 0, 255), clamp(b, 0, 255)];
+      });
+      applyCove();
+      drawScreen();
+    } catch (_) { reelCols = null; }
+  };
+  img.onerror = function () { if (token === reelToken) { reelCols = null; drawScreen(); } };
+  img.src = proxyImg(url);
+}
+
+/* ---- 暂停落幕（intermission）：停 3 秒关快门，3.8 秒合幕，厅灯半亮 ---- */
+const inter = { shutter: 1, lights: 0, closed: 0, pauseFor: 0 };
+function stepIntermission(dt) {
+  const wantClose = !playing && S.curtainsOnPause;
+  if (!playing) inter.pauseFor += dt; else inter.pauseFor = 0;
+  const shutTarget = (!playing && inter.pauseFor > 3 && S.curtainsOnPause) ? 0 : 1;
+  inter.shutter = ease(inter.shutter, shutTarget, shutTarget ? 4 : 1.6, dt);
+  const closeTarget = (wantClose && inter.pauseFor > 3.8) ? 1 : 0;
+  const rate = closeTarget ? 0.9 : 1.4;   // 合幕约 6 秒、开幕更快
+  inter.closed = ease(inter.closed, closeTarget, rate, dt);
+  const lightsTarget = S.houseLights ? 1 : (inter.closed > 0.85 ? 0.5 : 0);
+  inter.lights = ease(inter.lights, lightsTarget, lightsTarget > inter.lights ? 0.9 : 4.5, dt);
+}
+
+/* ---- 拖动转头 ---- */
+let dragging = false, px = 0, py = 0;
+cv.addEventListener('pointerdown', (e) => { dragging = true; px = e.clientX; py = e.clientY; ping(); });
+addEventListener('pointermove', (e) => {
+  if (!dragging) return;
+  yaw = clamp(yaw - (e.clientX - px) * 0.003, -0.4, 0.4);
+  pitch = clamp(pitch + (e.clientY - py) * 0.002, -0.16, 0.2);
+  px = e.clientX; py = e.clientY;
+});
+addEventListener('pointerup', () => { dragging = false; });
+
+/* ---- 主循环：暂停且落幕完成后停 rAF，切后台也停 ---- */
+let rafId = 0, lastMs = 0, loopOn = false;
+function frame(ms) {
+  if (!loopOn) return;
+  rafId = requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (ms - lastMs) / 1000 || 0.016); lastMs = ms;
+  const t = now();
+  const idx = curIdxAt(t);
+  if (idx !== curIdx) { curIdx = idx; drawScreen(); }
+  else if (curIdx >= 0) {  // 只在唱到的字变化时重画荧幕
+    const line = lines[curIdx], chars = charsOf(line);
+    let sung = 0; for (const ch of chars) if (t >= ch.t) sung++;
+    if (sung !== lastSung) drawScreen();
+  }
+  if (reelMixT < 1) { reelMixT = Math.min(1, reelMixT + dt / REEL_SECONDS); reelMix = reelMixT; }
+  stepIntermission(dt);
+  beatPulse *= Math.exp(-dt * 3);
+  // 镜头：座位机位 + 转头
+  camera.position.set(SEAT.x + Math.sin(yaw) * 0.4, SEAT.y + pitch * 2, SEAT.z);
+  camera.lookAt(Math.sin(yaw) * -6 + yaw * -8, SCREEN_Y + pitch * 6, 0);
+  // 快门：荧幕亮度；换片过渡：中间一暗
+  const dim = inter.shutter * (reelMix < 1 ? (0.4 + 0.6 * reelMix) : 1);
+  screenMesh.material.opacity = 1;
+  screenMesh.material.color.setScalar(Math.max(0.12, dim));
+  beamMat.opacity = 0.03 + 0.05 * inter.shutter + beatPulse * 0.06;
+  const c = coveColor();
+  const house = inter.lights;
+  coveMat.color.setRGB(c[0] / 255, c[1] / 255, c[2] / 255);
+  coveLight.intensity = 2 + house * 14;
+  coveLight.color.setRGB(c[0] / 255, c[1] / 255, c[2] / 255);
+  amb.intensity = 0.16 + house * 0.85;
+  sconceMat.color.setHex(house > 0.3 ? 0xffe2b0 : 0xffc98a);
+  screenLight.intensity = 14 * inter.shutter * (reelCols ? 1 : 0.6);
+  if (reelCols) screenLight.color.setRGB(reelCols[1][0] / 255, reelCols[1][1] / 255, reelCols[1][2] / 255);
+  setCurtains(inter.closed);
+  // 尘埃在光束里缓缓下沉
+  const dp = dustGeo.attributes.position;
+  for (let i = 0; i < DUST_N; i++) {
+    let y = dp.getY(i) - dt * 0.12;
+    if (y < 0.8) y = 8;
+    dp.setY(i, y);
+  }
+  dp.needsUpdate = true;
+  dust.material.opacity = 0.25 + 0.35 * inter.shutter;
+  const ho = lines.length ? (curIdx >= 0 ? '0' : '1') : '0.5';
+  if (hint.style.opacity !== ho) hint.style.opacity = ho;
+  renderer.render(scene, camera);
+  // 闲下来就停：暂停、幕合灯稳、无换片时不再出帧
+  if (!playing && inter.closed > 0.98 && Math.abs(inter.lights - (S.houseLights ? 1 : 0.5)) < 0.02
+      && reelMixT >= 1 && inter.shutter < 0.02) stopLoop();
+}
+function ensureLoop() {
+  if (loopOn) return;
+  loopOn = true; lastMs = performance.now();
+  rafId = requestAnimationFrame(frame);
+}
+function stopLoop() {
+  loopOn = false; cancelAnimationFrame(rafId);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopLoop(); else ensureLoop();
+});
+ensureLoop();
+
+/* ---- 与播放器通信（__c100） ---- */
+const ping = () => { try { parent.postMessage({ __c100: 1, type: 'activity' }, '*'); } catch (_) {} };
+addEventListener('pointermove', ping, { passive: true });
+addEventListener('pointerdown', ping, { passive: true });
+addEventListener('wheel', ping, { passive: true });
+addEventListener('keydown', ping);
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.key === ' ') {
+    e.preventDefault();
+    try { parent.postMessage({ __c100: 1, type: 'key', payload: { key: 'Space' } }, '*'); } catch (_) {}
+  }
+}, true);
+addEventListener('message', (e) => {
+  const d = e.data;
+  if (!d || d.__c100 !== 1) return;
+  if (d.type === 'init') {
+    const p = d.payload || {};
+    lines = (p.lines || []).slice().sort((a, b) => a.t - b.t);
+    song = p.song || null;
+    if (p.accent) { accent = p.accent; applyCove(); }
+    curIdx = -1; lastSung = -2; lastDrawnIdx = -2;
+    clockT = 0; clockAt = performance.now();
+    inter.pauseFor = 0; inter.closed = 0; inter.shutter = 1; inter.lights = S.houseLights ? 1 : 0;
+    reelMixT = 0;
+    loadReel(song && song.cover);
+    hint.textContent = lines.length ? '等待第一句…' : '这首没有歌词';
+    drawScreen();
+    ensureLoop();
+  } else if (d.type === 'tick') {
+    clockT = d.payload.time; clockAt = performance.now();
+    const was = playing; playing = !!d.payload.playing;
+    if (playing !== was) ensureLoop();
+    if (playing) ensureLoop();
+  } else if (d.type === 'beat') {
+    if (window.__liziShake !== false) beatPulse = Math.min(1, 0.35 + (d.payload.level || 0) * 0.65);
+    ensureLoop();
+  } else if (d.type === 'setting') {
+    const p = d.payload || {};
+    if (p.key === 'shake') { window.__liziShake = p.value !== false; S.shake = p.value !== false; }
+    else if (p.key === 'houseLights') { S.houseLights = p.value === true; }
+    else if (p.key === 'curtainsOnPause') { S.curtainsOnPause = p.value !== false; }
+    ensureLoop();
+  }
+});
+try { parent.postMessage({ __c100: 1, type: 'ready' }, '*'); } catch (_) {}
+window.__stage = () => ({ lines: lines.length, curIdx, closed: +inter.closed.toFixed(2), shutter: +inter.shutter.toFixed(2), t: +now().toFixed(2) });
+</script>
+</body>
+</html>

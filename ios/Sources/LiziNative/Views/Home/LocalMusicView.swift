@@ -2,8 +2,9 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// 本地音乐区（r22j 模板 v2：~/workspace/lizi-home-template-portrait.png /
-/// lizi-home-template-landscape.png——首页最末、首屏之外，下滑才看到；
-/// 首屏一个像素都不许露本地音乐，见 HomeView 文件头）。
+/// lizi-home-template-landscape.png——首页面板之下，竖屏露在首屏；
+/// r51（D4）：r28 起不再是「下滑才看到」，「首屏一个像素都不许露本地音乐」
+/// 的旧规已作废；是否显示由 HomeView 的 `if localMusicShown` 开关控）。
 ///
 /// - 标题「本地音乐」28pt 粗体；下面是文件夹卡片（60 高、paper2 底、
 ///   圆角 14：蓝色 folder.fill 图标 + 「本地音乐」+ 首数/空态 + chevron，
@@ -21,10 +22,11 @@ import UniformTypeIdentifiers
 ///   `LocalFilesBridge.swift` 的选择器参数），选完后台
 ///   `LocalMusic.importFiles` 拷进沙盒 `Documents/LocalMusic/` +
 ///   写 index.json 清单，再刷新列表 + 状态行（导入 N 首、失败 M 个）。
-/// - r31-download：下面再加一张「下载管理」卡（同款 60 高）：进
-///   DownloadsView（正在下载进度 / 已下载点播 / 左滑删除）。Lizi 没有
-///   独立的「我的」页，首页就是我的 hub，这张卡就是我的页面那行的落点；
-///   下载不混进本地音乐清单（见 DownloadStore 文件头），这张卡只放入口。
+/// - r31-download（旧计划，r33 已改）：原说下面再加一张「下载管理」卡
+///   （同款 60 高）：进 DownloadsView（正在下载进度 / 已下载点播 / 左滑删除）。
+///   r51（D4）：这张卡 r33 已搬走——现挂在 HomeView 面板之下、本地音乐区块正上方，
+///   本文件里不再有下载管理入口，不留两个。Lizi 没有独立的「我的」页，
+///   首页就是我的 hub；下载不混进本地音乐清单（见 DownloadStore 文件头）。
 /// - r33-download-entry：上面那张卡已搬走——现在在 HomeView 面板之下
 ///   VStack、本地音乐区块正上方、`if localMusicShown` 之外（开关关了
 ///   它也一直在、首屏一眼见）；本文件里不再有下载管理入口，不留两个。

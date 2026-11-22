@@ -1,6 +1,7 @@
 import AVFoundation
 import Combine
 import Foundation
+import UIKit // r47：回前台补激活要 UIApplication.didBecomeActiveNotification
 
 /// 播放状态机（P1 填实）：AVPlayer 封装 + 队列 + 取链编排器。
 ///
@@ -30,8 +31,14 @@ import Foundation
 ///
 /// 第 16 轮教训：崩溃点在取到资源之后、播放启动那一段——播放启动路径
 /// **不要留强制解包**，每一步调 `DiagLog.recordPlaybackStep`（文件落盘）。
-/// 音频会话：AVAudioSession .playback 独占（不设 mixWithOthers），第一次真正
+/// 音频会话：AVAudioSession .playback + .mixWithOthers，第一次真正
 /// 播放时才激活（照抄壳版 ContentView 的做法，避免打开 App 就抢走别的 App 的声音）。
+/// r47：混音是用户 23:16–17 的纠正——别的平台用音频时 Lizi 也要强制播放、
+/// 我们这边不停；旧独占（不设 mixWithOthers）是用户早期的反向要求
+/// （r13 壳版「对方播、Lizi 停」），已作废。混音后别的 App 开播不再中断
+/// Lizi；电话/Siri/闹钟等不可混音的中断仍走 .began/.ended，由强制恢复接住。
+/// 会话激活不再一次性闩死（r45 遗留 F3）：中断/后台丢会话后必须能重激活，
+/// 见 ensureAudioSessionActive。
 ///
 /// 第 22 轮第 5 件（照 Moumusic PlayerService）：状态全在 @MainActor 上——
 /// 之前刻意不用 @MainActor（App.init 同步创建、远程命令闭包非隔离），但旧任务
@@ -324,6 +331,15 @@ final class PlaybackStore: ObservableObject {
             guard let self else { return }
             Task { @MainActor in self.handleRouteChange(note) }
         }
+        // r47：回前台补激活——后台丢会话后 .ended 可能已在后台处理过、也可能
+        // 漏掉；只在 UI 认为在播（isPlaying）时补一道（会话重激活 + 续播），
+        // 没声的"假在播"态就此接回。没在播时什么都不做，不抢别的 App 的声音。
+        _ = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.handleDidBecomeActive() }
+        }
         // r45-5：退出重进恢复上次那首进展示态（队列 + 当前曲目 + 时长，
         // 不起播、不取链）：播放页一进来就有数据，点播放再重新取链。
         // 只恢复，不自动播——启动就出声是错的。
@@ -336,24 +352,32 @@ final class PlaybackStore: ObservableObject {
 
     // MARK: - 音频会话
 
-    /// 类别 .playback 独占：不设 mixWithOthers（混音会把双音频问题带回来），
-    /// 启动时只设类别、不激活（第一次真正播放时才激活，见 activateSessionOnce）。
+    /// 类别 .playback + .mixWithOthers（r47：别的平台用音频时 Lizi 也不停，
+    /// 两边一起响正是用户要的；旧独占已作废，见文件头）。
+    /// 启动时只设类别、不激活（第一次真正播放时才激活，见 ensureAudioSessionActive）。
     private func configureAudioSession() {
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
         } catch {
             DiagLog.shared.recordPlaybackStep("audiosession category FAIL: \(error.localizedDescription)")
         }
     }
 
-    private func activateSessionOnce() {
-        guard !audioSessionActivated else { return }
-        audioSessionActivated = true
+    /// r47：会话激活不再一次性闩死——中断/后台丢会话后必须能重激活
+    /// （r45 遗留 F3：旧 activateSessionOnce 的 guard 让 setActive(true)
+    /// 终身只跑一次，中断后会话死了、resume() 再调也激活不回来，播出来没声）。
+    /// setActive(true) 在已激活时是空操作，随时调都安全；第一次成功记
+    /// "first play"，之后成功不记面包屑（resume/起播每首都调，记了会刷屏），
+    /// 失败永远记。恢复路径（中断 .ended、回前台）自己另记面包屑。
+    private func ensureAudioSessionActive() {
         do {
             try AVAudioSession.sharedInstance().setActive(true)
-            DiagLog.shared.recordPlaybackStep("audiosession activate ok (first play)")
+            if !audioSessionActivated {
+                audioSessionActivated = true
+                DiagLog.shared.recordPlaybackStep("audiosession activate ok (first play)")
+            }
         } catch {
-            DiagLog.shared.recordPlaybackStep("audiosession activate FAIL (first play): \(error.localizedDescription)")
+            DiagLog.shared.recordPlaybackStep("audiosession activate FAIL: \(error.localizedDescription)")
             // 激活失败也不拦着播；媒体播放时系统自己也会激活。
         }
     }
@@ -367,10 +391,18 @@ final class PlaybackStore: ObservableObject {
             wasPlayingBeforeInterruption = isPlaying
             pause()
         case .ended:
-            if let optRaw = info[AVAudioSessionInterruptionOptionKey] as? UInt,
-               AVAudioSession.InterruptionOptions(rawValue: optRaw).contains(.shouldResume),
-               wasPlayingBeforeInterruption {
+            // r47：强制恢复——不再等系统给 .shouldResume（别的 App 还在播时
+            // 根本没有 .ended；.ended 来了说明中断已结束，但系统常常不带
+            // shouldResume，旧代码就此死停）。中断前在播、且当前曲目还在
+            // （中途按了停播会清 currentTrack，那时不续）就重激活会话再续播；
+            // 混音开着时这一步通常只是补一道（别的 App 不会打断我们）。
+            // resume() 自己会再调一次 ensureAudioSessionActive。
+            if wasPlayingBeforeInterruption, currentTrack != nil {
+                wasPlayingBeforeInterruption = false
+                DiagLog.shared.recordPlaybackStep("audio interruption ended, force resume")
                 resume()
+            } else {
+                wasPlayingBeforeInterruption = false
             }
         @unknown default:
             break
@@ -394,6 +426,17 @@ final class PlaybackStore: ObservableObject {
         }
         isPlaying = false
         DiagLog.shared.recordPlaybackStep("route old device unavailable, paused")
+    }
+
+    /// r47：回前台补激活（见 init 注释）：UI 认为在播时才补——会话可能
+    /// 在后台丢了（.ended 漏掉 / 别的 App 抢走后没还回来），重激活 + 续播
+    /// 把没声的"假在播"接回来；resume() 自己会再调一次 ensureAudioSessionActive，
+    /// 已激活时是空操作。没在播（isPlaying false）时不做任何事。
+    private func handleDidBecomeActive() {
+        guard isPlaying else { return }
+        ensureAudioSessionActive()
+        DiagLog.shared.recordPlaybackStep("app foreground reactivate (was playing)")
+        resume()
     }
 
     /// r45-5：从 UserDefaults 读上次播放（HomeViewModel.notePlayed 存的
@@ -671,7 +714,7 @@ final class PlaybackStore: ObservableObject {
             startCurrentTrackPlay()
             return
         }
-        activateSessionOnce()
+        ensureAudioSessionActive()
         if usingAppleMusicPlayer {
             appleMusicPlayer?.resume()
             isPlaying = true
@@ -1061,7 +1104,7 @@ final class PlaybackStore: ObservableObject {
         }
         DiagLog.shared.recordPlaybackStep("url ok source=\(track.platform) id=\(track.id) via=\(result.via) scheme=\(url.scheme ?? "-")")
 
-        activateSessionOnce()
+        ensureAudioSessionActive()
         await startItem(url: url, track: track, gen: gen)
         // r31：起播后异步跑实测链（AVFoundation 流实测 → 文件头 →
         // URL 文件名 → 音源返回标签），测到就替换宣称档位，测不到保留；
@@ -1151,7 +1194,7 @@ final class PlaybackStore: ObservableObject {
             return false
         }
         usingAppleMusicPlayer = true
-        activateSessionOnce()
+        ensureAudioSessionActive()
         startedTrackId = track.id
         didRecordFirstTimeUpdate = false
         didCheckAMPreview = false

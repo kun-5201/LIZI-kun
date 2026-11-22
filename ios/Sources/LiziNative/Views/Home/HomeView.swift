@@ -840,6 +840,23 @@ struct HomeView: View {
                 Task { @MainActor in viewModel.notePlayed(track) }
             }
         }
+        .onChange(of: playback.queue.map(\.queueId)) { _ in
+            // r47-4：点播（setQueue 重建队列，queueId 全是新 UUID）后面板
+            // 切到「正在播放」，不再留在今日推荐；已在正在播放时
+            // selectSource 直接 return。自动切歌不走 setQueue、不重建队列，
+            // 不触发——正在浏览别的模式/已打开的歌单详情时不被拽回来。
+            if !playback.queue.isEmpty {
+                viewModel.selectSource(.nowPlaying)
+            }
+        }
+        // r47-4：从暂停恢复播（队列与当前曲目都不变时）也切到「正在播放」；
+        // 只在 false→true 时触发，暂停/停播不切回去（菜单顺序另由
+        // menuOrderFor(isPlaying:) 管；打断后自动恢复也走这里，见 D7）。
+        .onChange(of: playback.isPlaying) { playing in
+            if playing {
+                viewModel.selectSource(.nowPlaying)
+            }
+        }
     }
 
     /// 每日推荐铺色面板（壳版 `#hall-plat` 内容；r28：底色是专辑取色渐变，
@@ -1207,7 +1224,7 @@ struct HomeView: View {
             Color.black.opacity(0.001)
                 .onTapGesture { sourceMenuShown = false }
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(HomeRailPage.menuOrder, id: \.rawValue) { page in // r38-1：菜单按 menuOrder 排，「正在播放」第 2
+                ForEach(HomeRailPage.menuOrderFor(isPlaying: playback.isPlaying), id: \.rawValue) { page in // r47-4：菜单按播/停排（在播「正在播放」第一排，不在播恢复正常顺序；不写「置顶」二字）
                     Button(action: {
                         withAnimation(.easeOut(duration: 0.18)) {
                             viewModel.selectSource(page)

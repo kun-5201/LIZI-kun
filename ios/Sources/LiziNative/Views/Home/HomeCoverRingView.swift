@@ -1754,6 +1754,10 @@ final class HomeCoverRingModel: ObservableObject {
             lastPrefetchCenterSlot = targetSlot
             prefetchRingCovers(aroundCenterSlot: targetSlot)
         }
+        // r47-2：第 2 件——松手即把带子同步到环中心：恰好落槽无弹簧时 angle
+        // 不再变，覆盖层 onChange(of: angle) 的同步到不了；拖动中已同步过
+        // 时这里是空操作（偏移已对齐，守卫直接 return）。
+        syncFlatOffsetToRingCenter()
         scheduleHoldClose()
     }
 
@@ -1877,6 +1881,23 @@ final class HomeCoverRingModel: ObservableObject {
         flatOffsetX = next
     }
 
+    /// r47-2：第 2 件——点环卡播歌后把平面带停在被选的那首上（不从头显示）。
+    /// 视频实测：拖环、点卡、收环后带子回到旧中心卡，而不是被选的那首。
+    /// 缺口：syncInputs 只改 selectedFlatIndex（上抬）不改 flatOffsetX；
+    /// 拖环时的 syncFlatOffsetToRingCenter 有 overlayOpacity ≥ 0.99 的守卫，
+    /// 快拖 / 恰好落槽无弹簧时一次都没跑到，收环后带子就停在旧位置。
+    /// 点卡是明确选择：收环淡出里带子不可见，偏移跳变看不见；收完 2s
+    /// dwell 后 tickFlat 从被选卡的位置继续走，不从头显示。
+    /// 公式与 syncFlatOffsetToRingCenter 同款（卡 k 居中），只差 k 是点中的
+    /// 下标、不要 overlayOpacity 守卫（点卡时带子正在淡出/已藏好）。
+    func centerFlatOnSelected(_ index: Int) {
+        guard itemCount > 0, flatSetWidth > 0, stripSize.width > 0,
+              (0..<itemCount).contains(index) else { return }
+        let target = stripSize.width / 2 - flatCard / 2 - CGFloat(index) * flatPitch
+        flatOffsetX = normalizedFlat(target)
+        selectedFlatIndex = index
+    }
+
     // MARK: 点播
 
     /// 点卡片播歌（r26-3D）：整份每日进队列、从点中的起播
@@ -1908,6 +1929,9 @@ final class HomeCoverRingModel: ObservableObject {
     func tapRingCard(trackIndex: Int, store: PlaybackStore) {
         selectedRingIndex = trackIndex
         playTrack(at: trackIndex, store: store)
+        // r47-2：第 2 件——收环后带子停在被选的卡上（通用路是集合卡、点后换
+        // 内容，syncInputs 会按新内容归零，不在这里定偏移）。
+        if !isGeneric { centerFlatOnSelected(trackIndex) }
         closeRing()
     }
 
@@ -2063,8 +2087,43 @@ final class HomeCoverRingModel: ObservableObject {
     /// （r24 同款）；`topEdge` 不再用于夹取，保留参数免得改调用点。
     /// r31 的教训仍在：不要把 ring.js 的 cy 上下限夹取搬回来——Hero 拖大后
     /// 带心远超旧上限，夹取就是把环钉在固定高度、与带子脱节。
+    /// 横竖屏判定（r47-3：第 3 件——syncInputs 同步进来的实测屏宽/高；
+    /// 没量到时回落真屏基准 UIScreen）。
+    var isLandscapeScreen: Bool {
+        if screenHeight > 0 { return screenWidth > screenHeight }
+        return ringBasisWidth > ringBasisHeight
+    }
+
+    /// r47-3：第 3 件——横屏时环卡中心纵坐标夹到屏内（覆盖层本地坐标，
+    /// 原点 = ScrollView 顶，高度 = 覆盖层 geo 高；渲染、命中测试、
+    /// 变暗中心、压暗开洞都走同一份夹取后的值）。
+    /// 横屏默认面板只有 128pt、带子中心在屏底之下：按带子锚点算出的中心
+    /// 会把整环挂在屏外（只剩盖顶露在屏底边），用户眼里就是「没出 3D」。
+    /// 夹取区间：环顶 ≥ 8、环底 ≤ 提示行顶（屏高 ×0.94）− 8；带子在屏内
+    /// 时夹取不触发，环仍钉在带子上（原地变 3D 不变）；屏太矮、区间倒挂
+    /// 时不夹。竖屏一字不动（只在横屏分支里夹）。
+    func clampedRingCenterY(_ y: CGFloat, screenHeight: CGFloat) -> CGFloat {
+        guard isLandscapeScreen, screenHeight > 0 else { return y }
+        let half = ringCardHeight / 2
+        let top = half + 8
+        let bottom = screenHeight * 0.94 - 8 - half
+        guard top < bottom else { return y }
+        return min(max(y, top), bottom)
+    }
+
     func ringCenterY(screenHeight: CGFloat, topEdge: CGFloat) -> CGFloat {
         _ = topEdge
+        // r47-3：第 3 件——横屏时变暗中心跟夹取后的环中心走（与卡片同位置，
+        // 不然压暗洞与卡片错位、卡片被压暗）；竖屏原值不动。
+        // ringCardCenterScreenY 的回落分支会调回 ringCenterY，但只在
+        // stripCenter.y == 0 时调；这里只在 stripCenter.y > 0 时调它，
+        // 不成环。stripCenter 还没量到时直接夹取回落值。
+        if isLandscapeScreen {
+            if stripCenter.y > 0 {
+                return ringCardCenterScreenY(screenHeight: screenHeight) - 3
+            }
+            return clampedRingCenterY(screenHeight * 0.62, screenHeight: screenHeight) - 3
+        }
         return stripCenter.y > 0 ? stripCenter.y - 3 : screenHeight * 0.62
     }
 
@@ -2106,7 +2165,9 @@ final class HomeCoverRingModel: ObservableObject {
         } else {
             centerCardY = ringCenterY(screenHeight: screenHeight, topEdge: 95)
         }
-        return centerCardY
+        // r47-3：第 3 件——横屏夹到屏内（见 clampedRingCenterY；竖屏原值不动）。
+        // 命中测试与覆盖层渲染都走这里，夹取后两边同值，点按盒与卡片一致。
+        return clampedRingCenterY(centerCardY, screenHeight: screenHeight)
     }
 
     /// 面板横向范围（r31 真圆柱：halfWidth 不再用于裁切——r30 v5 图的
@@ -2411,7 +2472,9 @@ struct HomeCoverRingView: View {
             // overlayOpacity（展开 0.26s 淡入、收回跟 closeT 淡出）。
             // 侧卡溢出带子贴到面板边是设计（壳版同款），外层 ZStack
             // 不裁切；面板圆角底座在 body 的 VStack 上，不裁内容。
-            if model.ringPhase != .closed {
+            // r47-3：第 3 件——横屏时环卡改挂全屏覆盖层（面板 clipShape 会把
+            // 261pt 高的环卡裁到只剩顶边）；竖屏仍挂平带里，一字不动。
+            if model.ringPhase != .closed, !(screenHeight > 0 && screenWidth > screenHeight) {
                 ringLayerInStrip
                     .opacity(model.overlayOpacity)
             }
@@ -2459,44 +2522,10 @@ struct HomeCoverRingView: View {
     /// 旋转方向偏；其余卡片保持同一水平线）。
     private var ringLayerInStrip: some View {
         GeometryReader { geo in
-            ZStack {
-                ForEach(model.visibleSlots()) { slot in
-                    let card = model.itemCard(at: slot.trackIndex) // r43-2：第 2 件——通用卡，曲目路与旧 model.tracks[slot.trackIndex] 同内容
-                    let facing = model.facing(forWorld: slot.world)
-                    RingCardView(
-                        card: card,
-                        width: model.ringCard,
-                        world: slot.world,
-                        shadeFlat: model.shadeOpacity(facing: facing)
-                    )
-                    .scaleEffect(model.depthScale(forWorld: slot.world) * model.cameraScale())
-                    .rotation3DEffect(
-                        .degrees(Double(slot.world)),
-                        axis: (x: 0, y: 1, z: 0),
-                        // r33，第 1 条：perspective 0 → 卡高/P（≈0.28）——正交旋转
-                        // 的侧卡只是等比窄矩形、没有梯形，看着是平铺；按壳版 P=3.2R
-                        // 再压一次近大远小，近缘比远缘宽约 12%，才是绕圆柱转圈。
-                        perspective: model.ringCardPerspective
-                    )
-                    .rotation3DEffect(
-                        .degrees(-5),
-                        axis: (x: 1, y: 0, z: 0),
-                        perspective: 0
-                    )
-                    .opacity(model.facingOpacity(facing: facing))
-                    .position(
-                        x: geo.size.width / 2 + model.projectedX(forWorld: slot.world),
-                        y: model.ringCardCenterYLocal()
-                    )
-                    // r39-5：第 5 件——点中的环卡整体上抬 1pt（r43-3；0.18s 动画）；
-                    // offset 在 position 之后，沿屏纵向直上直下；其余卡片不动。
-                    .offset(y: model.selectedRingIndex == slot.trackIndex ? -HomeCoverRingModel.selectedLift : 0)
-                    .animation(.easeOut(duration: 0.18), value: model.selectedRingIndex == slot.trackIndex)
-                    .zIndex(Double(100 - abs(slot.world)))
-                    .accessibilityLabel(card.accessibilityLabel) // r43-2：第 2 件——曲目路「播放：标题」与旧值同值，通用路为标题本身
-                }
-            }
-            .frame(width: geo.size.width, height: model.flatHeight)
+            // r47-3：第 3 件——卡片循环抽到共用的 RingCardsLayer（见下），中心坐标仍是平带里的（带宽/2，ringCardCenterYLocal），
+            // 渲染一字不动；横屏时这里不挂（见 flatStrip 的横屏守卫）。
+            RingCardsLayer(model: model, centerX: geo.size.width / 2, centerY: model.ringCardCenterYLocal())
+                .frame(width: geo.size.width, height: model.flatHeight)
         }
         .frame(height: model.flatHeight)
     }
@@ -2517,6 +2546,56 @@ struct HomeCoverRingView: View {
         }
         .foregroundColor(model.panelIsDark ? .white.opacity(0.75) : LiziTokens.ink3)
         .opacity(1 - model.overlayOpacity) // r34：环开着时提示行跟平带一起淡出
+    }
+}
+
+/// 环卡循环（r47-3：第 3 件——平带里 / 横屏覆盖层里共用的卡片循环，
+/// 只差中心坐标：平带里中心 =（带宽/2，ringCardCenterYLocal）；
+/// 横屏覆盖层里中心 =（stripCenter.x，ringCardCenterScreenY 夹取后）。
+/// 透视、压暗、缩放、上抬、zIndex 与原来平带里的循环一字不动；
+/// 位置由调用方给的 centerX/centerY 定（父容器坐标系）。
+private struct RingCardsLayer: View {
+    @ObservedObject var model: HomeCoverRingModel
+    var centerX: CGFloat
+    var centerY: CGFloat
+    var body: some View {
+        ZStack {
+            ForEach(model.visibleSlots()) { slot in
+                let card = model.itemCard(at: slot.trackIndex) // r43-2：第 2 件——通用卡，曲目路与旧 model.tracks[slot.trackIndex] 同内容
+                let facing = model.facing(forWorld: slot.world)
+                RingCardView(
+                    card: card,
+                    width: model.ringCard,
+                    world: slot.world,
+                    shadeFlat: model.shadeOpacity(facing: facing)
+                )
+                .scaleEffect(model.depthScale(forWorld: slot.world) * model.cameraScale())
+                .rotation3DEffect(
+                    .degrees(Double(slot.world)),
+                    axis: (x: 0, y: 1, z: 0),
+                    // r33，第 1 条：perspective 0 → 卡高/P（≈0.28）——正交旋转
+                    // 的侧卡只是等比窄矩形、没有梯形，看着是平铺；按壳版 P=3.2R
+                    // 再压一次近大远小，近缘比远缘宽约 12%，才是绕圆柱转圈。
+                    perspective: model.ringCardPerspective
+                )
+                .rotation3DEffect(
+                    .degrees(-5),
+                    axis: (x: 1, y: 0, z: 0),
+                    perspective: 0
+                )
+                .opacity(model.facingOpacity(facing: facing))
+                .position(
+                    x: centerX + model.projectedX(forWorld: slot.world),
+                    y: centerY
+                )
+                // r39-5：第 5 件——点中的环卡整体上抬 1pt（r43-3；0.18s 动画）；
+                // offset 在 position 之后，沿屏纵向直上直下；其余卡片不动。
+                .offset(y: model.selectedRingIndex == slot.trackIndex ? -HomeCoverRingModel.selectedLift : 0)
+                .animation(.easeOut(duration: 0.18), value: model.selectedRingIndex == slot.trackIndex)
+                .zIndex(Double(100 - abs(slot.world)))
+                .accessibilityLabel(card.accessibilityLabel) // r43-2：第 2 件——曲目路「播放：标题」与旧值同值，通用路为标题本身
+            }
+        }
     }
 }
 
@@ -2768,6 +2847,20 @@ struct HomeRingOverlayView: View {
                 // 亮度与壳版同款（只剩 3.8% flat shade），洞外页面照常压暗。
                 radialScrim(size: geo.size, centerX: ringCx, centerY: ringCy)
                     .mask(scrimHoleMask(containerHeight: geo.size.height))
+                // r47-3：第 3 件——横屏时环卡挂在这里（全屏覆盖层，面板
+                // clipShape 裁不到；竖屏环卡仍在平带里，这里不挂）。
+                // 中心 x = 带子中心（stripCenter.x，量不到时回落屏中心），
+                // 中心 y = ringCardCenterScreenY（横屏夹到屏内，与命中测试
+                // 同公式）。压暗层在下、卡片在上（开洞只让卡片亮，顺序不能反）；
+                // 触摸层仍在最上层。透明度跟外层 ZStack 的 overlayOpacity。
+                if geo.size.width > geo.size.height {
+                    RingCardsLayer(
+                        model: model,
+                        centerX: model.stripCenter.x > 0 ? model.stripCenter.x : geo.size.width / 2,
+                        centerY: model.ringCardCenterScreenY(screenHeight: geo.size.height)
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
                 // r36-8，删：拖动时顶部再暗一档（0.14 黑、上 55% 高、
                 // isRingDragging 驱动）已删——壳版 ring.js 里没有拖动加暗
                 // 这一层（`.mring.is-drag` 只换光标）；壳版视频里拖动中
@@ -2776,6 +2869,8 @@ struct HomeRingOverlayView: View {
                 // r34：第 4 件——圆柱环已经搬进平带容器（flatStrip 里的
                 // ringLayerInStrip），覆盖层不再画卡；这里只剩变暗 +
                 // 底部提示 + 触摸层。
+                // r47-3：第 3 件——横屏例外：环卡改挂覆盖层（见上），竖屏
+                // 仍走平带里的环。
                 // 底部提示（视频原字；位置约 94% 屏高、居中）。
                 // r33，第 4 条：原来是 VStack + Spacer + padding(.bottom,
                 // max(16, safeArea+10))——safeAreaInsets 在 ignoresSafeArea
@@ -2836,7 +2931,11 @@ struct HomeRingOverlayView: View {
         guard model.stripSize.height > 0 else {
             return LinearGradient(colors: [.black, .black], startPoint: .top, endPoint: .bottom)
         }
-        let cy = model.stripCenter.y - 3
+        // r47-3：第 3 件——横屏时洞跟夹取后的环中心走（卡片挂在覆盖层里、
+        // 洞还按带子开会把卡片压暗）；竖屏原值不动。
+        let cy = model.isLandscapeScreen
+            ? model.ringCardCenterScreenY(screenHeight: containerHeight) - 3
+            : model.stripCenter.y - 3
         let half = model.ringCardHeight / 2
         let top0 = max(0, min(1, (cy - half - feather) / h))
         let top1 = max(0, min(1, (cy - half) / h))

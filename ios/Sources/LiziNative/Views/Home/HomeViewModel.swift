@@ -879,6 +879,15 @@ enum HomeRailPage: Int, CaseIterable {
     /// 在每日推荐之后、精选之前；rawValue 顺序不动，只影响菜单排列）。
     static var menuOrder: [HomeRailPage] = [.daily, .nowPlaying, .featured, .liked, .created, .radio, .rank]
 
+    /// r47-4：菜单按播/停两种顺序排——在播时「正在播放」置顶第一排，
+    /// 其余顺序不动；不在播时恢复正常顺序（`menuOrder`：每日推荐第一、
+    /// 「正在播放」第 2）。`menuOrder` 本身不动（正常顺序的事实来源，
+    /// 见 r45 §K1，仍锁它）；菜单 ForEach 改走这里。菜单里不写「置顶」二字，
+    /// 置顶只用第一排的位置表示，当前模式的勾照常显示。
+    static func menuOrderFor(isPlaying: Bool) -> [HomeRailPage] {
+        isPlaying ? [.nowPlaying, .daily, .featured, .liked, .created, .radio, .rank] : menuOrder
+    }
+
     /// 栏目名（喜欢那栏按平台取真名，唯一事实来源 `RailKind.likedTitle(for:)`）。
     func title(platform: String) -> String {
         switch self {

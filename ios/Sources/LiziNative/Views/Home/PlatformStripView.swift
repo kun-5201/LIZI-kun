@@ -101,7 +101,7 @@ struct PlatformStripView: View {
                 Button(action: { onSourceMenuTap?() }) {
                     HStack(spacing: 4) {
                         Text(viewModel.sourceTitle)
-                            .font(.liziBody(size: 19, weight: .bold))
+                            .font(.liziHome(size: 19, weight: .bold))
                             .foregroundColor(isDark ? .white : LiziTokens.ink)
                             .lineLimit(1)
                             .background(
@@ -186,7 +186,7 @@ struct PlatformIconView: View {
                     .fill(Color(hex: platform.brandHex))
                     .frame(width: size, height: size)
                 Text(platform.monogram)
-                    .font(.liziDisplay(size: size * 13 / 32))
+                    .font(.liziHome(size: size * 13 / 32))
                     .foregroundColor(platform.onBrandLight ? LiziTokens.ink : .white)
             }
         }

@@ -162,12 +162,16 @@ targets:
       # r36：原生灵动岛全删（r35-11 重加作废），回 r28 状态——只剩系统 Now Playing。
     # P3-D 打磨：Fraunces 三档静态 TTF 随包（见 Sources/LiziNative/Fonts/
     # README.md）。显式列进 resources（进包根目录，UIAppFonts 按文件名找）；
+    # r57：MiLanPro-Thin.ttf 同路进包（首页字体，见下面 UIAppFonts 注释）。
     # Assets.xcassets（平台 logo）在 Sources/LiziNative 源码 glob 里，
     # XcodeGen 按资源自动收，不另列。
     resources:
       - Sources/LiziNative/Fonts/Fraunces-Medium.ttf
       - Sources/LiziNative/Fonts/Fraunces-SemiBold.ttf
       - Sources/LiziNative/Fonts/Fraunces-Italic.ttf
+      # r57：首页字体小米兰亭 Pro（MiLanPro-Thin.ttf，族名 MI Lan Pro，
+      # 仅 Thin 一档；与 Fraunces 同路子进包根，UIAppFonts 注册）。
+      - Sources/LiziNative/Fonts/MiLanPro-Thin.ttf
       # P3-B 画廊：本地 HTML 资源整目录进包（forms-labs 整页；目录结构
       # 原样保留，`../vendor/` 相对路径才能解析；GalleryWebView 以 bundle
       # 资源根目录为 readAccess 根，见 GalleryHTMLBundle）。
@@ -254,10 +258,14 @@ targets:
         # P3-D 打磨：Fraunces 随包字体注册（族名 Fraunces；文件见
         # Sources/LiziNative/Fonts/，resources 负责拷进包）。
         # 字体进包后 DesignTokens.liziDisplay 用 Font.custom("Fraunces")。
+        # r57：小米兰亭 Pro 同路注册（族名 MI Lan Pro；文件同目录
+        # MiLanPro-Thin.ttf，resources 负责拷进包），首页
+        # DesignTokens.liziHome 用 Font.custom("MI Lan Pro")。
         UIAppFonts:
           - Fraunces-Medium.ttf
           - Fraunces-SemiBold.ttf
           - Fraunces-Italic.ttf
+          - MiLanPro-Thin.ttf
         UILaunchScreen: {}
         ITSAppUsesNonExemptEncryption: false
         NSAppTransportSecurity:

@@ -8,6 +8,10 @@ import UIKit
 ///   `liziDisplay` 用 `Font.custom("Fraunces")`，注册缺失时回落系统 serif；
 ///   中文不在 Fraunces 字库内，由系统字体兜底。Geist（正文）未随包提供，
 ///   仍用系统字体近似。
+/// - 首页字体（r57）：小米兰亭 Pro（`Fonts/MiLanPro-Thin.ttf`，`UIAppFonts`
+///   注册；族名 `MI Lan Pro`，仅 Thin 一档），`liziHome` 用
+///   `Font.custom("MI Lan Pro")`，注册缺失时回落系统字体；只给首页用
+///   （Views/Home/），其他页面不动。
 /// - 字号：12 / 13 / 14 / 16 / 20 / 25 / 31 / 39（tokens.css 的 1.25 级数）。
 /// - 圆角：10 / 14 / 20 / 28。
 /// - 颜色：浅色纸面 + 墨色文字；accent 只有一个——网易云红 #EA3E3C。
@@ -77,6 +81,19 @@ extension Font {
             return .custom("Fraunces", size: size).weight(weight)
         }
         return .system(size: size, weight: weight, design: .serif)
+    }
+
+    /// 首页字体（r57 用户定：首页全部文字换小米兰亭 Pro）。
+    /// 字体已随包（`Sources/LiziNative/Fonts/MiLanPro-Thin.ttf`，`UIAppFonts`
+    /// 注册；族名 `MI Lan Pro`，仅 Thin 一档）；字重透传，CoreText 按最近档
+    /// 匹配（只有 Thin 100 一档，全部字重都落到 Thin）；中文在字库内，
+    /// 不走系统兜底。字体未注册进包时回落系统字体，不崩、不空白。
+    /// 只给首页用（Views/Home/）：播放页 / 设置页等其他页面不动。
+    static func liziHome(size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        if !UIFont.fontNames(forFamilyName: "MI Lan Pro").isEmpty {
+            return .custom("MI Lan Pro", size: size).weight(weight)
+        }
+        return .system(size: size, weight: weight)
     }
 
     /// 正文字体：tokens.css --font-body（Geist），

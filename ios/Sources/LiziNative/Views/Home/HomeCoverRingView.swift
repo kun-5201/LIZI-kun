@@ -2409,7 +2409,7 @@ struct HomeCoverRingView: View {
         HStack(spacing: 8) {
             ProgressView()
             Text("正在拉取每日推荐…")
-                .font(.liziBody(size: LiziTokens.size13))
+                .font(.liziHome(size: LiziTokens.size13))
                 .foregroundColor(model.panelIsDark ? .white.opacity(0.62) : LiziTokens.ink3)
         }
         .frame(maxWidth: .infinity, minHeight: model.flatHeight, alignment: .center)
@@ -2417,7 +2417,7 @@ struct HomeCoverRingView: View {
 
     private var emptyView: some View {
         Text(model.dailyEmptyReason ?? "暂无推荐内容。")
-            .font(.liziBody(size: LiziTokens.size13))
+            .font(.liziHome(size: LiziTokens.size13))
             .foregroundColor(model.panelIsDark ? .white.opacity(0.62) : LiziTokens.ink3)
             .multilineTextAlignment(.center)
             .frame(maxWidth: .infinity, minHeight: model.flatHeight, alignment: .center)
@@ -2554,7 +2554,7 @@ struct HomeCoverRingView: View {
             Image(systemName: "arrow.left.and.right")
                 .font(.system(size: 10, weight: .semibold))
             Text("左右拖动展开 3D 环 · 拖动旋转")
-                .font(.liziBody(size: LiziTokens.size12))
+                .font(.liziHome(size: LiziTokens.size12))
         }
         .foregroundColor(model.panelIsDark ? .white.opacity(0.75) : LiziTokens.ink3)
         .opacity(1 - model.overlayOpacity) // r34：环开着时提示行跟平带一起淡出
@@ -2686,13 +2686,13 @@ private struct FlatRingCard: View {
                 if coverOnly && !coverLoaded {
                     VStack(alignment: .center, spacing: 2) {
                         Text(card.title)
-                            .font(.liziBody(size: LiziTokens.size15, weight: .semibold))
+                            .font(.liziHome(size: LiziTokens.size15, weight: .semibold))
                             .foregroundColor(.white)
                             .lineLimit(2)
                             .multilineTextAlignment(.center)
                         if !card.subtitle.isEmpty {
                             Text(card.subtitle)
-                                .font(.liziBody(size: LiziTokens.size12))
+                                .font(.liziHome(size: LiziTokens.size12))
                                 .foregroundColor(.white.opacity(0.75))
                                 .lineLimit(1)
                         }
@@ -2706,12 +2706,12 @@ private struct FlatRingCard: View {
             // Track.artist）；文字在封面下方、卡片外面，不叠在封面里面）。歌名粗体 16pt、演唱者 14pt，
             // 各一行、超长截断（lineLimit 1），居中对齐卡片。
             Text(card.title)
-                .font(.liziBody(size: LiziTokens.size16, weight: .semibold))
+                .font(.liziHome(size: LiziTokens.size16, weight: .semibold))
                 .foregroundColor(isDark ? .white : LiziTokens.ink)
                 .lineLimit(1)
                 .multilineTextAlignment(.center)
             Text(card.subtitle)
-                .font(.liziBody(size: LiziTokens.size14))
+                .font(.liziHome(size: LiziTokens.size14))
                 .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
                 .lineLimit(1)
                 .multilineTextAlignment(.center)
@@ -2898,7 +2898,7 @@ struct HomeRingOverlayView: View {
                 // 30 帧里 94% 高度处一个亮像素都没有）。改成按屏高 94%
                 // 定死位置，不依赖 safeArea 读数；横屏竖屏同一套。
                 Text("拖动旋转 · 点击播放 · 松手收回")
-                    .font(.system(size: 11))
+                    .font(.liziHome(size: 11))
                     .foregroundColor(.white.opacity(0.74))
                     .shadow(color: .black.opacity(0.5), radius: 8, x: 0, y: 1)
                     .position(x: geo.size.width / 2, y: geo.size.height * 0.94)
@@ -3040,12 +3040,12 @@ private struct RingCardView: View {
                 )
                 .shadow(color: .black.opacity(0.8), radius: 26, x: 0, y: 12)
             Text(card.title)
-                .font(.liziBody(size: 15, weight: .medium))
+                .font(.liziHome(size: 15, weight: .medium))
                 .foregroundColor(.white.opacity(0.9))
                 .lineLimit(1)
                 .shadow(color: .black.opacity(0.55), radius: 8, x: 0, y: 1)
             Text(card.subtitle)
-                .font(.liziBody(size: 13))
+                .font(.liziHome(size: 13))
                 .foregroundColor(.white.opacity(0.62))
                 .lineLimit(1)
                 .shadow(color: .black.opacity(0.55), radius: 8, x: 0, y: 1)

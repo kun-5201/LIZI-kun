@@ -100,7 +100,7 @@ struct HeroCardView: View {
                 HStack(alignment: .top) {
                     if let at = viewModel.lastPlayedAt, track != nil {
                         Text("上次听到 · \(agoString(from: at))")
-                            .font(.liziMono(size: LiziTokens.size13, weight: .medium))
+                            .font(.liziHome(size: LiziTokens.size13, weight: .medium))
                             .tracking(1.5)
                             .foregroundColor(.white.opacity(0.78))
                             .textCase(.uppercase)
@@ -127,17 +127,17 @@ struct HeroCardView: View {
                 HStack(alignment: .bottom, spacing: 24) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(track?.title ?? "从下面挑一个平台开始")
-                            .font(.liziDisplay(size: titleSize))
+                            .font(.liziHome(size: titleSize))
                             .foregroundColor(track == nil ? LiziTokens.ink2 : .white)
                             .lineLimit(1)
                         if let track = track {
                             Text(subtitle(for: track))
-                                .font(.liziBody(size: 15))
+                                .font(.liziHome(size: 15))
                                 .foregroundColor(.white.opacity(0.76))
                                 .lineLimit(1)
                         } else {
                             Text("点一个平台图标，切到它的公开内容")
-                                .font(.liziBody(size: LiziTokens.size13))
+                                .font(.liziHome(size: LiziTokens.size13))
                                 .foregroundColor(LiziTokens.ink3)
                                 .lineLimit(1)
                         }

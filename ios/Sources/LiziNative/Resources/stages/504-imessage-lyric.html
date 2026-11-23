@@ -12,19 +12,17 @@
    实现：没有运镜——手机永远平放、居中、贴满，不平移、不旋转、不缩放、
    不回弹；横屏直接拖手机可以换个角度看（自由视角，见 JS 第 10 节）；
    点下面语音条可以暂停/继续播。
-   字体（r55 用户发来的 kitty-__ing__8.ttf，内部名 kitty-加载ing长腿8，
-   12,023,284 B，随舞台资源走，见 stages/kitty-__ing__8.ttf）：舞台全部文字
-   的 font-family 只走 --stageFont 这一处变量，@font-face 声明 KittyStage
-   指向该文件，body 经变量用它。r56 例外：已发送蓝气泡（.bub.r）改用小米兰亭
-   Pro（MiLanPro-Thin.ttf，见下 @font-face），回退仍是 --stageFont；灰气泡与
-   标题等仍走 --stageFont，一字不动。 */
-@font-face{font-family:'KittyStage';src:url('kitty-__ing__8.ttf') format('truetype');font-weight:normal;font-style:normal;font-display:swap}
+   字体（r57：原自定义字体已删除）：舞台全部文字的 font-family 只走 --stageFont
+   这一处变量，--stageFont 是系统字体栈（不指任何自定义字体），body 经变量用它。
+   r56 例外：已发送蓝气泡（.bub.r）改用小米兰亭 Pro（MiLanPro-Thin.ttf，
+   见下 @font-face）；r57：蓝气泡回退不再挂 --stageFont，只留通用 sans-serif
+   兜底；灰气泡与标题等仍走 --stageFont，一字不动。 */
 /* r56：已发送蓝气泡改用小米兰亭 Pro（MiLanPro-Thin.ttf，内部 family「MI Lan Pro」、
    Thin 字重 = 100，28,666 字形；随舞台资源走，见 stages/MiLanPro-Thin.ttf）。
-   只给 .bub.r 用（见下），灰气泡与标题等仍走 --stageFont（KittyStage），一字不动。 */
+   只给 .bub.r 用（见下），灰气泡与标题等仍走 --stageFont（系统字体），一字不动。 */
 @font-face{font-family:'MiLanPro';src:url('MiLanPro-Thin.ttf') format('truetype');font-weight:100;font-style:normal;font-display:swap}
 :root{--ac:150,165,255;--islandPad:48px;
-      --stageFont:'KittyStage',"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+      --stageFont:"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif}
 *,*::before,*::after{box-sizing:border-box;-webkit-font-smoothing:antialiased}
 html,body{margin:0;height:100%;overflow:hidden;background:#000}
 body{font-family:var(--stageFont);
@@ -124,7 +122,7 @@ body{font-family:var(--stageFont);
 .bub.cur{box-shadow:0 3px 14px -6px rgba(40,44,70,.30)}
 .bub span{opacity:.34;transition:opacity .32s ease}
 .bub span.on{opacity:1}
-.bub.r{right:12px;background:#0b84ff;color:#fff;border-bottom-right-radius:0;font-family:'MiLanPro',var(--stageFont)}
+.bub.r{right:12px;background:#0b84ff;color:#fff;border-bottom-right-radius:0;font-family:'MiLanPro',sans-serif}
 .bub.l{left:12px;background:#e9e9eb;color:#000;border-bottom-left-radius:0}
 /* 气泡尾巴：向内压 2px 与本体重叠，消除接缝 */
 .bub::after{content:'';position:absolute;bottom:0;width:9px;height:16px;

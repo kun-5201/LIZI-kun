@@ -1049,7 +1049,7 @@ struct HomeView: View {
             // v4 顶栏：左榜单名，右「‹ 榜单」返回 + 放大镜搜索。
             HStack(spacing: 12) {
                 Text(board.name)
-                    .font(.liziBody(size: LiziTokens.size16, weight: .semibold))
+                    .font(.liziHome(size: LiziTokens.size16, weight: .semibold))
                     .foregroundColor(isDark ? .white : LiziTokens.ink)
                     .lineLimit(1)
                 Spacer()
@@ -1058,7 +1058,7 @@ struct HomeView: View {
                     rankDetailTracks = []
                 }) {
                     Text("‹ 榜单")
-                        .font(.liziBody(size: LiziTokens.size14))
+                        .font(.liziHome(size: LiziTokens.size14))
                         .foregroundColor(isDark ? .white.opacity(0.75) : LiziTokens.ink3)
                 }
                 .accessibilityLabel("返回榜单列表")
@@ -1090,7 +1090,7 @@ struct HomeView: View {
                 .frame(height: 20)
             } else {
                 Text("该榜单暂无曲目")
-                    .font(.liziBody(size: LiziTokens.size13))
+                    .font(.liziHome(size: LiziTokens.size13))
                     .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
             }
         }
@@ -1150,7 +1150,7 @@ struct HomeView: View {
                 .frame(height: 20)
             } else if let reason = viewModel.rankEmptyReason {
                 Text(reason)
-                    .font(.liziBody(size: LiziTokens.size13))
+                    .font(.liziHome(size: LiziTokens.size13))
                     .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
                     .lineLimit(2)
             } else {
@@ -1245,7 +1245,7 @@ struct HomeView: View {
                     }) {
                         HStack(spacing: 8) {
                             Text(page.title(platform: viewModel.selectedPlatform))
-                                .font(.liziBody(size: LiziTokens.size16, weight: page == viewModel.selectedSource ? .semibold : .regular))
+                                .font(.liziHome(size: LiziTokens.size16, weight: page == viewModel.selectedSource ? .semibold : .regular))
                                 .foregroundColor(LiziTokens.ink)
                                 .lineLimit(1)
                             Spacer()
@@ -1466,19 +1466,19 @@ struct HomeView: View {
                                 .font(.system(size: 13, weight: .semibold))
                             Text("返回\(page.title(platform: platform))")
                         }
-                        .font(.liziBody(size: LiziTokens.size13, weight: .medium))
+                        .font(.liziHome(size: LiziTokens.size13, weight: .medium))
                         .foregroundColor(LiziTokens.ink2)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("返回\(page.title(platform: platform))")
                     Text(viewModel.openedTitle)
-                        .font(.liziBody(size: LiziTokens.size15, weight: .semibold))
+                        .font(.liziHome(size: LiziTokens.size15, weight: .semibold))
                         .foregroundColor(isDark ? .white : LiziTokens.ink)
                         .lineLimit(1)
                     Spacer()
                     if !viewModel.openedTracks.isEmpty {
                         Text("共 \(viewModel.openedTracks.count) 首")
-                            .font(.liziBody(size: LiziTokens.size12))
+                            .font(.liziHome(size: LiziTokens.size12))
                             .foregroundColor(isDark ? .white.opacity(0.62) : LiziTokens.ink3)
                     }
                 }
@@ -1487,7 +1487,7 @@ struct HomeView: View {
                     HStack(spacing: 8) {
                         ProgressView()
                         Text("正在拉取\(viewModel.openedTitle)…")
-                            .font(.liziBody(size: LiziTokens.size13))
+                            .font(.liziHome(size: LiziTokens.size13))
                             .foregroundColor(LiziTokens.ink3)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -1545,7 +1545,7 @@ struct HomeView: View {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 11, weight: .semibold))
                     }
-                    .font(.liziBody(size: LiziTokens.size13, weight: .medium))
+                    .font(.liziHome(size: LiziTokens.size13, weight: .medium))
                     .foregroundColor(LiziTokens.ink2)
                 }
                 .padding(.top, 8)
@@ -1557,7 +1557,7 @@ struct HomeView: View {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 11, weight: .semibold))
                     }
-                    .font(.liziBody(size: LiziTokens.size13, weight: .medium))
+                    .font(.liziHome(size: LiziTokens.size13, weight: .medium))
                     .foregroundColor(LiziTokens.ink2)
                 }
                 .padding(.top, 8)
@@ -1668,7 +1668,7 @@ struct HomeView: View {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 11, weight: .semibold))
                     }
-                    .font(.liziBody(size: LiziTokens.size13, weight: .medium))
+                    .font(.liziHome(size: LiziTokens.size13, weight: .medium))
                     .foregroundColor(LiziTokens.ink2)
                 }
                 .padding(.top, 8)
@@ -1706,7 +1706,7 @@ struct HomeView: View {
             HStack(spacing: 8) {
                 ProgressView()
                 Text("正在拉取\(page.title(platform: platform))…")
-                    .font(.liziBody(size: LiziTokens.size13))
+                    .font(.liziHome(size: LiziTokens.size13))
                     .foregroundColor(LiziTokens.ink3)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -1714,7 +1714,7 @@ struct HomeView: View {
 
         private func emptyView(reason: String) -> some View {
             Text(reason)
-                .font(.liziBody(size: LiziTokens.size13))
+                .font(.liziHome(size: LiziTokens.size13))
                 .foregroundColor(LiziTokens.ink3)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -1727,13 +1727,13 @@ struct HomeView: View {
                     .font(.system(size: 20))
                     .foregroundColor(LiziTokens.accent)
                 Text(error)
-                    .font(.liziBody(size: LiziTokens.size13))
+                    .font(.liziHome(size: LiziTokens.size13))
                     .foregroundColor(LiziTokens.ink2)
                     .multilineTextAlignment(.center)
                 Button("重试") {
                     viewModel.loadRailPage(page, force: true)
                 }
-                .font(.liziBody(size: LiziTokens.size14, weight: .medium))
+                .font(.liziHome(size: LiziTokens.size14, weight: .medium))
                 .foregroundColor(.white)
                 .padding(.horizontal, 20)
                 .padding(.vertical, 8)

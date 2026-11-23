@@ -47,7 +47,7 @@ struct LocalMusicSectionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("本地音乐")
-                .font(.liziBody(size: 28, weight: .bold))
+                .font(.liziHome(size: 28, weight: .bold))
                 .foregroundColor(LiziTokens.ink)
 
             // 文件夹卡片：点开是文件列表，再点文件播放（模板 v2）。
@@ -58,10 +58,10 @@ struct LocalMusicSectionView: View {
                         .foregroundColor(.blue)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("本地音乐")
-                            .font(.liziBody(size: 16, weight: .semibold))
+                            .font(.liziHome(size: 16, weight: .semibold))
                             .foregroundColor(LiziTokens.ink)
                         Text(entries.isEmpty ? "空文件夹" : "\(entries.count) 首")
-                            .font(.liziBody(size: 12))
+                            .font(.liziHome(size: 12))
                             .foregroundColor(LiziTokens.ink2)
                     }
                     Spacer()
@@ -81,7 +81,7 @@ struct LocalMusicSectionView: View {
             if isExpanded {
                 if entries.isEmpty {
                     Text("还没有导入本地音频。在文件 App 里选音频文件，导入后出现在这里。")
-                        .font(.liziBody(size: 13))
+                        .font(.liziHome(size: 13))
                         .foregroundColor(LiziTokens.ink2)
                         .padding(.horizontal, 4)
                 } else {
@@ -113,7 +113,7 @@ struct LocalMusicSectionView: View {
                     Image(systemName: "square.and.arrow.down")
                         .font(.system(size: 16, weight: .semibold))
                     Text("导入本地音乐")
-                        .font(.liziBody(size: 15, weight: .semibold))
+                        .font(.liziHome(size: 15, weight: .semibold))
                 }
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
@@ -125,7 +125,7 @@ struct LocalMusicSectionView: View {
 
             if let statusLine {
                 Text(statusLine)
-                    .font(.liziBody(size: 12))
+                    .font(.liziHome(size: 12))
                     .foregroundColor(LiziTokens.ink2)
             }
         }
@@ -193,17 +193,17 @@ private struct LocalMusicRowView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(entry.title)
-                            .font(.liziBody(size: 15, weight: .medium))
+                            .font(.liziHome(size: 15, weight: .medium))
                             .foregroundColor(isPlaying ? .blue : LiziTokens.ink)
                             .lineLimit(1)
                         Text(entry.artists.isEmpty ? "未知歌手" : entry.artists.joined(separator: " / "))
-                            .font(.liziBody(size: 12))
+                            .font(.liziHome(size: 12))
                             .foregroundColor(LiziTokens.ink2)
                             .lineLimit(1)
                     }
                     Spacer()
                     Text(Self.durationText(entry.duration))
-                        .font(.liziBody(size: 12))
+                        .font(.liziHome(size: 12))
                         .foregroundColor(LiziTokens.ink2)
                 }
             }

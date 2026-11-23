@@ -776,20 +776,30 @@ final class QishuiService {
         throw QishuiError(code: "unsupported", message: "Qishui returned protected audio only; decryption is disabled", upstreamCode: nil)
     }
 
-    /// LRCLIB 兜底（第 11 轮）：元数据来自前端 srcLyric 传参，不再调一次
-    /// songDetail（lyrics() 内部已经查过详情；官方歌词为空时直接用传参查）。
-    private func lrclibFallback(req: HttpRequest) async -> (lyric: String, yrc: String)? {
-        await Lrclib.fetch(artist: req.string("artist"), track: req.string("s"),
-                           album: req.string("album"), duration: req.int("duration"))
-    }
-
-    /// lyrics：复用 song_detail 取 display_info.lyric_info；lyric_entity.content 的路径包内没找到——
-    /// 按 sidecars.md §4.5 的归一化层记录，取 lyrics.lyric_entity.content。
+    /// lyrics：复用 song_detail 取 display_info；lyric_info.lyric_entity.content
+    /// 是歌词原文（Folia 汽水只有桌面桥，Lizi 无桥；这就是等价的原生直读——
+    /// 包内没有独立歌词端点，歌词随详情回）。返回整块 display_info，
+    /// 调用方另取 lang_translations（翻译轨）。
     private func lyrics(id: String) async throws -> [String: Any] {
         let track = try await songDetail(id: id)
-        let display = (track["display_info"] as? [String: Any]) ?? [:]
-        guard let lyricInfo = display["lyric_info"] as? [String: Any] else { return [:] }
-        return lyricInfo
+        return (track["display_info"] as? [String: Any]) ?? [:]
+    }
+
+    /// 汽水翻译轨（Folia qishuiLyrics.ts 同款来源：lang_translations 的
+    /// zh-CN / ZH-HANS-CN，取首个可用项；type 为 krc 时转行级 LRC）。
+    /// display_info 与 lyric_info 两层都找（包内路径未钉死）。无翻译回 ""。
+    private func qishuiTranslationText(display: [String: Any]) -> String {
+        var all: [String: Any] = (display["lang_translations"] as? [String: Any]) ?? [:]
+        if let inner = (display["lyric_info"] as? [String: Any])?["lang_translations"] as? [String: Any] {
+            for (k, v) in inner where all[k] == nil { all[k] = v }
+        }
+        let entry = (all["zh-CN"] as? [String: Any])
+            ?? (all["ZH-HANS-CN"] as? [String: Any])
+            ?? all.values.compactMap({ $0 as? [String: Any] }).first
+        guard let entry else { return "" }
+        let text = scStr(entry, "content")
+        guard !text.isEmpty else { return "" }
+        return scStr(entry, "type") == "krc" ? krcToLrc(text) : text
     }
 
     private func feedModes() async throws -> [[String: Any]] {
@@ -1192,27 +1202,24 @@ final class QishuiService {
                                        "clipStartMs": 0, "quality": q, "reason": e.code, "error": e.message])
                 }
             case ["api", "qishui", "lyric"]:
+                // r55 Folia 歌词：songDetail 直读 + Folia 字段形；LRCLIB 兜底已删。
                 guard !req.string("id").isEmpty else { return .error(400, "缺少 id") }
                 do {
-                    let info = try await lyrics(id: req.string("id"))
+                    let display = try await lyrics(id: req.string("id"))
+                    let info = (display["lyric_info"] as? [String: Any]) ?? [:]
                     let content = scStr((info["lyric_entity"] as? [String: Any]) ?? [:], "content")
                     let isKrc = content.range(of: #"^\[\d+,\d+\]"#, options: [.regularExpression, .anchored]) != nil
                         || content.range(of: #"\n\[\d+,\d+\]"#, options: .regularExpression) != nil
                     let lrc = isKrc ? krcToLrc(content) : content
                     let yrc = isKrc ? krcToYrc(content) : ""
-                    if lrc.isEmpty && yrc.isEmpty, let fb = await lrclibFallback(req: req) {
-                        return .json(200, ["code": 200, "lyric": fb.lyric, "yrc": "", "tlyric": "",
-                                           "format": "lrc"])
-                    }
-                    return .json(200, ["code": 200, "lyric": lrc, "yrc": yrc, "tlyric": "",
-                                       "format": !yrc.isEmpty ? "yrc" : (!lrc.isEmpty ? "lrc" : "none")])
+                    return .json(200, ["code": 200, "mainText": lrc, "wordByWordText": yrc,
+                                       "translationText": qishuiTranslationText(display: display),
+                                       "romanizationText": "",
+                                       "isPureMusic": false, "source": "qishui"])
                 } catch let e as QishuiError {
-                    // 第 11 轮：官方抛错也试一次兜底；兜底失败回原来的 error 形状。
-                    if let fb = await lrclibFallback(req: req) {
-                        return .json(200, ["code": 200, "lyric": fb.lyric, "yrc": "", "tlyric": "",
-                                           "format": "lrc"])
-                    }
-                    return .json(200, ["code": 200, "lyric": "", "yrc": "", "tlyric": "", "format": "none",
+                    return .json(200, ["code": 200, "mainText": "", "wordByWordText": "",
+                                       "translationText": "", "romanizationText": "",
+                                       "isPureMusic": false, "source": "qishui",
                                        "error": e.message])
                 }
             case ["api", "qishui", "feed", "modes"]:

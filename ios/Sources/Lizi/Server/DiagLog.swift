@@ -41,6 +41,7 @@ final class DiagLog {
 
     private func loadPersisted() {
         loadBreadcrumb()
+        loadActivity()
         loadPlayStartByGen()
         let ud = UserDefaults.standard
         if let data = ud.data(forKey: PersistKey.logs),
@@ -184,6 +185,44 @@ final class DiagLog {
         persistBreadcrumb()
     }
 
+    // MARK: - r55 活动日志（UI/导航活动）
+
+    /// 崩在播放之前时面包屑是空的（r55 诊断：lastDeathStep=""）——活动日志
+    /// 是唯一的死亡线索。只记步骤/标题/平台，不记 token/直链/密码。
+    /// 与面包屑同款落盘：Application Support 下 lizi.activityLog.json
+    /// 原子写 + UserDefaults 镜像，cap 30 条，`ts 步骤` 同格式。
+    private var activityLog: [String] = []
+    private static let activityFileName = "lizi.activityLog.json"
+    private static func activityFileURL() -> URL? {
+        let fm = FileManager.default
+        guard let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent(activityFileName)
+    }
+    private func loadActivity() {
+        if let url = Self.activityFileURL(),
+           let data = try? Data(contentsOf: url),
+           let arr = try? JSONSerialization.jsonObject(with: data) as? [String] {
+            activityLog = Array(arr.suffix(30))
+            return
+        }
+        activityLog = UserDefaults.standard.stringArray(forKey: "lizi.activityLog") ?? []
+    }
+    private func persistActivity() {
+        if let url = Self.activityFileURL(),
+           let data = try? JSONSerialization.data(withJSONObject: activityLog) {
+            try? data.write(to: url, options: [.atomic])
+        }
+        UserDefaults.standard.set(activityLog, forKey: "lizi.activityLog")
+    }
+
+    func recordActivity(_ step: String) {
+        lock.lock(); defer { lock.unlock() }
+        activityLog.append("\(Int(Date().timeIntervalSince1970)) \(step)")
+        if activityLog.count > 30 { activityLog.removeFirst(activityLog.count - 30) }
+        persistActivity()
+    }
+
     // MARK: - r49 各代 play start 独立索引
 
     /// 各代 play start 时间戳（gen → 秒）：面包屑只有最近 30 条，快速
@@ -234,19 +273,40 @@ final class DiagLog {
     /// 见文件头注释：单独看不是闪退实锤，要和 lastDeathStep 一起读）。
     private(set) var previousRunClean: Bool = true
     /// 上次不干净退出时面包屑的最后一步（干净退出时保留上一次的快照）。
+    /// r55：面包屑空时回落到活动日志最后一步（见 markLaunched）。
     private(set) var lastDeathStep: String = ""
+    /// 上次不干净退出时活动日志的最后一步（全文；面包屑空时它是
+    /// lastDeathStep 的回落来源）。
+    private(set) var lastDeathActivity: String = ""
     /// 上次不干净退出的发现时间（启动时刻，秒）。
     private(set) var lastDeathAt: Double = 0
     /// 发现上次不干净退出时本进程的常驻内存（MB；-1 = 读不到，仅作参考，
     /// 判断是不是内存被杀的旁证，不是定论）。
+    /// r55：注意——这是**重起时新进程**的内存，不是死亡时内存（r55 诊断
+    /// 的 6MB 是刚启动的常驻内存，说明不了死亡时的内存压力）。
     private(set) var lastDeathMemoryMB: Int = -1
+    /// 重起时本进程的 bundle 版本（shortVersion + build；与死的那轮同版，
+    /// 除非中间升级过——r55 诊断里没有版本号字段，无法确认用户装的是哪版，
+    /// 从 r55 起死亡快照里补版本）。
+    private(set) var lastDeathVersion: String = ""
 
     private enum RunKey {
         static let hadRun = "lizi.runHadRun"
         static let cleanExit = "lizi.runCleanExit"
         static let lastDeathStep = "lizi.lastDeathStep"
+        static let lastDeathActivity = "lizi.lastDeathActivity"
         static let lastDeathAt = "lizi.lastDeathAt"
         static let lastDeathMemoryMB = "lizi.lastDeathMemoryMB"
+        static let lastDeathVersion = "lizi.lastDeathVersion"
+    }
+
+    /// 本进程 bundle 版本（shortVersion + build，如 "1.0(12)"；读不到回 ""）。
+    static func appVersion() -> String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? ""
+        let build = info?["CFBundleVersion"] as? String ?? ""
+        if short.isEmpty && build.isEmpty { return "" }
+        return build.isEmpty ? short : "\(short)(\(build))"
     }
 
     /// App 启动第一时间调（LiziNativeApp.init 首行）：读上次的干净退出旗标，
@@ -259,17 +319,26 @@ final class DiagLog {
         let wasClean = ud.bool(forKey: RunKey.cleanExit)
         if hadRun && !wasClean {
             previousRunClean = false
-            lastDeathStep = breadcrumbSteps.last ?? ""
+            // r55：死亡快照回落——面包屑最后一步 ?? 活动最后一步 ?? ""。
+            // r55 诊断的教训：崩在播放之前时面包屑是空的，lastDeathStep=""
+            // 什么都说明不了；活动日志（打开歌单/搜索/切页）是唯一的线索。
+            lastDeathActivity = activityLog.last ?? ""
+            lastDeathStep = breadcrumbSteps.last ?? lastDeathActivity
             lastDeathAt = Date().timeIntervalSince1970
             lastDeathMemoryMB = Self.memoryFootprintMB()
+            lastDeathVersion = Self.appVersion()
             ud.set(lastDeathStep, forKey: RunKey.lastDeathStep)
+            ud.set(lastDeathActivity, forKey: RunKey.lastDeathActivity)
             ud.set(lastDeathAt, forKey: RunKey.lastDeathAt)
             ud.set(lastDeathMemoryMB, forKey: RunKey.lastDeathMemoryMB)
+            ud.set(lastDeathVersion, forKey: RunKey.lastDeathVersion)
         } else {
             previousRunClean = true
             lastDeathStep = ud.string(forKey: RunKey.lastDeathStep) ?? ""
+            lastDeathActivity = ud.string(forKey: RunKey.lastDeathActivity) ?? ""
             lastDeathAt = ud.double(forKey: RunKey.lastDeathAt)
             lastDeathMemoryMB = ud.integer(forKey: RunKey.lastDeathMemoryMB)
+            lastDeathVersion = ud.string(forKey: RunKey.lastDeathVersion) ?? ""
         }
         ud.set(true, forKey: RunKey.hadRun)
         ud.set(false, forKey: RunKey.cleanExit)
@@ -296,10 +365,11 @@ final class DiagLog {
     // MARK: - r31 日志清空（设置 → 关于 → 诊断日志 → 展开后底部的「清空日志」）
 
     /// 把当前诊断日志全部清掉——内存里的 logs（100 条）/ requests（20 条）/
-    /// events（20 条）/ lastSearch / 播放面包屑 / 上次死亡快照 / 诊断 POST
-    /// 计数 + 落盘的 UserDefaults 四个键（lizi.diagLogs / lizi.diagRequests /
+    /// events（20 条）/ lastSearch / 播放面包屑 / 活动日志（r55）/ 上次死亡快照 /
+    /// 诊断 POST 计数 + 落盘的 UserDefaults 四个键（lizi.diagLogs / lizi.diagRequests /
     /// lizi.diagEvents / lizi.diagLastSearch）+ 面包屑 JSON 文件
-    /// （Application Support/lizi.playbackBreadcrumb.json）+ 面包屑与死亡
+    /// （Application Support/lizi.playbackBreadcrumb.json）+ 活动日志 JSON 文件
+    /// （Application Support/lizi.activityLog.json）+ 面包屑与死亡
     /// 快照的 UserDefaults 镜像。清完不留一条「已清空」记录（留了就不是
     /// 空的）；调用方（设置页）用 Notice 告诉用户「日志已清空」。
     /// 运行期旗标 hadRun/cleanExit 不动（markLaunched 的判断还靠它们），
@@ -311,23 +381,32 @@ final class DiagLog {
         events = []
         lastSearch = [:]
         breadcrumbSteps = []
+        activityLog = []
         playStartByGen = [:]
         diagLogReceived = 0
         previousRunClean = true
         lastDeathStep = ""
+        lastDeathActivity = ""
         lastDeathAt = 0
         lastDeathMemoryMB = -1
+        lastDeathVersion = ""
         let ud = UserDefaults.standard
         ud.removeObject(forKey: PersistKey.logs)
         ud.removeObject(forKey: PersistKey.requests)
         ud.removeObject(forKey: PersistKey.events)
         ud.removeObject(forKey: PersistKey.lastSearch)
         ud.removeObject(forKey: "lizi.playbackBreadcrumb")
+        ud.removeObject(forKey: "lizi.activityLog")
         ud.removeObject(forKey: Self.playStartByGenKey)
         ud.removeObject(forKey: RunKey.lastDeathStep)
+        ud.removeObject(forKey: RunKey.lastDeathActivity)
         ud.removeObject(forKey: RunKey.lastDeathAt)
         ud.removeObject(forKey: RunKey.lastDeathMemoryMB)
+        ud.removeObject(forKey: RunKey.lastDeathVersion)
         if let url = Self.breadcrumbFileURL() {
+            try? FileManager.default.removeItem(at: url)
+        }
+        if let url = Self.activityFileURL() {
             try? FileManager.default.removeItem(at: url)
         }
     }
@@ -348,6 +427,11 @@ final class DiagLog {
                 "previousRunClean": previousRunClean,
                 "lastDeathStep": lastDeathStep,
                 "lastDeathAt": lastDeathAt,
-                "lastDeathMemoryMB": lastDeathMemoryMB]
+                "lastDeathMemoryMB": lastDeathMemoryMB,
+                // r55：死亡快照回落 + 版本（见 markLaunched 注释）。
+                "lastDeathActivity": lastDeathActivity,
+                "lastDeathVersion": lastDeathVersion,
+                "activityLog": activityLog,
+                "appVersion": Self.appVersion()]
     }
 }

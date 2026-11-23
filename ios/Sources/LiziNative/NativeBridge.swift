@@ -729,82 +729,144 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
 // 直发音源，返回什么播什么。登录态本身还在（各平台登录流程、云盘
 // 读取照旧），只是不再拿它决定档位与腿的顺序。
 
-    // MARK: - 歌词（官方 → LRCLIB 兜底）
+    // MARK: - 歌词（r55 Folia 歌词：服务端回包统一 Folia 字段形
+    // {mainText, wordByWordText, translationText, romanizationText,
+    // isPureMusic, source}；本平台空时走跨平台自动匹配，顺序
+    // 网易 → QQ → 酷狗 → 汽水，10 秒总预算，超时回空，绝不阻塞播放；
+    // 酷我/Apple Music 无歌词源，不列入；波点按 Folia 注释不是歌词源，
+    // 不列入。纯音乐（isPureMusic）直接回空，不跑自动匹配。
+    // 缓存：DiskCache 歌词分支存新字段形 JSON（30 天）；读到旧字段形
+    // （无 mainText/wordByWordText）视为无缓存，删掉旧文件后重取。）
 
-    /// 取一首歌的歌词（完整结果，含 format）。官方接口（各平台 lyric 已内置
-    /// LRCLIB 兜底的照抄壳版；官方与兜底都空时这里再直调一次 Lrclib.fetch）；
-    /// YRC 优先。无词返回空 ParsedLyrics（调用方显示歌名，绝不用 ♪ 作假歌词）。
+    /// 取一首歌的歌词（完整结果，含 format）。缓存 → 本平台 → 跨平台
+    /// 自动匹配；仍为空回空 ParsedLyrics（调用方显示歌名，绝不用 ♪
+    /// 作假歌词）。YRC 优先，翻译/音译按行起点对齐（LyricsParser）。
     static func lyrics(for track: Track) async -> ParsedLyrics {
         let platform = track.platform
         let key = track.platformKey
         // r48-11：歌词磁盘缓存（30 天 TTL）——官方歌词原文落盘，二次直接读
-        // 本地解析，不再调官方接口；官方空时不写（LRCLIB 兜底结果不进缓存）。
+        // 本地解析，不再调官方接口；官方空时不写（自动匹配结果进缓存）。
         let lyricKey = DiskCache.lyricKey(platform: platform, id: key)
         var skipOfficialFetch = false
         if let cached = DiskCache.data(kind: .lyric, key: lyricKey),
-           let raw = try? JSONSerialization.jsonObject(with: cached) as? [String: String] {
-            let cachedParsed = LyricsParser.parse(lyric: raw["lyric"] ?? "", yrc: raw["yrc"] ?? "",
-                                                  tlyric: raw["tlyric"] ?? "", ytlrc: raw["ytlrc"] ?? "")
-            if !cachedParsed.lines.isEmpty { return cachedParsed }
-            // r48-11（自查补）：缓存的官方原文非空、但解析不出行（上游回了
-            // 损坏文本）时不直接回空——跳过官方重取（原文已在盘里，重取
-            // 还是同一份），直接走下面的 LRCLIB 兜底，与首次取数同款。
-            skipOfficialFetch = true
+           let raw = try? JSONSerialization.jsonObject(with: cached) as? [String: Any] {
+            if raw["mainText"] is String || raw["wordByWordText"] is String {
+                let cachedParsed = LyricsParser.parseFolia(
+                    mainText: raw["mainText"] as? String ?? "",
+                    wordByWordText: raw["wordByWordText"] as? String ?? "",
+                    translationText: raw["translationText"] as? String ?? "",
+                    romanizationText: raw["romanizationText"] as? String ?? "",
+                    isPureMusic: raw["isPureMusic"] as? Bool ?? false)
+                if !cachedParsed.lines.isEmpty || cachedParsed.isPureMusic { return cachedParsed }
+                // r48-11（自查补）：缓存的官方原文非空、但解析不出行（上游回了
+                // 损坏文本）时不直接回空——跳过官方重取（原文已在盘里，重取
+                // 还是同一份），直接走下面的跨平台自动匹配，与首次取数同款。
+                skipOfficialFetch = true
+            } else {
+                // 旧字段形缓存（lyric/yrc/tlyric/ytlrc，无 mainText）：
+                // 删文件后按无缓存走官方取词（旧文件会触发 skipOfficialFetch、
+                // 永远跳过官方重取，所以必须清掉）。
+                DiskCache.remove(kind: .lyric, key: lyricKey)
+            }
         }
+        var d: [String: Any]?
+        if !skipOfficialFetch {
+            d = await fetchPlatformLyrics(platform: platform, key: key, track: track)
+        }
+        if let d {
+            // 纯音乐直接回空，不跑自动匹配（无词可找，跑了只会浪费
+            // 10 秒甚至错配）；纯音乐标记也写盘。
+            if d["isPureMusic"] as? Bool == true {
+                if let data = try? JSONSerialization.data(withJSONObject: d) {
+                    DiskCache.store(data, kind: .lyric, key: lyricKey)
+                }
+                return ParsedLyrics(lines: [], format: "none", isPureMusic: true)
+            }
+            let parsed = LyricsParser.parseFolia(
+                mainText: d["mainText"] as? String ?? "",
+                wordByWordText: d["wordByWordText"] as? String ?? "",
+                translationText: d["translationText"] as? String ?? "",
+                romanizationText: d["romanizationText"] as? String ?? "")
+            // r48-11：官方回了内容才写盘（空结果不写，不缓存「没词」）。
+            if !(d["mainText"] as? String ?? "").isEmpty || !(d["wordByWordText"] as? String ?? "").isEmpty,
+               let data = try? JSONSerialization.data(withJSONObject: d) {
+                DiskCache.store(data, kind: .lyric, key: lyricKey)
+            }
+            if !parsed.lines.isEmpty { return parsed }
+        }
+        // 跨平台自动匹配（Folia autoMatchBestLyric 的 Lizi 版）：
+        // 本平台取词为空时，按顺序试其他平台；仍为空回空，不阻塞播放。
+        if let matched = await autoMatchLyrics(for: track, skipPlatform: platform) {
+            DiskCache.store(matched.rawData, kind: .lyric, key: lyricKey)
+            return matched.parsed
+        }
+        return ParsedLyrics(lines: [], format: "none")
+    }
+
+    /// 单平台取词：调本平台 /api/*/lyric，返回服务端解析后的字典
+    /// （Folia 字段形）；上游空/失败回 nil，不抛错。
+    /// 酷我用自己的歌词系统（PC lrcx + H5）；Apple Music 用自己的官方
+    /// 歌词（lyrics/syllable-lyrics + user token，TTML 原生解析）；
+    /// Spotify 无歌词源，直接回 nil。
+    private static func fetchPlatformLyrics(platform: String, key: String, track: Track) async -> [String: Any]? {
         let meta: [String: String] = ["s": track.title, "name": track.title,
                                       "artist": track.artist,
                                       "album": track.album,
                                       "duration": "\(track.durationMs / 1000)"]
-        var d: [String: Any]?
-        if skipOfficialFetch {
-            d = nil
-        } else {
         switch platform {
-        case "netease":
-            d = await call(path: "/api/lyric", query: ["id": key])
-        case "qq":
-            d = await call(path: "/api/qq/lyric", query: ["mid": key])
-        case "kuwo":
-            d = await call(path: "/api/kuwo/lyric",
-                           query: ["id": key].merging(meta) { a, _ in a })
-        case "qishui":
-            d = await call(path: "/api/qishui/lyric", query: ["id": key])
-        case "bodian":
-            d = await call(path: "/api/bodian/lyric", query: ["id": key])
+        case "netease": return await call(path: "/api/lyric", query: ["id": key])
+        case "qq": return await call(path: "/api/qq/lyric", query: ["mid": key])
+        case "qishui": return await call(path: "/api/qishui/lyric", query: ["id": key])
+        case "bodian": return await call(path: "/api/bodian/lyric", query: ["id": key])
+        case "kuwo": return await call(path: "/api/kuwo/lyric", query: ["id": key])
+        case "applemusic": return await call(path: "/api/applemusic/lyric", query: ["id": key])
         case "kugou":
             // 酷狗歌词：hash + 歌名/歌手/专辑/时长（秒），服务端先走
-            // Folia 两步（search_lyric → download），再走 LRCLIB 兜底。
-            d = await call(path: "/api/kugou/lyric",
-                           query: ["hash": key].merging(meta) { a, _ in a })
-        case "applemusic":
-            d = await call(path: "/api/applemusic/lyric",
-                           query: meta.merging(["id": key]) { a, _ in a })
-        default:
-            d = nil
+            // Folia 两步（search_lyric → download），KRC 内嵌翻译/音译轨。
+            return await call(path: "/api/kugou/lyric",
+                              query: ["hash": key].merging(meta) { a, _ in a })
+        default: return nil
         }
-        }
-        let lyric = (d?["lyric"] as? String) ?? ""
-        let yrc = (d?["yrc"] as? String) ?? ""
-        let tlyric = (d?["tlyric"] as? String) ?? ""
-        let ytlrc = (d?["ytlrc"] as? String) ?? ""
-        var parsed = LyricsParser.parse(lyric: lyric, yrc: yrc, tlyric: tlyric, ytlrc: ytlrc)
-        // r48-11：官方回了内容才写盘（空结果不写，不缓存「没词」）。
-        if !(lyric.isEmpty && yrc.isEmpty && tlyric.isEmpty && ytlrc.isEmpty),
-           let data = try? JSONSerialization.data(withJSONObject: ["lyric": lyric, "yrc": yrc,
-                                                                   "tlyric": tlyric, "ytlrc": ytlrc]) {
-            DiskCache.store(data, kind: .lyric, key: lyricKey)
-        }
-        if parsed.lines.isEmpty,
-           let fb = await Lrclib.fetch(artist: track.artist, track: track.title,
-                                       album: track.album, duration: track.durationMs / 1000) {
-            parsed = LyricsParser.parse(lyric: fb.lyric, yrc: fb.yrc)
-        }
-        return parsed
     }
 
-    /// 歌词行（P0 签名的兼容包装；完整结果用 lyrics(for:)）。
-    static func lyricLines(for track: Track) async -> [LyricLine] {
-        (await lyrics(for: track)).lines
+    /// 跨平台自动匹配：按顺序在其他平台搜歌（取首个匹配）再取词；
+    /// 每平台先搜后取，搜不到跳过，不编数据；10 秒总预算，超时回 nil。
+    private static func autoMatchLyrics(for track: Track, skipPlatform: String) async -> (rawData: Data, parsed: ParsedLyrics)? {
+        let order = ["netease", "qq", "kugou", "qishui"].filter { $0 != skipPlatform }
+        let query = "\(track.title) \(track.artist)".trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return nil }
+        return await withTaskGroup(of: (rawData: Data, parsed: ParsedLyrics)?.self) { group in
+            group.addTask {
+                for platform in order {
+                    guard let hit = await search(platform: platform, query: query, limit: 1).tracks.first else { continue }
+                    let key = hit.platformKey
+                    guard !key.isEmpty else { continue }
+                    guard let d = await fetchPlatformLyrics(platform: platform, key: key, track: hit) else { continue }
+                    if d["isPureMusic"] as? Bool == true { continue }
+                    let parsed = LyricsParser.parseFolia(
+                        mainText: d["mainText"] as? String ?? "",
+                        wordByWordText: d["wordByWordText"] as? String ?? "",
+                        translationText: d["translationText"] as? String ?? "",
+                        romanizationText: d["romanizationText"] as? String ?? "")
+                    if !parsed.lines.isEmpty,
+                       let data = try? JSONSerialization.data(withJSONObject: d) {
+                        return (data, parsed)
+                    }
+                }
+                return nil
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                return nil
+            }
+            // 先完成的孩子说了算（超时任务先回 nil 就直接回空，
+            // 不等搜词任务跑完；搜词先命中就取消超时任务）。
+            for await value in group {
+                group.cancelAll()
+                return value
+            }
+            return nil
+        }
     }
 
     // MARK: - 评论区（r27，只读）

@@ -4,6 +4,7 @@ import Compression
 /// 酷我音乐：services/kuwo-api/start.mjs 的 1:1 Swift 移植（零依赖边车）。
 /// www 接口（搜索/歌单/推荐/榜单/电台）+ mobi convert_url2（DES 变体加密）+
 /// PC 歌词（lrcx 逐字，zlib 解压后 XOR + gb18030）+ 粘贴 Cookie 登录（无扫码）。
+/// r55 删后按用户要求恢复（酷我用自己的歌词系统），回包走 Folia 字段形。
 
 // MARK: - DES 变体（start.mjs 的 q 参数加密，密钥 ylzsxkwm）
 
@@ -425,15 +426,15 @@ final class KuwoService {
         return Data(out).base64EncodedString()
     }
 
-    private static let lrcxLineRe = try! NSRegularExpression(pattern: #"^\[(\d{2}):(\d{2})(?:[.:](\d{1,3}))?\](.*)$"#)
-    private static let lrcxCharRe = try! NSRegularExpression(pattern: #"<(\d+),(\d+)>([^<]*)"#)
-    private static let kuwoTagRe = try! NSRegularExpression(pattern: #"\[kuwo:([0-7]+)\]"#)
-    private static let kuwoPairRe = try! NSRegularExpression(pattern: #"<(-?\d+),(-?\d+)>"#)
+    private static let lrcxLineRe = liziRegex(#"^\[(\d{2}):(\d{2})(?:[.:](\d{1,3}))?\](.*)$"#)
+    private static let lrcxCharRe = liziRegex(#"<(\d+),(\d+)>([^<]*)"#)
+    private static let kuwoTagRe = liziRegex(#"\[kuwo:([0-7]+)\]"#)
+    private static let kuwoPairRe = liziRegex(#"<(-?\d+),(-?\d+)>"#)
 
     /// lrcx 的 <左,右> 是逐字时间：[kuwo:NNN] 给出两个系数（八进制），
     /// 左/右是「起点 + 时长」的混合编码，解回 <相对行首ms,字时长ms>。
     static func decodeWordTiming(_ content: String) -> String? {
-        guard let tagMatch = kuwoTagRe.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
+        guard let tagMatch = kuwoTagRe?.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
               tagMatch.range(at: 1).location != NSNotFound else { return nil }
         guard let tagRange = Range(tagMatch.range(at: 1), in: content) else { return nil }
         let digits = String(content[tagRange])
@@ -445,7 +446,7 @@ final class KuwoService {
         let ns = NSRange(result.startIndex..., in: result)
         var out = ""
         var lastEnd = result.startIndex
-        for m in kuwoPairRe.matches(in: result, range: ns) {
+        for m in kuwoPairRe?.matches(in: result, range: ns) ?? [] {
             guard let range = Range(m.range, in: result),
                   let r1 = Range(m.range(at: 1), in: result),
                   let r2 = Range(m.range(at: 2), in: result) else { continue }
@@ -468,7 +469,7 @@ final class KuwoService {
         var yrcOut: [String] = []
         var lastTime = ""
         for line in decoded.components(separatedBy: .newlines) {
-            guard let m = lrcxLineRe.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+            guard let m = lrcxLineRe?.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
                   let r1 = Range(m.range(at: 1), in: line),
                   let r2 = Range(m.range(at: 2), in: line),
                   let r4 = Range(m.range(at: 4), in: line) else {
@@ -491,7 +492,7 @@ final class KuwoService {
             if !isTrans { lastTime = time }
             if isTrans { continue }
             var chars: [(Int, Int, String)] = []
-            for cm in lrcxCharRe.matches(in: content, range: NSRange(content.startIndex..., in: content)) {
+            for cm in lrcxCharRe?.matches(in: content, range: NSRange(content.startIndex..., in: content)) ?? [] {
                 guard let c1 = Range(cm.range(at: 1), in: content),
                       let c2 = Range(cm.range(at: 2), in: content),
                       let c3 = Range(cm.range(at: 3), in: content) else { continue }
@@ -516,7 +517,9 @@ final class KuwoService {
     }
 
     private func lyricPc(_ id: String) async throws -> (lyric: String, yrc: String) {
-        let url = URL(string: "https://newlyric.kuwo.cn/newlyric.lrc?" + Self.buildLyricParams(id, lrcx: true))!
+        guard let url = URL(string: "https://newlyric.kuwo.cn/newlyric.lrc?" + Self.buildLyricParams(id, lrcx: true)) else {
+            throw NSError(domain: "Kuwo", code: -1, userInfo: [NSLocalizedDescriptionKey: "歌词地址构造失败"])
+        }
         let (data, resp) = try await Upstream.fetch(url, headers: ["User-Agent": Self.uaWeb], timeout: 20)
         guard resp.statusCode >= 200 && resp.statusCode < 300 else {
             throw NSError(domain: "Kuwo", code: -1, userInfo: [NSLocalizedDescriptionKey: "歌词 HTTP \(resp.statusCode)"])
@@ -551,13 +554,15 @@ final class KuwoService {
         // 第 12 轮：http → https（m.kuwo.cn 实测 https 200，与 http 等价）。
         // plist 里被忽略的 NSAllowsArbitraryLoads 删掉后，URLSession 拉 http
         // 会被 ATS -1022 拦掉；这条是歌词接口，顺手一起升了。
-        let url = URL(string: "https://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId=" + scURLEncode(id))!
+        guard let url = URL(string: "https://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId=" + scURLEncode(id)) else {
+            throw NSError(domain: "Kuwo", code: -1, userInfo: [NSLocalizedDescriptionKey: "歌词地址构造失败"])
+        }
         let (data, _) = try await Upstream.fetch(url, headers: ["User-Agent": Self.uaMobile, "Referer": "https://m.kuwo.cn/"], timeout: 15)
         let text = String(data: data, encoding: .utf8) ?? ""
         guard let j = scParseJSON(text) as? [String: Any],
               let list = scDict(j, "data")["lrclist"] as? [[String: Any]], !list.isEmpty else { return "" }
         return list.filter { $0["lineLyric"] != nil }.map {
-            "[\(Self.secToLrc(($0["time"] as? NSNumber)?.doubleValue ?? 0))]\(String(describing: $0["lineLyric"]!))"
+            "[\(Self.secToLrc(($0["time"] as? NSNumber)?.doubleValue ?? 0))]\(String(describing: ($0["lineLyric"] ?? "")))"
         }.joined(separator: "\n")
     }
 
@@ -939,33 +944,33 @@ final class KuwoService {
         let id = [req.string("id"), req.string("mid")].first(where: { !$0.isEmpty }) ?? ""
         let idTrim = id.trimmingCharacters(in: .whitespaces)
         guard !idTrim.isEmpty else { return .json(400, ["code": 400, "error": "id required"]) }
+        let empty: [String: Any] = ["code": 200, "mainText": "", "wordByWordText": "",
+                                    "translationText": "", "romanizationText": "",
+                                    "isPureMusic": false, "source": "kuwo"]
         var parsed = (lyric: "", yrc: "")
         var source = "kw-pc"
-        var error: String? = nil
         do {
             parsed = try await lyricPc(idTrim)
-        } catch let e { error = e.localizedDescription }
+        } catch {
+            // PC 路失败，继续试 H5；两路都空才回空 Folia 形，不编假词。
+        }
         if parsed.lyric.isEmpty && parsed.yrc.isEmpty {
             source = "kw-h5"
             do {
                 parsed = (lyric: try await lyricH5(idTrim), yrc: "")
-            } catch let e { if error == nil { error = e.localizedDescription } }
-        }
-        let hasLyric = !parsed.lyric.isEmpty || !parsed.yrc.isEmpty
-        if !hasLyric {
-            // 第 11 轮：PC + H5 两路都空，走 LRCLIB 兜底；元数据来自前端
-            // srcLyric 传参（酷我没有现成的单曲详情接口，不新写）。
-            // 兜底命中时 source 记 lrclib，error 清掉；兜底也空时回原来的
-            // source/error，原样不变。
-            if let fb = await Lrclib.fetch(artist: req.string("artist"), track: req.string("s"),
-                                           album: req.string("album"), duration: req.int("duration")) {
-                return .json(200, ["code": 200, "lyric": fb.lyric, "yrc": fb.yrc,
-                                   "format": "lrc", "source": "lrclib", "error": NSNull()])
+            } catch {
+                // H5 也失败，回空 Folia 形。
             }
         }
-        return .json(200, ["code": 200, "lyric": parsed.lyric, "yrc": parsed.yrc,
-                           "format": !parsed.yrc.isEmpty ? "yrc" : (!parsed.lyric.isEmpty ? "lrc" : "none"),
-                           "source": source,
-                           "error": hasLyric ? NSNull() as Any : (error ?? "酷我没给这首歌歌词（或上游限流）")])
+        guard !parsed.lyric.isEmpty || !parsed.yrc.isEmpty else { return .json(200, empty) }
+        // 酷我自己的歌词系统：LRCX 逐字进 wordByWordText（YRC）；翻译/音译
+        // 在 LRC 行里以内联形式出现（convertLrcx 原样），不另拆字段、不编数据。
+        return .json(200, ["code": 200,
+                           "mainText": parsed.lyric,
+                           "wordByWordText": parsed.yrc,
+                           "translationText": "",
+                           "romanizationText": "",
+                           "isPureMusic": false,
+                           "source": source])
     }
 }

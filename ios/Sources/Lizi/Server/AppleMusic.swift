@@ -19,8 +19,10 @@
 //   推荐  Apple 排行榜 RSS（rss.applemarketingtools.com，公开；TW 店面
 //         most-played songs/playlists；apple-music/top-songs 旧路径已 404）
 //   歌单  RSS 热门歌单 + iTunes lookup（entity=song）取曲目
-//   歌词  LRCLIB 兜底（第 20 件开关统一 gate；Apple 没有公开歌词接口，
-//         Folia 走 TTML——要 MusicKit 授权，本轮没有）
+//   歌词  官方 lyrics/syllable-lyrics 端 + Music-User-Token（r55 接力：
+//         只带开发者 token 调两端都 40012，缺的就是 user token；
+//         TTML 用 Foundation.XMLParser 原生解析，不抄 Folia 代码；
+//         没 user token / 端口不通时静默回空，不编假数据、不留 LRCLIB）
 //   播放  30 秒试听（previewUrl，128k AAC），明确标 试听，不假装整首
 // 开发者 token 入口留在设置里（本地保存、绝不上传）：有 token 时搜索走
 // api.music.apple.com catalog（代码路径已实现，replica 桩验通）；整首播放
@@ -136,7 +138,7 @@ final class AppleMusicService {
             switch part {
             case "", "health":
                 return .json(200, ["code": 200, "ok": true, "audio": true, "login": "token", "preview": true,
-                                   "note": "公开 API：搜索/推荐/歌单/歌词；播放是 30 秒试听；整首要开发者 token + 原生 MusicKit 播放器"])
+                                   "note": "公开 API：搜索/推荐/歌单；播放是 30 秒试听；整首要开发者 token + 原生 MusicKit 播放器；歌词：官方 lyrics/syllable-lyrics + user token（r55 接力）"])
             case "status", "login/status":
                 return .json(200, await statusBody())
             case "login/token":
@@ -571,16 +573,344 @@ final class AppleMusicService {
                            "error": "这首歌没有试听地址（Apple Music 无公开整首流）"])
     }
 
+    // MARK: - 歌词（r55 接力：Apple Music 自己的官方歌词路线）
+    //
+    // 端点（未公开，网页播放器内部用；官方文档无 lyrics 端点）：
+    //   GET /v1/catalog/tw/songs/{id}/lyrics（行级 TTML）
+    //   GET /v1/catalog/tw/songs/{id}/syllable-lyrics（逐字 TTML）
+    // VM 实测（2026-11-23，网页 token，晴天 tw 535824738）：
+    //   - 只带开发者 token → 两端都 400 Insufficient Permissions
+    //     (code 40012)；对照组 catalog 搜索 200，token 本身有效；
+    //     40012 原文是缺权限凭证，多方资料一致指向 Music-User-Token。
+    //   - ?extend=lyrics 只回 hasLyrics/hasTimeSyncedLyrics 两个布尔旗标，不给词。
+    //   - 去掉 Origin → 401（网页 token 必须带 Origin，r33 已知）。
+    //   - amp-api 同路径 → 404（无此资源）。
+    // 所以：没 user token 不发请求直接回空（NativeBridge 走跨平台自动匹配）；
+    // 有 user token 时双 token 调。真机验证（待用户设备，见任务书）：
+    // 带 user token 调 535824738，200 且 data[0].attributes.ttml 非空 →
+    // 路线成立；仍 40012 → 网页 token scope 不足，此路死（静默回空）。
+    // TTML 解析只学流程（Folia 用 @applemusic-like-lyrics/ttml 的
+    // TTMLParser 读行/词时间与 timingMode；这里用 Foundation.XMLParser
+    // 原生重写，不引第三方库，不抄 Folia 代码）。
+    // 翻译/音译：回包 attributes.ttmlLocalizations（VM 未验证形状，
+    // 需真机拿到真 TTML 后核对）——按 itunes:key 与主行对齐；认不出的
+    // 形状静默留空，不编数据。
     private func lyric(_ req: HttpRequest) async throws -> HttpResponse {
-        // Apple 没有公开歌词接口（Folia 走 MusicKit TTML，要授权）；直接走 LRCLIB，
-        // 开关在 Lrclib.fetch 里统一 gate（第 20 件）。
-        let artist = req.string("artist")
-        let track = [req.string("s"), req.string("name")].first(where: { !$0.isEmpty }) ?? ""
-        let album = req.string("album")
-        let dur = req.int("duration")
-        if let hit = await Lrclib.fetch(artist: artist, track: track, album: album, duration: dur) {
-            return .json(200, ["code": 200, "lyric": hit.lyric, "yrc": hit.yrc, "format": "lrc", "source": "lrclib"])
+        var id = [req.string("id"), req.string("mid")].first(where: { !$0.isEmpty }) ?? ""
+        if id.hasPrefix("am-") { id = String(id.dropFirst(3)) }
+        guard !id.isEmpty else {
+            return .json(400, ["code": 400, "error": "id required"])
         }
-        return .json(200, ["code": 200, "lyric": "", "yrc": "", "format": "none"])
+        let empty: [String: Any] = ["code": 200, "mainText": "", "wordByWordText": "",
+                                    "translationText": "", "romanizationText": "",
+                                    "isPureMusic": false, "source": "applemusic"]
+        // 没 user token：官方 lyrics 端缺 Music-User-Token 必 40012，
+        // 不发请求直接回空。
+        guard !userToken.isEmpty else { return .json(200, empty) }
+        let token = await catalogToken()
+        guard !token.isEmpty else { return .json(200, empty) }
+        // 纯音乐启发式：song detail 的 hasLyrics 与 hasTimeSyncedLyrics
+        // 都 false → 纯音乐（TTML 本身无纯音乐标记；detail 查不到不阻塞，
+        // 继续走 lyrics 端）。
+        if await appleMusicIsPureMusic(id: id, token: token) == true {
+            var d = empty
+            d["isPureMusic"] = true
+            return .json(200, d)
+        }
+        guard let (ttml, locs) = await fetchAppleTtml(id: id, token: token) else {
+            return .json(200, empty)
+        }
+        let folia = Self.ttmlToFolia(ttml: ttml, localizations: locs)
+        let main = folia["mainText"] as? String ?? ""
+        let yrc = folia["wordByWordText"] as? String ?? ""
+        guard !main.isEmpty || !yrc.isEmpty else { return .json(200, empty) }
+        var d = folia
+        d["code"] = 200
+        d["source"] = "applemusic"
+        return .json(200, d)
+    }
+
+    /// 纯音乐启发式：`songs/{id}?extend=lyrics` 的 hasLyrics 与
+    /// hasTimeSyncedLyrics 都 false → 纯音乐；任一旗标缺失/请求失败
+    /// 回 nil（未知，继续走 lyrics 端，不阻塞）。
+    private func appleMusicIsPureMusic(id: String, token: String) async -> Bool? {
+        guard let url = URL(string: "https://api.music.apple.com/v1/catalog/tw/songs/\(scURLEncode(id))?extend=lyrics"),
+              let (data, resp) = try? await Upstream.fetch(url, headers: ["Authorization": "Bearer \(token)",
+                                                                          "Music-User-Token": userToken,
+                                                                          "Origin": "https://music.apple.com"], timeout: 10),
+              resp.statusCode == 200,
+              let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let list = j["data"] as? [[String: Any]],
+              let a = list.first?["attributes"] as? [String: Any],
+              let has = a["hasLyrics"] as? Bool,
+              let hasSync = a["hasTimeSyncedLyrics"] as? Bool else { return nil }
+        return !has && !hasSync
+    }
+
+    /// 逐字版优先（Lizi 舞台要 karaoke 逐字）；没有逐字数据时回落行级；
+    /// 官方 host 两路都不通时最后试 amp-api（网页播放器私 host，VM
+    //  测过 404，纯属兜底）。任一端 200 且 ttml 非空即回；全灭回 nil。
+    private func fetchAppleTtml(id: String, token: String) async -> (ttml: String, localizations: Any?)? {
+        let headers = ["Authorization": "Bearer \(token)",
+                       "Music-User-Token": userToken,
+                       "Origin": "https://music.apple.com"]
+        let attempts: [(host: String, kind: String, timeout: TimeInterval)] = [
+            ("api.music.apple.com", "syllable-lyrics", 10),
+            ("api.music.apple.com", "lyrics", 10),
+            ("amp-api.music.apple.com", "lyrics", 8),
+        ]
+        for a in attempts {
+            guard let url = URL(string: "https://\(a.host)/v1/catalog/tw/songs/\(scURLEncode(id))/\(a.kind)"),
+                  let (data, resp) = try? await Upstream.fetch(url, headers: headers, timeout: a.timeout),
+                  resp.statusCode == 200,
+                  let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let list = j["data"] as? [[String: Any]],
+                  let first = list.first,
+                  let attrs = first["attributes"] as? [String: Any],
+                  let ttml = attrs["ttml"] as? String,
+                  !ttml.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            return (ttml, attrs["ttmlLocalizations"])
+        }
+        return nil
+    }
+
+    // MARK: - TTML → Folia 字段形
+
+    /// TTML 一行：行起点/终点（ms）、itunes:key、文本片段（词带时间，
+    /// 普通文本不带）。
+    private struct AppleTtmlLine {
+        struct Fragment {
+            var text: String
+            var startMs: Int?
+            var durMs: Int?
+        }
+        var startMs: Int
+        var endMs: Int
+        var key: String
+        var fragments: [Fragment]
+        var text: String { fragments.map { $0.text }.joined() }
+        var words: [(startMs: Int, durMs: Int, text: String)] {
+            fragments.compactMap { f in
+                guard let s = f.startMs, let d = f.durMs, !f.text.isEmpty else { return nil }
+                return (s, d, f.text)
+            }
+        }
+    }
+
+    /// TTML 解析器（Foundation.XMLParser；只认 <tt>/<p>/<span>/<br/>，
+    /// 其余元素跳过；解析失败回空行，不抛错）。
+    private final class AppleTtmlParser: NSObject, XMLParserDelegate {
+        var timingMode = ""
+        var lines: [AppleTtmlLine] = []
+        private var curLine: AppleTtmlLine?
+        private var curFragments: [AppleTtmlLine.Fragment] = []
+        private var curPlain = ""
+        private var curWord: AppleTtmlWord?
+
+        private final class AppleTtmlWord {
+            var startMs: Int?
+            var endMs: Int?
+            var text = ""
+        }
+
+        func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
+            switch elementName {
+            case "tt":
+                timingMode = attributeDict["itunes:timing"] ?? ""
+            case "p":
+                flushPlain()
+                flushWord()
+                curLine = AppleTtmlLine(startMs: Self.ttmlMs(attributeDict["begin"]) ?? 0,
+                                       endMs: Self.ttmlMs(attributeDict["end"]) ?? 0,
+                                       key: attributeDict["itunes:key"] ?? "",
+                                       fragments: [])
+                curFragments = []
+            case "span":
+                guard curLine != nil else { return }
+                flushPlain()
+                let w = AppleTtmlWord()
+                w.startMs = Self.ttmlMs(attributeDict["begin"])
+                w.endMs = Self.ttmlMs(attributeDict["end"])
+                curWord = w
+            case "br":
+                // 行内换行按空格处理（LRC 单行）。
+                if let w = curWord { w.text += " " } else { curPlain += " " }
+            default:
+                break
+            }
+        }
+
+        func parser(_ parser: XMLParser, foundCharacters string: String) {
+            guard curLine != nil else { return }
+            if let w = curWord { w.text += string } else { curPlain += string }
+        }
+
+        func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+            switch elementName {
+            case "span":
+                flushWord()
+            case "p":
+                flushPlain()
+                flushWord()
+                if var line = curLine {
+                    line.fragments = curFragments
+                    lines.append(line)
+                }
+                curLine = nil
+                curFragments = []
+            default:
+                break
+            }
+        }
+
+        private func flushPlain() {
+            guard !curPlain.isEmpty else { return }
+            curFragments.append(AppleTtmlLine.Fragment(text: curPlain, startMs: nil, durMs: nil))
+            curPlain = ""
+        }
+
+        private func flushWord() {
+            guard let w = curWord else { return }
+            curWord = nil
+            guard !w.text.isEmpty else { return }
+            if let s = w.startMs {
+                let e = w.endMs ?? curLine?.endMs ?? s
+                curFragments.append(AppleTtmlLine.Fragment(text: w.text, startMs: s, durMs: max(0, e - s)))
+            } else {
+                // 词没给时间：当普通文本（行级 TTML 的 span 同款处理）。
+                curFragments.append(AppleTtmlLine.Fragment(text: w.text, startMs: nil, durMs: nil))
+            }
+        }
+
+        /// TTML 时间 → ms："mm:ss.mmm" / "hh:mm:ss.mmm" / "ss.mmm" /
+        /// "ss"；另容忍末尾的 "s"/"ms" 单位。解析不上回 nil。
+        static func ttmlMs(_ s: String?) -> Int? {
+            guard var t = s?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
+            var scale = 1000.0
+            if t.hasSuffix("ms") { scale = 1.0; t = String(t.dropLast(2)) }
+            else if t.hasSuffix("s") { scale = 1000.0; t = String(t.dropLast(1)) }
+            let parts = t.split(separator: ":")
+            guard !parts.isEmpty else { return nil }
+            var secs = 0.0
+            for part in parts {
+                guard let v = Double(part) else { return nil }
+                secs = secs * 60 + v
+            }
+            return Int((secs * scale).rounded())
+        }
+    }
+
+    /// TTML 文本 → 解析出的行（BOM 先清；解析失败回空）。
+    private static func parseTtmlLines(_ ttml: String) -> [AppleTtmlLine] {
+        let clean = ttml.replacingOccurrences(of: "\u{FEFF}", with: "")
+        guard let data = clean.data(using: .utf8), !data.isEmpty else { return [] }
+        let parser = AppleTtmlParser()
+        let xml = XMLParser(data: data)
+        xml.delegate = parser
+        guard xml.parse() else { return [] }
+        return parser.lines
+    }
+
+    /// TTML → Folia 字段形。空文本行跳过（客户端 LyricsParser 本来
+    /// 也跳空行；跳过能让「有无词」的判断诚实——全空行的 TTML 按无词处理）。
+    /// wordByWordText 只在真有词级时间戳时生成（与 QQ/Bodian 惯例一致）。
+    private static func ttmlToFolia(ttml: String, localizations: Any?) -> [String: Any] {
+        let lines = parseTtmlLines(ttml).filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let mainText = lines.map { lrcLine($0.startMs, $0.text) }.joined(separator: "\n")
+        let wordByWordText = lines.filter { !$0.words.isEmpty }.map { line -> String in
+            let lineEnd: Int
+            if line.endMs > line.startMs {
+                lineEnd = line.endMs
+            } else if let last = line.words.last {
+                lineEnd = last.startMs + last.durMs
+            } else {
+                lineEnd = line.startMs + 1000
+            }
+            let body = line.words.map { "(\($0.startMs),\($0.durMs),0)\($0.text)" }.joined()
+            return "[\(line.startMs),\(max(0, lineEnd - line.startMs))]\(body)"
+        }.joined(separator: "\n")
+        var translationText = ""
+        var romanizationText = ""
+        // ttmlLocalizations 的形状 VM 未验证（真机拿到真 TTML 后核对）：
+        // 预期是 {locale: TTML字符串}（如 "zh-Hans" 翻译、"zh-Latn" 音译），
+        // 兼容字符串（单份当翻译）与数组。按 itunes:key 对齐主行，取不到
+        // key 时按行序号对齐；认不出的形状静默留空，不编数据。
+        for (locKey, locTtml) in localizationDocs(localizations) {
+            let built = localizationLrc(mainLines: lines, locTtml: locTtml)
+            guard !built.isEmpty else { continue }
+            if locKey.lowercased().contains("latn") {
+                if romanizationText.isEmpty { romanizationText = built }
+            } else if translationText.isEmpty {
+                translationText = built
+            }
+        }
+        return ["mainText": mainText, "wordByWordText": wordByWordText,
+                "translationText": translationText, "romanizationText": romanizationText,
+                "isPureMusic": false, "source": "applemusic"]
+    }
+
+    /// ttmlLocalizations → [(locale key, TTML 文本)]（dict / 字符串 /
+    /// 数组三种形状都认；值里嵌 {ttml: ...} 也认）。
+    private static func localizationDocs(_ localizations: Any?) -> [(key: String, ttml: String)] {
+        guard let locs = localizations else { return [] }
+        if let s = locs as? String, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return [("", s)]
+        }
+        if let dict = locs as? [String: Any] {
+            var out: [(key: String, ttml: String)] = []
+            for k in dict.keys.sorted() {
+                let v = dict[k]
+                if let s = v as? String, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    out.append((k, s))
+                } else if let d = v as? [String: Any], let s = d["ttml"] as? String,
+                          !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    out.append((k, s))
+                }
+            }
+            return out
+        }
+        if let arr = locs as? [Any] {
+            var out: [(key: String, ttml: String)] = []
+            for v in arr {
+                if let s = v as? String, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    out.append(("", s))
+                } else if let d = v as? [String: Any], let s = d["ttml"] as? String,
+                          !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    out.append((d["language"] as? String ?? d["locale"] as? String ?? "", s))
+                }
+            }
+            return out
+        }
+        return []
+    }
+
+    /// 本地化 TTML → 行级 LRC（时间戳取主行，按 itunes:key 对齐，
+    /// 取不到 key 时按行序号对齐）。
+    private static func localizationLrc(mainLines: [AppleTtmlLine], locTtml: String) -> String {
+        let locLines = parseTtmlLines(locTtml).filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !locLines.isEmpty else { return "" }
+        var byKey: [String: AppleTtmlLine] = [:]
+        for l in locLines where !l.key.isEmpty { byKey[l.key] = l }
+        var out: [String] = []
+        for (i, m) in mainLines.enumerated() {
+            let loc: AppleTtmlLine?
+            if !m.key.isEmpty, let hit = byKey[m.key] {
+                loc = hit
+            } else if i < locLines.count {
+                loc = locLines[i]
+            } else {
+                loc = nil
+            }
+            guard let t = loc?.text.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { continue }
+            out.append(lrcLine(m.startMs, t))
+        }
+        return out.joined(separator: "\n")
+    }
+
+    /// LRC 行：`[mm:ss.xx]行文本`（与 QQ qrcToLrc 同款格式）。
+    private static func lrcLine(_ startMs: Int, _ text: String) -> String {
+        let mm = startMs / 60000
+        let ss = Double(startMs % 60000) / 1000.0
+        return "[\(String(format: "%02d:%05.2f", mm, ss))]\(text)"
     }
 }

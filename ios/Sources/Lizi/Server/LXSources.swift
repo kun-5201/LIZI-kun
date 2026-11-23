@@ -59,7 +59,9 @@ enum LXSourceStore {
     static let maxScriptBytes = 1_048_576
 
     static var directory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        // r55：.first! 改回落（见 LocalFiles.directory 同款）。
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
         return base.appendingPathComponent("lx-sources", isDirectory: true)
     }
 

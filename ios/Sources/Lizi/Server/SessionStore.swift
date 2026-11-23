@@ -17,7 +17,8 @@ final class SessionStore {
     private var cookies: [String: String] = [:]
 
     private init() {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
         dir = base.appendingPathComponent("lizi")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         lock.lock()

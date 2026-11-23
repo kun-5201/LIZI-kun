@@ -69,6 +69,8 @@ final class AppNavigation: ObservableObject {
     @Published private(set) var sessionStageFormId: String? = nil
 
     func show(_ view: AppView) {
+        // r55：活动日志（死亡快照回落用；目标页截断 120 字）。
+        DiagLog.shared.recordActivity("nav \(String(String(describing: view).prefix(120)))")
         // r36-7：回首页 = 本次播放器会话结束，会话级舞台选择清掉；
         // 所有回首页的路（舞台页返回、播放页返回、详情页返回栏……）都走
         // show(.home)，重置只放这一处，不用每个调用点各自清。

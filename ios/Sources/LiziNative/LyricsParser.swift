@@ -3,48 +3,55 @@ import Foundation
 /// LRC / YRC 歌词解析（P1 新写；逻辑照抄壳版 public/player.js 的 parseLyrics / parseYrcLine / parseLrcLines，
 /// 时间统一转毫秒；不抄 Web 代码，只复用解析规则）。
 ///
-/// 规则：
-/// - YRC 优先（逐字）：行首 `[起点ms,行时长ms]`，字 `(字起点ms,字时长ms,0)字`；
-///   另认新接口的尖括号变体 `<mm:ss.xxx>字`（r22a，见文件底注释）。
-/// - 没有 YRC 时退回 LRC：`[mm:ss.xx]文本`，一行可带多个时间戳。
+/// r55 Folia 歌词：入口改 parseFolia(mainText:wordByWordText:
+/// translationText:romanizationText:isPureMusic:)——服务端已按 Folia
+/// 字段形回包（{mainText, wordByWordText, translationText,
+/// romanizationText, isPureMusic, source}），客户端只做解析与对齐：
+/// - wordByWordText（逐字 YRC）优先；没有就退回 mainText（先按 YRC 试，
+///   再按 LRC；尖括号 YRC 可能装在 mainText 里）。
+/// - 翻译/音译都是行级 LRC 文本，按行起点（毫秒取整到 10ms 的键）对齐
+///   到主行（translation / romanization）。
 /// - 无词时返回空（`format == "none"`，lines 为空）；调用方显示歌名，绝不用 ♪ 作假歌词。
+/// - 纯音乐（isPureMusic）直接回空行 + isPureMusic true，不解析、不编词。
 enum LyricsParser {
 
-    /// 统一入口：YRC 优先，没有就退回 LRC（照抄 player.js parseLyrics）。
-    static func parse(lyric: String, yrc: String, tlyric: String = "", ytlrc: String = "") -> ParsedLyrics {
-        let trMap = translationMap(tlyric.isEmpty ? ytlrc : tlyric)
-        if !yrc.isEmpty {
-            var lines = parseYRC(yrc)
-            if !lines.isEmpty {
-                for i in lines.indices {
-                    lines[i].translation = trMap[translationKey(ms: lines[i].startMs)] ?? ""
-                }
-                lines.sort { $0.startMs < $1.startMs }
-                return ParsedLyrics(lines: lines, format: "yrc")
+    /// 统一入口：Folia 字段形 → ParsedLyrics。
+    static func parseFolia(mainText: String, wordByWordText: String,
+                           translationText: String = "", romanizationText: String = "",
+                           isPureMusic: Bool = false) -> ParsedLyrics {
+        if isPureMusic { return ParsedLyrics(lines: [], format: "none", isPureMusic: true) }
+        let trMap = translationMap(translationText)
+        let roMap = translationMap(romanizationText)
+        func attach(_ lines: [LyricLine]) -> [LyricLine] {
+            var out = lines
+            for i in out.indices {
+                let key = translationKey(ms: out[i].startMs)
+                out[i].translation = trMap[key] ?? ""
+                out[i].romanization = roMap[key] ?? ""
             }
+            out.sort { $0.startMs < $1.startMs }
+            return out
         }
-        if !lyric.isEmpty {
-            // 尖括号 YRC 可能装在 lyric 字段里（新接口）；先按 YRC 试一次，
-            // 再退回 LRC。普通 LRC 文本没有 `[起点,时长]` 行首也没有尖括号戳，
+        if !wordByWordText.isEmpty {
+            let lines = parseYRC(wordByWordText)
+            if !lines.isEmpty { return ParsedLyrics(lines: attach(lines), format: "yrc") }
+        }
+        if !mainText.isEmpty {
+            // 尖括号 YRC 可能装在 mainText 里；先按 YRC 试一次，再退回 LRC。
+            // 普通 LRC 文本没有 `[起点,时长]` 行首也没有尖括号戳，
             // parseYRC 会返回空，不会误判。
-            let yrcLines = parseYRC(lyric)
-            if !yrcLines.isEmpty {
-                var lines = yrcLines
-                for i in lines.indices {
-                    lines[i].translation = trMap[translationKey(ms: lines[i].startMs)] ?? ""
+            let yrcLines = parseYRC(mainText)
+            if !yrcLines.isEmpty { return ParsedLyrics(lines: attach(yrcLines), format: "yrc") }
+            let lines = parseLRC(mainText, translationMap: trMap)
+            if !lines.isEmpty {
+                var out = lines
+                for i in out.indices {
+                    out[i].romanization = roMap[translationKey(ms: out[i].startMs)] ?? ""
                 }
-                lines.sort { $0.startMs < $1.startMs }
-                return ParsedLyrics(lines: lines, format: "yrc")
+                return ParsedLyrics(lines: out, format: "lrc")
             }
-            let lines = parseLRC(lyric, translationMap: trMap)
-            if !lines.isEmpty { return ParsedLyrics(lines: lines, format: "lrc") }
         }
         return ParsedLyrics(lines: [], format: "none")
-    }
-
-    /// 只传 LRC 字符串的兼容入口（照抄 player.js parseLRC）。
-    static func parseLRCOnly(_ lrc: String, tlyric: String = "") -> [LyricLine] {
-        parseLRC(lrc, translationMap: translationMap(tlyric))
     }
 
     // MARK: - YRC（逐字）
@@ -239,15 +246,16 @@ enum LyricsParser {
 //   (1) 新增 parseAngleYRCLine：认 `<mm:ss.xxx>字`，首个戳为行起点，
 //       每段一个逐字（字结束 = 下一字起点，末字 +1 秒），兼容行首带
 //       `[mm:ss.xx]` 的混合式；parseYRC 每行先试 QQ 式再试尖括号式。
-//   (2) parse(lyric:yrc:) 里 lyric 字段也先按 YRC 试一次（尖括号 YRC 可能
-//       装在 lyric 字段里），再退回 LRC。
+//   (2) parseFolia(mainText:wordByWordText:) 里 mainText 字段也先按 YRC
+//       试一次（尖括号 YRC 可能装在 mainText 字段里），再退回 LRC。
 //   (3) parseLRC 防御性剥掉残留的 `<...>` 时间戳：行文本永不含原始时间戳。
 // - 7 平台歌词格式（NativeBridge.lyrics(for:)；取词是各平台自己的 lyric
-//   接口，解析是同一条 LyricsParser.parse，与平台无关）：
-//   网易 /api/lyric、QQ /api/qq/lyric、酷我 /api/kuwo/lyric、汽水 /api/qishui/lyric、
-//   波点 /api/bodian/lyric、Apple Music /api/applemusic/lyric 返回 LRC
-//   （lyric + tlyric）。任一平台官方与解析都空时，统一走 Lrclib.fetch
-//   兜底（按歌名/歌手/专辑/时长查，返回的 lyric/yrc 同样进同一解析器）；
+//   接口，解析是同一条 LyricsParser.parseFolia，与平台无关）：
+//   网易 /api/lyric、QQ /api/qq/lyric、酷狗 /api/kugou/lyric、汽水
+//   /api/qishui/lyric、波点 /api/bodian/lyric 回 Folia 字段形
+//   （mainText + wordByWordText + translationText + romanizationText）。
+//   任一平台官方与解析都空时，统一走跨平台自动匹配（NativeBridge，
+//   网易 → QQ → 酷狗 → 汽水，10 秒总预算，搜不到就跳过，不编数据）；
 //   再空则返回空（format "none"，调用方显示歌名，绝不用 ♪ 作假歌词）。
-//   Apple Music 没有应用内官方歌词接口（MusicKit 不提供歌词），
-//   走后端 /api/applemusic/lyric + Lrclib 兜底；没有就空着，不编假数据。
+//   酷我 / Apple Music 无歌词接口（Folia 也无此源），r55 已删，
+//   不编假数据，等用户定。

@@ -1,12 +1,22 @@
 import Foundation
 
+/// 安全正则：编译失败回 nil（调用方按“无匹配”走），不抛不崩。
+/// r55：全仓强制 try 的 NSRegularExpression 归零——12 处全是字面量 pattern，
+/// 本来就不可能失败；强制 try 的风险是“万一哪天改错一个字符就猝死”，
+/// 这里把风险收到一处（Kuwo/Bodian/Sidecars 同属 Lizi 模块，共用）。
+func liziRegex(_ pattern: String) -> NSRegularExpression? {
+    try? NSRegularExpression(pattern: pattern)
+}
+
 /// 七个边车服务：qq / kuwo / qishui / bodian / spotify / applemusic / kugou。
 /// 实现细节见 specs/sidecars.md；QQ 的上游在 npm 包内（见各源文件头的说明），
 /// 汽水/波点的 guard 签名在协议库内；酷我与 Spotify 已按源码 1:1 移植；
 /// 酷狗按 Folia 的酷狗流程新写（FoliaKugou.swift 文件头有对照出处）。
 /// 其余路由按 Node 版的空态/错误原样返回，绝不编假数据。
-/// 第 13 轮第 24 件：Apple Music（公开 API：iTunes Search + 排行榜 RSS +
-/// LRCLIB 歌词；播放是 30 秒试听；整首要开发者 token + 原生 MusicKit 播放器）。
+/// 第 13 轮第 24 件：Apple Music（公开 API：iTunes Search + 排行榜 RSS；
+/// 播放是 30 秒试听；整首要开发者 token + 原生 MusicKit 播放器；
+/// r55 接力：歌词走自己的官方 lyrics/syllable-lyrics 端 + user token，
+/// TTML 原生解析；没 user token 时静默回空）。
 final class SidecarService {
     let kuwo = KuwoService()
     let spotify = SpotifyService()
@@ -87,7 +97,7 @@ func scCookieValue(_ setCookie: String?, _ name: String) -> String? {
 func krcToLrc(_ krc: String) -> String {
     var out: [String] = []
     for line in krc.components(separatedBy: "\n") {
-        guard let m = krcLineRegex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+        guard let m = krcLineRegex?.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
               let r1 = Range(m.range(at: 1), in: line),
               let r3 = Range(m.range(at: 3), in: line) else { continue }
         let start = Int(line[r1]) ?? 0
@@ -100,14 +110,14 @@ func krcToLrc(_ krc: String) -> String {
     return out.joined(separator: "\n")
 }
 
-private let krcLineRegex = try! NSRegularExpression(pattern: #"^\[(\d+),(\d+)\](.*)$"#)
-private let krcCharRegex = try! NSRegularExpression(pattern: #"<(\d+),(\d+),-?\d+>([^<]*)"#)
+private let krcLineRegex = liziRegex(#"^\[(\d+),(\d+)\](.*)$"#)
+private let krcCharRegex = liziRegex(#"<(\d+),(\d+),-?\d+>([^<]*)"#)
 
 /// 逐字 YRC：[行起点,行时长](字绝对起点,字时长,0)字…；任一步对不上回 ""（调用方退回整行 LRC）。
 func krcToYrc(_ krc: String) -> String {
     var out: [String] = []
     for line in krc.components(separatedBy: "\n") {
-        guard let m = krcLineRegex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+        guard let m = krcLineRegex?.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
               let r1 = Range(m.range(at: 1), in: line),
               let r2 = Range(m.range(at: 2), in: line),
               let r3 = Range(m.range(at: 3), in: line) else { continue }
@@ -116,7 +126,7 @@ func krcToYrc(_ krc: String) -> String {
         let content = String(line[r3])
         let ns = NSRange(content.startIndex..., in: content)
         var chars: [(Int, Int, String)] = []
-        for cm in krcCharRegex.matches(in: content, range: ns) {
+        for cm in krcCharRegex?.matches(in: content, range: ns) ?? [] {
             guard let c1 = Range(cm.range(at: 1), in: content),
                   let c2 = Range(cm.range(at: 2), in: content),
                   let c3 = Range(cm.range(at: 3), in: content) else { continue }
@@ -135,8 +145,8 @@ func krcToYrc(_ krc: String) -> String {
 
 // MARK: - AWLRC → YRC（波点逐字，server.mjs 的 awlrcToYrc）
 
-private let awlrcLineRegex = try! NSRegularExpression(pattern: #"^\[(\d{2}):(\d{2})[.:](\d{1,3})\](.*)$"#)
-private let awlrcCharRegex = try! NSRegularExpression(pattern: #"<(\d+),(\d+)>([^<]*)"#)
+private let awlrcLineRegex = liziRegex(#"^\[(\d{2}):(\d{2})[.:](\d{1,3})\](.*)$"#)
+private let awlrcCharRegex = liziRegex(#"<(\d+),(\d+)>([^<]*)"#)
 
 /// AWLRC 行格式 [mm:ss.xxx]<相对行首ms,字时长ms>字…；行时长取最后一个字结束，
 /// 无字时长时取下一行起点差。
@@ -144,7 +154,7 @@ func awlrcToYrc(_ awlrc: String) -> String {
     struct Line { var start: Int; var text: String; var chars: [(Int, Int, String)] }
     var lines: [Line] = []
     for raw in awlrc.components(separatedBy: "\n") {
-        guard let m = awlrcLineRegex.firstMatch(in: raw, range: NSRange(raw.startIndex..., in: raw)),
+        guard let m = awlrcLineRegex?.firstMatch(in: raw, range: NSRange(raw.startIndex..., in: raw)),
               let r1 = Range(m.range(at: 1), in: raw),
               let r2 = Range(m.range(at: 2), in: raw),
               let r3 = Range(m.range(at: 3), in: raw),
@@ -157,7 +167,7 @@ func awlrcToYrc(_ awlrc: String) -> String {
         let content = String(raw[r4])
         let ns = NSRange(content.startIndex..., in: content)
         var chars: [(Int, Int, String)] = []
-        for cm in awlrcCharRegex.matches(in: content, range: ns) {
+        for cm in awlrcCharRegex?.matches(in: content, range: ns) ?? [] {
             guard let c1 = Range(cm.range(at: 1), in: content),
                   let c2 = Range(cm.range(at: 2), in: content),
                   let c3 = Range(cm.range(at: 3), in: content) else { continue }

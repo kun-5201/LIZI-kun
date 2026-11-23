@@ -8,6 +8,16 @@ import Foundation
 /// - 时长一律毫秒 `durationMs`（Int）；歌词时间一律毫秒（`startMs` / `endMs`，Int）。
 /// - 不编平台没有的字段，不编假数据：没有官方接口的平台对应方法返回空态。
 
+/// 按 id 去重（保第一项、保顺序）：SwiftUI ForEach 用 Identifiable.id 作键，
+/// 同一份列表里出现两个同 id 项时行为未定义、可 trap——上游可回重歌、
+/// 分页 append 也可跨页重。r55：数据层去重，不在视图层改 identity。
+/// 覆盖：搜索（SearchViewModel）、详情页（RailResult.init）、评论
+/// （CommentsPanelView.loadMore）。
+func dedupedById<T: Identifiable>(_ items: [T]) -> [T] where T.ID: Hashable {
+    var seen = Set<T.ID>()
+    return items.filter { seen.insert($0.id).inserted }
+}
+
 // MARK: - 音质（9 档，顺序即优先级：高 → 低）
 
 /// 九档音质（r31 音质系统替换：Moumusic 的档位结构，只学流程和结构、
@@ -486,13 +496,17 @@ struct LyricLine: Identifiable, Codable, Hashable {
     var words: [LyricWord]
     /// 译文（tlyric/ytlrc 有才填；没有时为空）。
     var translation: String
+    /// 音译（romalrc/yromalrc 有才填；没有时为空。r55 Folia 歌词新增，
+    /// 消费方暂不用，先对齐存下来，不丢数据）。
+    var romanization: String
 
     init(startMs: Int = 0, text: String = "", words: [LyricWord] = [],
-         translation: String = "") {
+         translation: String = "", romanization: String = "") {
         self.startMs = startMs
         self.text = text
         self.words = words
         self.translation = translation
+        self.romanization = romanization
     }
 }
 
@@ -511,16 +525,20 @@ struct LyricWord: Codable, Hashable {
     }
 }
 
-/// 一次歌词拉取的完整结果（官方 → LRCLIB 兜底后仍为空时 lines 为空，
+/// 一次歌词拉取的完整结果（官方 → 跨平台自动匹配后仍为空时 lines 为空，
 /// 调用方显示歌名，绝不用 ♪ 作假歌词）。
 struct ParsedLyrics: Codable, Hashable {
     var lines: [LyricLine]
     /// yrc（逐字）/ lrc / none。
     var format: String
+    /// 纯音乐（上游标记无词；r55 Folia 歌词新增，消费方暂不用，显示已按
+    /// 无词回落歌名）。
+    var isPureMusic: Bool
 
-    init(lines: [LyricLine] = [], format: String = "none") {
+    init(lines: [LyricLine] = [], format: String = "none", isPureMusic: Bool = false) {
         self.lines = lines
         self.format = format
+        self.isPureMusic = isPureMusic
     }
 }
 

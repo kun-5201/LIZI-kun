@@ -820,6 +820,8 @@ final class HomeViewModel: ObservableObject {
     /// 点歌单卡：在面板内打开它，显示全部歌曲卡片（曲目走
     /// `railPlaylistTracks` 全量翻页取数，50 首以上也不截断）。
     func openPlaylist(_ playlist: Playlist) {
+        // r55：活动日志（死亡快照回落用；只记平台+标题，不记直链/token）。
+        DiagLog.shared.recordActivity("openPlaylist \(playlist.source) \(String(playlist.title.prefix(80)))")
         openedPlaylist = playlist
         openedAlbum = nil
         openedTitle = playlist.title
@@ -845,6 +847,8 @@ final class HomeViewModel: ObservableObject {
     /// 网易/酷我/QQ/酷狗/波点有专辑取曲接口，汽水/Apple Music 没有，
     /// 取不到时按诚实空态显示，不编曲目）。
     func openAlbum(_ album: Album) {
+        // r55：活动日志（死亡快照回落用；只记平台+标题）。
+        DiagLog.shared.recordActivity("openAlbum \(album.source) \(String(album.title.prefix(80)))")
         openedAlbum = album
         openedPlaylist = nil
         openedTitle = album.title
@@ -866,6 +870,8 @@ final class HomeViewModel: ObservableObject {
 
     /// 关掉面板内打开的歌单/专辑，回到该来源列表（返回键 / 切来源 / 切台时调）。
     func closeOpened() {
+        // r55：活动日志（死亡快照回落用）。
+        DiagLog.shared.recordActivity("closeOpened")
         openedPlaylist = nil
         openedAlbum = nil
         openedTracks = []

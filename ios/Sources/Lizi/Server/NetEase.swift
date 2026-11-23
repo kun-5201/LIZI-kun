@@ -254,6 +254,40 @@ final class NetEaseService {
     func arr(_ d: [String: Any], _ k: String) -> [[String: Any]] { d[k] as? [[String: Any]] ?? [] }
     func dict(_ d: [String: Any], _ k: String) -> [String: Any] { d[k] as? [String: Any] ?? [:] }
 
+    /// YRC 逐字文本转行级 LRC（r55 Folia 歌词：翻译/音译对齐用）。
+    /// ytlrc / yromalrc 是逐字版（`[起点ms,时长ms](起点,时长,0)字…` 或
+    /// 尖括号 `<mm:ss.xxx>字…`），客户端只认 `[mm:ss.xx]文本` 行级形；
+    /// 这里逐行取行起点、剥逐字标签、拼回行级文本。无行起点或空行跳过。
+    static func yrcToLrc(_ yrc: String) -> String {
+        guard !yrc.isEmpty else { return "" }
+        var out: [String] = []
+        for raw in yrc.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+            var startMs: Int? = nil
+            var text = line
+            if let m = line.range(of: #"^\[(\d+),(\d+)\]"#, options: .regularExpression) {
+                let nums = String(line[m]).components(separatedBy: CharacterSet.decimalDigits.inverted).compactMap(Int.init)
+                if nums.count >= 2 { startMs = nums[0] }
+                text = String(line[m.upperBound...])
+            } else if let m = line.range(of: #"<(\d+):(\d+(?:\.\d+)?)>"#, options: .regularExpression) {
+                let stamp = String(line[m]).replacingOccurrences(of: "<", with: "").replacingOccurrences(of: ">", with: "")
+                let parts = stamp.split(separator: ":")
+                if parts.count == 2, let mm = Int(parts[0]), let ss = Double(parts[1]) {
+                    startMs = Int((Double(mm) * 60 + ss) * 1000)
+                }
+            }
+            text = text.replacingOccurrences(of: #"\(\d+,\d+(?:,\d+)?\)"#, with: "", options: .regularExpression)
+            text = text.replacingOccurrences(of: #"<\d+:\d+(?:\.\d+)?>"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty, let startMs else { continue }
+            let mm = startMs / 60000
+            let ss = Double(startMs % 60000) / 1000.0
+            out.append("[\(String(format: "%02d:%05.2f", mm, ss))]\(text)")
+        }
+        return out.joined(separator: "\n")
+    }
+
     // MARK: - 曲目归一化（toTrack / fetchTrackDetails）
 
     func toTrack(_ s: [String: Any]) -> [String: Any]? {
@@ -297,52 +331,6 @@ final class NetEaseService {
             i += 500
         }
         return out
-    }
-
-    /// 富文本歌词转 LRC（richLyricToLrc）：只改能解析成 {c:[{tx:String}]} 的行，其余原样保留；
-    /// 失败退回原串、绝不抛异常。
-    func richLyricToLrc(_ lyric: String) -> String {
-        guard !lyric.isEmpty else { return lyric }
-        // 整串是 JSON 数组时逐项转。
-        if let data = lyric.data(using: .utf8),
-           let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-            return items.compactMap { richLineToLrc($0, prevTime: nil) }.joined(separator: "\n")
-        }
-        var outLines: [String] = []
-        var prevTime: Int? = nil
-        for line in lyric.components(separatedBy: "\n") {
-            if let data = line.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let c = obj["c"] as? [[String: Any]],
-               c.allSatisfy({ $0["tx"] is String }) {
-                let t = (obj["t"] as? NSNumber)?.intValue
-                let time: Int
-                if let t { time = max(0, t) } else if let p = prevTime { time = p + 1000 } else { time = 0 }
-                prevTime = time
-                let text = c.compactMap { $0["tx"] as? String }.joined()
-                outLines.append("[\(formatLyricTime(time))]\(text)")
-            } else {
-                outLines.append(line)
-            }
-        }
-        return outLines.joined(separator: "\n")
-    }
-
-    private func richLineToLrc(_ obj: [String: Any], prevTime: Int?) -> String? {
-        guard let c = obj["c"] as? [[String: Any]] else { return nil }
-        let text = c.compactMap { $0["tx"] as? String }.joined()
-        let t = (obj["t"] as? NSNumber)?.intValue ?? 0
-        return "[\(formatLyricTime(max(0, t)))]\(text)"
-    }
-
-    /// 时间格式 [mm:ss.xx]：先落到 10ms 再格式化，避免 59.999s 进成 60.00。
-    private func formatLyricTime(_ ms: Int) -> String {
-        let rounded = (ms / 10) * 10
-        let totalSeconds = rounded / 1000
-        let mm = totalSeconds / 60
-        let ss = totalSeconds % 60
-        let xx = (rounded % 1000) / 10
-        return String(format: "%02d:%02d.%02d", mm, ss, xx)
     }
 
     func profileOf(_ p: [String: Any]?) -> [String: Any]? {
@@ -646,42 +634,28 @@ extension NetEaseService {
             }
             return ["code": code, "data": items]
         case "lyric":
-            let lrcText = str(dict(data, "lrc"), "lyric").isEmpty ? str(data, "lyric") : str(dict(data, "lrc"), "lyric")
-            let lyric = richLyricToLrc(lrcText)
+            // r55 Folia 歌词：网易走 weapi /song/lyric/v1（已在线上跑通的端点，
+            // 不换），只取字段 + 去 LRCLIB 兜底。Folia 字段形：
+            // mainText = lrc.lyric（行级 LRC），wordByWordText = yrc.lyric
+            // （逐字 YRC），translationText = tlyric（行级翻译；没有时把逐字
+            // 版 ytlrc 转回行级 LRC 再对齐），romanizationText 同理
+            // （romalrc / yromalrc）。isPureMusic 取上游 nolyric 标记。
+            // 富文本 JSON 转换（旧 richLyricToLrc）已删：Folia 无此处理，
+            // lrc.lyric 本身就是 LRC 文本。
+            let mainText = str(dict(data, "lrc"), "lyric").isEmpty ? str(data, "lyric") : str(dict(data, "lrc"), "lyric")
             let yrc = str(dict(data, "yrc"), "lyric")
-            // 第 13 轮第 19 件：网易是唯一没有 LRCLIB 兜底的平台——官方回空就直接
-            // format none，歌词区只剩「这首没有歌词」。其它 6 台第 11 轮都接了兜底，
-            // 这里补上同款：按 id 查一次现成的 fetchTrackDetails（playlist/detail
-            // 已在用，不新写接口），拿歌名/歌手/专辑/时长走 LRCLIB；兜底命中就当
-            // 官方词回，format 记 lrc。开关在 Lrclib.fetch 里统一 gate（第 20 件），
-            // 这里不用再判；兜底也空时回原来的空结果，不编词。
-            var finalLyric = lyric
-            var finalFormat = !yrc.isEmpty ? "yrc" : (!lyric.isEmpty ? "lrc" : "none")
-            if lyric.isEmpty && yrc.isEmpty {
-                let tid = int(payload, "id")
-                if tid != 0, let s = await fetchTrackDetails([tid]).first {
-                    let artists = (s["ar"] as? [[String: Any]]) ?? (s["artists"] as? [[String: Any]]) ?? []
-                    let album = (s["al"] as? [String: Any]) ?? (s["album"] as? [String: Any]) ?? [:]
-                    let names = artists.compactMap { $0["name"] as? String }.joined(separator: " / ")
-                    let name = str(s, "name")
-                    if !name.isEmpty,
-                       let fb = await Lrclib.fetch(artist: names, track: name,
-                                                   album: str(album, "name"),
-                                                   duration: int(s, "dt") / 1000) {
-                        finalLyric = fb.lyric
-                        finalFormat = "lrc"
-                    }
-                }
-            }
+            let tlyric = str(dict(data, "tlyric"), "lyric")
+            let ytlrc = str(dict(data, "ytlrc"), "lyric")
+            let romalrc = str(dict(data, "romalrc"), "lyric")
+            let yromalrc = str(dict(data, "yromalrc"), "lyric")
             return [
                 "code": code,
-                "lyric": finalLyric,
-                "yrc": yrc,
-                "tlyric": str(dict(data, "tlyric"), "lyric"),
-                "ytlrc": str(dict(data, "ytlrc"), "lyric"),
-                "romalrc": str(dict(data, "romalrc"), "lyric"),
-                "nolyric": data["nolyric"] as? Bool ?? false,
-                "format": finalFormat,
+                "mainText": mainText,
+                "wordByWordText": yrc,
+                "translationText": tlyric.isEmpty ? Self.yrcToLrc(ytlrc) : tlyric,
+                "romanizationText": romalrc.isEmpty ? Self.yrcToLrc(yromalrc) : romalrc,
+                "isPureMusic": data["nolyric"] as? Bool ?? false,
+                "source": "netease",
             ]
         case "playlist/detail", "playlist/track/all":
             let p = dict(data, "playlist")

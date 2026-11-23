@@ -89,6 +89,8 @@ final class AnimatedArtworkManager {
     /// 已创建的动态封面对象（Any：nowPlayingInfo 的值本来就是 Any，
     /// 这样调用方不用在类型上碰 iOS 26 的符号；同实例复用，系统不会反复重认）。
     private var artworks: [String: Any] = [:]
+    /// r55：artworks 字典的锁（与 previewLock/keyLock 同款）。
+    private let artworksLock = NSLock()
 
     private init() { deleteLegacyCacheFiles() }
 
@@ -113,7 +115,9 @@ final class AnimatedArtworkManager {
     }
 
     private var cacheDir: URL {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        // r55：[0] 改回落（见 LocalFiles.directory 同款）。
+        let dir = (FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory)
             .appendingPathComponent("animated-artwork", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
@@ -290,9 +294,13 @@ final class AnimatedArtworkManager {
         if #available(iOS 26.0, *) {
             guard isReady(key: key, aspect: aspect) else { return nil }
             let cacheKey = key + aspect.suffix
-            if let cached = artworks[cacheKey] { return cached }
+            // r55：artworks 字典加锁（previews/previewCache 有 previewLock、
+            // currentKey 有 keyLock，artworks 没有；调用方虽全在主线程，
+            // 但它是共享可变状态，加同一套 NSLock 防御，不改行为）。
+            // 读与写各锁一次；makeArtwork 在锁外建（重活不占锁）。
+            if let cached = artworksLock.withLock({ artworks[cacheKey] }) { return cached }
             let art = makeArtwork(key: key, aspect: aspect)
-            artworks[cacheKey] = art
+            artworksLock.withLock { artworks[cacheKey] = art }
             return art
         } else {
             return nil

@@ -5,7 +5,7 @@ import Security
 
 /// Spotify：services/spotify-api/start.mjs 的 1:1 Swift 移植（可行性骨架，本期不接音频）。
 /// 只做 PKCE 登录（官方 OAuth，回调 127.0.0.1:5588）+ 元数据读取；
-/// /audio 永远回 { url: '', reason: 'drm' }，/lyrics 永远空。
+/// /audio 永远回 { url: '', reason: 'drm' }；歌词无接口（r55 歌词入口已删）。
 /// 没有内置 client_id：需用户自己注册免费 App，把 Client ID 填进
 /// SPOTIFY_CLIENT_ID 环境变量或沙盒里的 spotify-client（对标边车目录的 .client.json）。
 
@@ -127,9 +127,16 @@ final class SpotifyService {
 
     private func sp(_ pathname: String, _ params: [String: String?]) async throws -> (status: Int, data: [String: Any]) {
         let t = try await accessToken()
-        var comps = URLComponents(string: "https://api.spotify.com/v1" + pathname)!
+        // r55：URLComponents(string:)! 与 comps.url! 改 guard 抛错（函数本身已 throws）。
+        // 注意顺序：先拼 queryItems 再取 url，否则 query 会丢。
+        guard var comps = URLComponents(string: "https://api.spotify.com/v1" + pathname) else {
+            throw NSError(domain: "Spotify", code: -1, userInfo: [NSLocalizedDescriptionKey: "URL 构造失败：\(pathname)"])
+        }
         comps.queryItems = params.compactMap { k, v in v.map { URLQueryItem(name: k, value: $0) } }
-        let (data, resp) = try await Upstream.fetch(comps.url!, headers: ["Authorization": "Bearer \(t)"], timeout: 15)
+        guard let url = comps.url else {
+            throw NSError(domain: "Spotify", code: -1, userInfo: [NSLocalizedDescriptionKey: "URL 构造失败：\(pathname)"])
+        }
+        let (data, resp) = try await Upstream.fetch(url, headers: ["Authorization": "Bearer \(t)"], timeout: 15)
         let text = String(data: data, encoding: .utf8) ?? ""
         let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             ?? ["raw": String(text.prefix(300))]
@@ -151,7 +158,11 @@ final class SpotifyService {
         let state = Self.b64url(Data(stateBytes))
         pendingPkce = (verifier: verifier, state: state, at: Date())
         let challenge = Self.b64url(Data(SHA256.hash(data: Data(verifier.utf8))))
-        var comps = URLComponents(string: "https://accounts.spotify.com/authorize")!
+        // r55：URLComponents(string:)! 与 comps.url! 改 guard 抛错（函数本身已 throws）。
+        // 注意顺序：先拼 queryItems 再取 url，否则 query 会丢。
+        guard var comps = URLComponents(string: "https://accounts.spotify.com/authorize") else {
+            throw NSError(domain: "Spotify", code: -1, userInfo: [NSLocalizedDescriptionKey: "授权 URL 构造失败"])
+        }
         comps.queryItems = [
             URLQueryItem(name: "client_id", value: client.clientId),
             URLQueryItem(name: "response_type", value: "code"),
@@ -161,7 +172,10 @@ final class SpotifyService {
             URLQueryItem(name: "state", value: state),
             URLQueryItem(name: "scope", value: Self.scopes.joined(separator: " ")),
         ]
-        return comps.url!.absoluteString
+        guard let url = comps.url else {
+            throw NSError(domain: "Spotify", code: -1, userInfo: [NSLocalizedDescriptionKey: "授权 URL 构造失败"])
+        }
+        return url.absoluteString
     }
 
     private static func callbackPage(title: String, detail: String) -> String {
@@ -308,15 +322,9 @@ final class SpotifyService {
         case "song/url":
             return .json(200, ["code": 200, "id": req.string("id"), "url": "", "preview": false,
                                "reason": "drm", "error": Self.needAudio])
-        case "lyric", "lyrics":
-            // 第 11 轮：Spotify 官方恒空（no-lyrics-api），LRCLIB 兜底在这里是
-            // 首次出词。元数据来自前端 srcLyric 传参；传参缺歌名时直接回原来的空。
-            if let fb = await Lrclib.fetch(artist: req.string("artist"), track: req.string("s"),
-                                           album: req.string("album"), duration: req.int("duration")) {
-                return .json(200, ["code": 200, "lyric": fb.lyric, "yrc": "", "tlyric": "",
-                                   "format": "lrc", "source": "lrclib"])
-            }
-            return .json(200, ["code": 200, "lyric": "", "format": "none", "reason": "no-lyrics-api"])
+        // r55 Folia 歌词：Spotify 歌词入口已删（旧 case 本体就是 LRCLIB
+        // 直调；Spotify 无官方歌词接口，Folia 也无此源）。/api/spotify/lyric
+        // 现走 default 404，不编假数据，等用户定。
         case "audio":
             return .json(200, ["code": 200, "url": "", "reason": "drm",
                                "error": "本期不接 Spotify 音频（需 Premium + node-librespot，且属 DRM 灰区）"])

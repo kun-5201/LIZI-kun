@@ -422,7 +422,8 @@ actor KugouAPI {
               let bodyData = bodyString.data(using: .utf8) else { throw APIError.invalidResponse }
         var qParams: [String: String] = ["plat": "1"]
         qParams["signature"] = Self.androidSignature(qParams, body: bodyData)
-        var comps = URLComponents(string: "https://usercenter.kugou.com/v3/get_my_info")!
+        // r55：URLComponents(string:)! 改 guard（函数本身已 throws）。
+        guard var comps = URLComponents(string: "https://usercenter.kugou.com/v3/get_my_info") else { throw APIError.invalidResponse }
         comps.queryItems = qParams.map { URLQueryItem(name: $0.key, value: $0.value) }
         guard let url = comps.url else { throw APIError.invalidResponse }
         let dev = deviceIdentity()

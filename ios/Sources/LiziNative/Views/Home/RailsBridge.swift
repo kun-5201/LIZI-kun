@@ -193,7 +193,9 @@ struct RailResult {
         self.kind = kind
         self.platform = platform
         self.feed = feed
-        self.entries = entries
+        // r55：按 id 去重（保第一项、保顺序）——歌单里同一首歌出现两次时
+        // RailEntry.id（track-<platform>-<id>）会撞，ForEach 行为未定义、可 trap。
+        self.entries = dedupedById(entries)
         self.emptyReason = emptyReason
         self.error = error
     }

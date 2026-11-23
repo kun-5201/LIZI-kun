@@ -18,17 +18,6 @@ final class LiziRouter {
         if path == "/api/health" { return .json(200, ["ok": true]) }
         if path == "/api/diag/search" { return .json(200, DiagLog.shared.json()) }
 
-        // ---- LRCLIB 兜底开关（第 13 轮第 20 件）：设置 → 歌词显示。
-        // GET 读当前态，POST {enabled} 写；存在 UserDefaults，重启还在，默认开。
-        if path == "/api/settings/lrclib" {
-            if req.method == "POST" {
-                let on = req.bool("enabled", Lrclib.isEnabled)
-                Lrclib.setEnabled(on)
-                return .json(200, ["code": 200, "enabled": on])
-            }
-            return .json(200, ["code": 200, "enabled": Lrclib.isEnabled])
-        }
-
         // ---- 前端诊断上报（第 6 轮）：POST /api/diag/log，JSON body
         // { category: "audio" | "cover" | "probe", message: string,
         //   host?: string, reason?: string, lane?: string, code?: number|string,

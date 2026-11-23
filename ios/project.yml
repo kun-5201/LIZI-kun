@@ -138,7 +138,6 @@ targets:
       - Sources/Lizi/Server/LX.swift
       - Sources/Lizi/Server/LXSources.swift
       - Sources/Lizi/Server/LXScriptEngine.swift
-      - Sources/Lizi/Server/Lrclib.swift
       - Sources/Lizi/Server/DiagLog.swift
       - Sources/Lizi/Server/SessionStore.swift
       - Sources/Lizi/Server/Crypto.swift

@@ -40,9 +40,10 @@ import UniformTypeIdentifiers
 /// 5. 播放页排版（r35-6 已删：只留默认，02/04/06 三套版式、设置页这一节、
 ///    `lizi.now.layout` 键全清；播放页永远只走默认两栏）。
 ///    LRCLIB 兜底开关原在这里，r31-settings-sections 挪进下面的「歌词显示」
-///    分区（键与默认值不动）。
+///    分区（键与默认值不动）；r55 已删（旧兜底库全删，官方无词时走跨平台
+///    自动匹配）。
 /// 5c. 歌词显示（r31-settings-sections，只归类现有设置，不新增歌词功能）：
-///    LRCLIB 歌词兜底（原在播放页排版区，键 `lizi.lrclib.enabled`，默认开）
+///    LRCLIB 歌词兜底开关 r55 已删
 ///    + 形态歌词三档（原 5b 独立分区，壳版 `#set-stage-lyric`，键
 ///    `lizi.stage.lyricMode`，默认原文）；只改歌词显示方式，播放页歌词
 ///    与形态显示的字都不新增、不改逻辑。
@@ -80,7 +81,7 @@ import UniformTypeIdentifiers
 ///   已真实现，见外观区「背景」；字体选择/快捷键仍没有。）
 /// 查过不是重复、留下的：本地音乐导入（首页与设置页各一个入口，同调
 /// LocalMusic.importFiles，同一实现、不同页面的入口，不算重复项）；
-/// 形态歌词三档、LRCLIB、动画插图、120Hz、每日签到/自动签到，
+/// 形态歌词三档、动画插图、120Hz、每日签到/自动签到，
 /// 全仓各只有一个设置入口。播放页音质芯片只剩底部一处（r29 已删歌名下角标）。
 ///
 /// 没有（做不了/没接口，老实写清）：均衡器细调；
@@ -1064,17 +1065,13 @@ private struct PickedVideoFile: Transferable {
     // MARK: - 5c. 歌词显示（r31-settings-sections）
     //
     // 只归类现有歌词显示设置，不新增歌词功能：
-    // - LRCLIB 歌词兜底：原在播放页排版区（该区 r35-6 已删），逐字挪过来（键
-    //   `lizi.lrclib.enabled`、默认开、hint 文案都不动）；
+    // - LRCLIB 歌词兜底开关 r55 已删（旧兜底库全删；官方无词时走跨平台自动匹配）；
     // - 形态歌词三档：原 5b 独立分区（r25 #31），整节并进来
     //   （Picker 与说明文案都不动，只改形态里显示的字）。
     // 位置 = 原 5b 形态歌词的位置（外观区之前），
     // 其他分区顺序不动。
     private var lyricsSection: some View {
         sectionCard(title: "歌词显示", note: "只改歌词显示方式；官方歌词优先，没有歌词时不编歌词。") {
-            toggleRow("LRCLIB 歌词兜底",
-                      hint: "官方歌词优先；打开后官方没有歌词时才用 LRCLIB 歌词库兜底。",
-                      isOn: $settings.lrclibEnabled)
             // 形态歌词三档（壳版 `#set-stage-lyric`，见 `SettingsStore`）：
             // 原文 / 双文 / 译文；只改形态里显示的字，播放页歌词不动。
             Picker("显示", selection: $settings.stageLyricMode) {

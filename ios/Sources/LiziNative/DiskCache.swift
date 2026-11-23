@@ -8,10 +8,12 @@ import CryptoKit
 /// - 封面 `covers/`：图片原始字节，按封面 URL 的 SHA256 存；
 ///   读：CoverImageLoader（首页/播放器/搜索）+ NowPlayingCoordinator
 ///   锁屏静态图；写：联网取图成功后。
-/// - 歌词 `lyrics/`：官方歌词原文 JSON（lyric/yrc/tlyric/ytlrc 四字段），
-///   按 `lyric-<平台>-<id>.json` 存；读：NativeBridge.lyrics(for:)；
-///   写：官方回了内容才写（官方空时不写——LRCLIB 兜底结果不进缓存，
-///   下次仍有机会拿到官方词；空结果也不写否定缓存）。
+/// - 歌词 `lyrics/`：官方歌词原文 JSON（Folia 字段形 mainText /
+///   wordByWordText / translationText / romanizationText /
+///   isPureMusic / source），按 `lyric-<平台>-<id>.json` 存；
+///   读：NativeBridge.lyrics(for:)；
+///   写：官方回了内容才写（官方空时不写；自动匹配结果进缓存；
+///   空结果也不写否定缓存）。
 /// - 音频信息 `audio/`：取链结果 JSON（url + 音质/码率/试听标记 +
 ///   取回时间），按 `audio-<平台>-<id>-<档位>.json` 存；读：
 ///   NativeBridge.songURL；写：取到可用地址才写。流地址本身是
@@ -81,7 +83,9 @@ enum DiskCache {
     }
 
     static func rootDir() -> URL {
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        // r55：.first! 改回落（见 LocalFiles.directory 同款）。
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
         return base.appendingPathComponent("lizi/disk-cache", isDirectory: true)
     }
 

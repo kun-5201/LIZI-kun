@@ -1653,37 +1653,82 @@ actor FoliaKugouService {
     }
 
     // MARK: - 歌词（Folia kugouLyricProvider.ts：search_lyric 取首候选 →
-    // download 取 decodeContent；KRC 解码后转 LRC/YRC；官方无结果时
-    // 再按 LRCLIB 兜底——兜底是 Lizi 壳版约定，非 Folia 流程）
+    // download 取 decodeContent；KRC 解码后转 LRC/YRC；r55 改走 Folia
+    // 字段形 {mainText, wordByWordText, translationText, romanizationText,
+    // isPureMusic, source}，空结果回全空（旧的 format:"lrc" + error 反常
+    // shape 已修），LRCLIB 兜底已删。KRC 内嵌 [language:...] 翻译/音译轨
+    // 按行起点对齐成行级文本（Folia parseKRC 同款来源）。）
 
     private func lyric(_ req: HttpRequest) async throws -> HttpResponse {
         let hash = (req.string("hash").isEmpty ? req.string("id") : req.string("hash")).uppercased()
         let title = req.string("s")
         let artist = req.string("artist")
-        let album = req.string("album")
         let durationSec = req.int("duration", 0)
         let albumAudioId = req.int("albumAudioId", 0)
+        let empty: [String: Any] = ["code": 200, "mainText": "", "wordByWordText": "",
+                                    "translationText": "", "romanizationText": "",
+                                    "isPureMusic": false, "source": "kugou"]
         if !hash.isEmpty {
             let keyword = artist.isEmpty ? title : "\(artist) - \(title)"
             if let hit = try? await fetchKugouLyric(hash: hash, keyword: keyword,
                                                     durationMs: durationSec * 1000, albumAudioId: albumAudioId) {
-                return .json(200, ["code": 200, "lyric": hit.lrc, "yrc": hit.yrc,
-                                   "format": "lrc", "source": "kugou"])
+                return .json(200, ["code": 200, "mainText": hit.lrc, "wordByWordText": hit.yrc,
+                                   "translationText": hit.translation, "romanizationText": hit.romanization,
+                                   "isPureMusic": false, "source": "kugou"])
             }
         }
         for kw in [title, req.string("originalName")] where !kw.isEmpty {
             if let hit = try? await fetchKugouLyric(hash: nil, keyword: kw,
                                                     durationMs: durationSec * 1000) {
-                return .json(200, ["code": 200, "lyric": hit.lrc, "yrc": hit.yrc,
-                                   "format": "lrc", "source": "kugou"])
+                return .json(200, ["code": 200, "mainText": hit.lrc, "wordByWordText": hit.yrc,
+                                   "translationText": hit.translation, "romanizationText": hit.romanization,
+                                   "isPureMusic": false, "source": "kugou"])
             }
         }
-        if let fb = await Lrclib.fetch(artist: artist, track: title, album: album, duration: durationSec) {
-            return .json(200, ["code": 200, "lyric": fb.lyric, "yrc": fb.yrc,
-                               "format": "lrc", "source": "lrclib"])
+        return .json(200, empty)
+    }
+
+    /// KRC 内嵌翻译/音译轨：`[language:<base64 JSON>]`，JSON 形
+    /// `{content: [{type: 0|1, lyricContent: [[行…], …]}]}`，type 0 音译、
+    /// type 1 翻译；每轨的行与主歌词行按序号对齐（Folia parseKRC 同款），
+    /// 用主 LRC 行的时间戳拼回 `[mm:ss.xx]文本` 行级文本。无内嵌轨回空串。
+    private static func krcEmbeddedTracks(krc: String, lrc: String) -> (translation: String, romanization: String) {
+        guard let m = liziRegex(#"\[language:([^\]]*)\]"#)
+                ?.firstMatch(in: krc, range: NSRange(krc.startIndex..., in: krc)),
+              let r = Range(m.range(at: 1), in: krc) else { return ("", "") }
+        var b64 = String(krc[r]).trimmingCharacters(in: .whitespacesAndNewlines)
+        while b64.count % 4 != 0 { b64 += "=" }
+        guard let data = Data(base64Encoded: b64),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let content = obj["content"] as? [[String: Any]] else { return ("", "") }
+        // 主 LRC 行的时间戳（按行取）。
+        let stampRe = liziRegex(#"^\[(\d+):(\d+(?:[.:]\d+)?)\]"#)
+        var starts: [Int] = []
+        for raw in lrc.components(separatedBy: "\n") {
+            let ns = raw as NSString
+            guard let sm = stampRe?.firstMatch(in: raw, range: NSRange(location: 0, length: ns.length)),
+                  sm.numberOfRanges == 3 else { continue }
+            let mm = Int(ns.substring(with: sm.range(at: 1))) ?? 0
+            let ss = Double(ns.substring(with: sm.range(at: 2)).replacingOccurrences(of: ":", with: ".")) ?? 0
+            starts.append(Int((Double(mm) * 60 + ss) * 1000))
         }
-        return .json(200, ["code": 200, "lyric": "", "yrc": "", "format": "lrc",
-                           "source": "kugou", "error": "没有找到歌词"])
+        func trackText(type: Int) -> String {
+            guard let track = content.first(where: { ($0["type"] as? Int) == type }),
+                  let lines = track["lyricContent"] as? [Any] else { return "" }
+            var out: [String] = []
+            for (i, item) in lines.enumerated() where i < starts.count {
+                let text: String
+                if let parts = item as? [String] { text = parts.joined() }
+                else if let s = item as? String { text = s }
+                else { continue }
+                let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !t.isEmpty else { continue }
+                let ms = starts[i]
+                out.append("[\(String(format: "%02d:%05.2f", ms / 60000, Double(ms % 60000) / 1000.0))]\(t)")
+            }
+            return out.joined(separator: "\n")
+        }
+        return (trackText(type: 1), trackText(type: 0))
     }
 
     /// r45-1：歌词专用请求（Folia `kugouLyricProvider.ts` requestKugou
@@ -1737,7 +1782,7 @@ actor FoliaKugouService {
     ///（旧写法 contenttype != 0 就当明文是错的：实测 contenttype 0 的
     /// 那条就是 KRC）。krcDecode / krcKey 已验证是对的，别动。
     private func fetchKugouLyric(hash: String?, keyword: String?,
-                                 durationMs: Int, albumAudioId: Int = 0) async throws -> (lrc: String, yrc: String)? {
+                                 durationMs: Int, albumAudioId: Int = 0) async throws -> (lrc: String, yrc: String, translation: String, romanization: String)? {
         var params: [String: String] = [
             "duration": String(durationMs),
             "lrctxt": "1", "man": "no",
@@ -1771,7 +1816,9 @@ actor FoliaKugouService {
             text = Self.krcDecode(content)
         }
         guard let krc = text, !krc.isEmpty else { return nil }
-        return (krcToLrc(krc), krcToYrc(krc))
+        let lrc = krcToLrc(krc)
+        let (translation, romanization) = Self.krcEmbeddedTracks(krc: krc, lrc: lrc)
+        return (lrc, krcToYrc(krc), translation, romanization)
     }
 
     // MARK: - 每日 / 精选 / 电台（Folia library：everyday_recommend /

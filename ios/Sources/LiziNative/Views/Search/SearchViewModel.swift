@@ -120,6 +120,8 @@ final class SearchViewModel: ObservableObject {
     func searchNow() {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
+        // r55：活动日志（死亡快照回落用；只记平台+query）。
+        DiagLog.shared.recordActivity("search \(source) \(String(q.prefix(80)))")
         debounceTask?.cancel()
         Task { await runSearch(query: q) }
     }
@@ -167,17 +169,18 @@ final class SearchViewModel: ObservableObject {
             let order = Self.platformIds
             groups = results
                 .sorted { (order.firstIndex(of: $0.0) ?? 99) < (order.firstIndex(of: $1.0) ?? 99) }
-                .map { PlatformGroup(platform: $0.0, tracks: $0.1.tracks,
+                .map { PlatformGroup(platform: $0.0, tracks: dedupedById($0.1.tracks),
                                     hasMore: $0.1.hasMore, totalCount: $0.1.totalCount,
                                     error: $0.1.errors[$0.0]) }
         } else {
             let result = await NativeBridge.search(platform: source, query: query,
                                                    limit: Self.pageLimit, offset: 0)
             guard seq == searchSeq else { return }
-            tracks = result.tracks
-            playlists = result.playlists
-            artists = result.artists
-            albums = result.albums
+            // r55：按 id 去重——上游可回重歌，ForEach 同 id 会 trap。
+            tracks = dedupedById(result.tracks)
+            playlists = dedupedById(result.playlists)
+            artists = dedupedById(result.artists)
+            albums = dedupedById(result.albums)
             hasMore = result.hasMore
             totalCount = result.totalCount
             searchError = result.errors[source]
@@ -197,7 +200,8 @@ final class SearchViewModel: ObservableObject {
             let result = await NativeBridge.search(platform: source, query: q,
                                                    limit: Self.pageLimit, offset: tracks.count)
             guard seq == searchSeq else { return }
-            tracks.append(contentsOf: result.tracks)
+            // r55：分页 append 也可跨页重——合并后再按 id 去重。
+            tracks = dedupedById(tracks + result.tracks)
             hasMore = result.hasMore
             totalCount = result.totalCount
             searchError = result.errors[source]
@@ -220,7 +224,8 @@ final class SearchViewModel: ObservableObject {
                                                    limit: Self.pageLimit,
                                                    offset: groups[index].tracks.count)
             guard seq == searchSeq else { return }
-            groups[index].tracks.append(contentsOf: result.tracks)
+            // r55：组内分页 append 也可跨页重——合并后再按 id 去重。
+            groups[index].tracks = dedupedById(groups[index].tracks + result.tracks)
             groups[index].hasMore = result.hasMore
             groups[index].totalCount = result.totalCount
             groups[index].error = result.errors[platform]

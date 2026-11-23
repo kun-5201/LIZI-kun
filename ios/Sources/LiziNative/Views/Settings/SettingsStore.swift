@@ -10,7 +10,7 @@ import QuartzCore
 /// | 设置项 | 键 | 默认 | 备注 |
 /// |---|---|---|---|
 /// | 动画插图 | `lizi.animatedArtwork` | 开 | 与 NowPlayingCoordinator 同键，开关真生效 |
-/// | LRCLIB 兜底 | `lizi.lrclib.enabled` | 开 | 与 Lrclib.enabledKey 同键 |
+/// | LRCLIB 兜底 | 旧兜底键 | — | r55 已删：旧兜底库全删，官方无词时走跨平台自动匹配 |
 /// （r31-settings-organization 已删：平台头像 `lizi.hall.platAvatar` /
 /// 平台颜色 `lizi.hall.platColor` / 大厅内容轨 `lizi.hall.rail` 三开关
 /// 只写键、原生大厅从不读，拨了无效；壳版 public/app.js 仍自带这三项，
@@ -147,11 +147,8 @@ final class SettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(animatedArtwork, forKey: "lizi.animatedArtwork") }
     }
 
-    /// LRCLIB 歌词兜底（壳版第 13 轮第 20 件）：官方歌词优先；开后官方没有
-    /// 歌词时才用 LRCLIB 兜底。默认开，与 Lrclib.isEnabled 同键同语义。
-    @Published var lrclibEnabled: Bool = Lrclib.isEnabled {
-        didSet { Lrclib.setEnabled(lrclibEnabled) }
-    }
+    // r55 Folia 歌词：LRCLIB 歌词兜底开关已删（
+    // 旧兜底库全删；官方无词时走跨平台自动匹配，不再走 LRCLIB）。
 
     // r31-settings-organization：平台头像 / 平台颜色铺色 / 大厅内容轨
     // 三开关已删（只写键、原生大厅从不读，拨了无效；见文件头键表注）。

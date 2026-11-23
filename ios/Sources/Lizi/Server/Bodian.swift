@@ -524,16 +524,12 @@ final class BodianService {
 
     // MARK: - 歌词（src/playback.cjs 的 decodeLyrics）
 
-    /// LRCLIB 兜底（第 11 轮）：元数据来自前端 srcLyric 传参。波点没有现成的
-    /// 单曲详情接口，不新写；传参缺歌名时 Lrclib 直接回 nil，不发请求。
-    private func lrclibFallback(req: HttpRequest) async -> (lyric: String, yrc: String)? {
-        await Lrclib.fetch(artist: req.string("artist"), track: req.string("s"),
-                           album: req.string("album"), duration: req.int("duration"))
-    }
-
     /// lyrics：GET mlyric /mobi.s?f=bodian&q=base64(...)&uid=&token=（未签名）；
     /// q 明文 `type=lyric&req=2&lrcx=1&rid={id}&songname=&artist=&corp=kuwo&fromchannel=bodian`；
-    /// 响应 result.data.content 先 base64 解码再 decodeLyrics。
+    /// 响应 `data.content` 先 base64 解码再 decodeLyrics（r55 实测：
+    /// 上游回的是顶层 `data.content`，旧代码读的 `result.data.content`
+    /// 是空的——波点歌词之前一直在走这条错路抛错、再掉进已删的 LRCLIB
+    /// 兜底；这里两层都认，`data.content` 优先）。
     private func lyricsOp(id: String) async throws -> (mainText: String, wordByWordText: String?) {
         let plain = "type=lyric&req=2&lrcx=1&rid=\(id)&songname=&artist=&corp=kuwo&fromchannel=bodian"
         let q = Data(plain.utf8).base64EncodedString()
@@ -543,7 +539,9 @@ final class BodianService {
                                           ("uid", sess == nil ? "-1" : scStr(sess!, "uid")),
                                           ("token", sess == nil ? "" : scStr(sess!, "token"))],
                                  base: Self.bdLyricBase)
-        guard let content = ((obj["result"] as? [String: Any])?["data"] as? [String: Any])?["content"] as? String,
+        let content = ((obj["data"] as? [String: Any])?["content"] as? String)
+            ?? ((obj["result"] as? [String: Any])?["data"] as? [String: Any])?["content"] as? String
+        guard let content,
               let decoded = Data(base64Encoded: content),
               let text = String(data: decoded, encoding: .utf8) else {
             throw BodianError(code: "invalid-response", message: "波点歌词返回缺 content", upstreamCode: nil)
@@ -554,10 +552,10 @@ final class BodianService {
     /// decodeLyrics：mainText 去全部 `<-?\d+,-?\d+>` 与全部 `[kuwo:…]` 标签；
     /// wordByWordText 仅当含逐字时间戳时为 decodeBodianWordTiming，否则 null。
     private static func bdDecodeLyrics(_ content: String) -> (mainText: String, wordByWordText: String?) {
-        let tagRegex = try! NSRegularExpression(pattern: #"<-?\d+,-?\d+>|\[kuwo:[^\]]*\]"#)
-        let mainText = tagRegex.stringByReplacingMatches(in: content,
+        let tagRegex = liziRegex(#"<-?\d+,-?\d+>|\[kuwo:[^\]]*\]"#)
+        let mainText = tagRegex?.stringByReplacingMatches(in: content,
                                                          range: NSRange(content.startIndex..., in: content),
-                                                         withTemplate: "")
+                                                         withTemplate: "") ?? content
         let hasWordTiming = content.range(of: #"<-?\d+,-?\d+>"#, options: .regularExpression) != nil
         guard hasWordTiming else { return (mainText, nil) }
         return (mainText, bdWordTiming(content))
@@ -569,22 +567,22 @@ final class BodianService {
     /// start = trunc(|(a+b)/(2*startFactor)|)，duration = trunc(|(a-b)/(2*durationFactor)|)。
     private static func bdWordTiming(_ content: String) -> String? {
         var factors = 11
-        if let m = try! NSRegularExpression(pattern: #"\[kuwo:([0-7]+)\]"#)
-            .firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
+        if let m = liziRegex(#"\[kuwo:([0-7]+)\]"#)
+            ?.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
            let r = Range(m.range(at: 1), in: content) {
             factors = Int(String(content[r]), radix: 8) ?? 11
         }
         let startFactor = factors / 10
         let durationFactor = factors % 10
         guard startFactor != 0, durationFactor != 0 else { return nil }
-        let kuwoRegex = try! NSRegularExpression(pattern: #"\[kuwo:[^\]]*\]"#)
-        let stripped = kuwoRegex.stringByReplacingMatches(in: content,
+        let kuwoRegex = liziRegex(#"\[kuwo:[^\]]*\]"#)
+        let stripped = kuwoRegex?.stringByReplacingMatches(in: content,
                                                           range: NSRange(content.startIndex..., in: content),
-                                                          withTemplate: "")
-        let abRegex = try! NSRegularExpression(pattern: #"<(-?\d+),(-?\d+)>"#)
+                                                          withTemplate: "") ?? content
+        let abRegex = liziRegex(#"<(-?\d+),(-?\d+)>"#)
         var result = ""
         var lastEnd = stripped.startIndex
-        for m in abRegex.matches(in: stripped, range: NSRange(stripped.startIndex..., in: stripped)) {
+        for m in abRegex?.matches(in: stripped, range: NSRange(stripped.startIndex..., in: stripped)) ?? [] {
             guard let r = Range(m.range, in: stripped),
                   let aR = Range(m.range(at: 1), in: stripped),
                   let bR = Range(m.range(at: 2), in: stripped),
@@ -875,23 +873,20 @@ final class BodianService {
                                    "quality": scStr(r, "quality"),
                                    "reason": reason, "error": err])
             case "lyric":
+                // r55 Folia 歌词：mlyric 直连 + Folia 字段形；LRCLIB 兜底已删。
+                // Folia 波点只有桌面桥，Lizi 无桥；这就是等价的原生直读。
+                // Folia：波点无翻译/音译字段。
                 guard !req.string("id").isEmpty else { return .error(400, "缺少 id") }
                 do {
                     let (mainText, wbw) = try await lyricsOp(id: req.string("id"))
                     let yrc = awlrcToYrc(wbw ?? "")
-                    if mainText.isEmpty && yrc.isEmpty, let fb = await lrclibFallback(req: req) {
-                        return .json(200, ["code": 200, "lyric": fb.lyric, "yrc": "", "tlyric": "",
-                                           "format": "lrc"])
-                    }
-                    return .json(200, ["code": 200, "lyric": mainText, "yrc": yrc, "tlyric": "",
-                                       "format": !yrc.isEmpty ? "yrc" : (!mainText.isEmpty ? "lrc" : "none")])
+                    return .json(200, ["code": 200, "mainText": mainText, "wordByWordText": yrc,
+                                       "translationText": "", "romanizationText": "",
+                                       "isPureMusic": false, "source": "bodian"])
                 } catch let e as BodianError {
-                    // 第 11 轮：官方抛错也试一次兜底；兜底失败回原来的 error 形状。
-                    if let fb = await lrclibFallback(req: req) {
-                        return .json(200, ["code": 200, "lyric": fb.lyric, "yrc": "", "tlyric": "",
-                                           "format": "lrc"])
-                    }
-                    return .json(200, ["code": 200, "lyric": "", "yrc": "", "tlyric": "", "format": "none",
+                    return .json(200, ["code": 200, "mainText": "", "wordByWordText": "",
+                                       "translationText": "", "romanizationText": "",
+                                       "isPureMusic": false, "source": "bodian",
                                        "error": e.message])
                 }
             case "playlist/tracks":

@@ -1,4 +1,5 @@
 import Foundation
+import Compression
 import WebKit // U9：登出时清 WKWebsiteDataStore 里的 QQ 域 cookie
 
 /// QQ 音乐：@yakult-green-tea/qq-music-api@3.3.5 的 Swift 移植。
@@ -2685,45 +2686,342 @@ extension QQService {
         return []
     }
 
-    /// LRCLIB 兜底（第 11 轮）：只在官方回空的兜底路径上查一次现成的
-    /// songDetail（get_song_detail_yqq，resolvePlayUrl/previewUrl 已在用，
-    /// 不新写接口），拿歌名/歌手/专辑/时长走 LRCLIB。
-    private func qqLrclibFallback(mid: String) async -> (lyric: String, yrc: String)? {
-        guard let detail = await songDetail(mid: mid), let t = qqTrack(detail) else { return nil }
-        let name = t["name"] as? String ?? ""
-        guard !name.isEmpty else { return nil }
-        return await Lrclib.fetch(artist: t["artists"] as? String ?? "", track: name,
-                                  album: t["album"] as? String ?? "",
-                                  duration: (t["duration"] as? Int ?? 0) / 1000)
-    }
+    // MARK: - 歌词（r55 Folia 歌词：qqLyricProvider.ts 直连流程，原生重写）
 
+    /// QQ 歌词：POST https://u.y.qq.com/cgi-bin/musicu.fcg，
+    /// GetPlayLyricInfo（匿名：Cookie tmeLoginType=-1，UA okhttp/3.14.9），
+    /// 回包 lyric/trans/roma 三字段各为十六进制密文 → QRC 解密 → QRC 文本。
+    /// 数字 songID + 歌名/专辑/歌手取自现成的 songDetail（get_song_detail_yqq，
+    /// 匿名走 UCommon，不新写接口）。任何一步失败回 Folia 式空结果
+    /// （mainText 等全空、isPureMusic false），不抛错、不编词。
+    /// 旧 fcg_query_lyric_new.fcg（base64 LRC，yrc 恒空）与 LRCLIB 兜底已删。
     private func lyric(req: HttpRequest) async throws -> HttpResponse {
         let mid = req.string("mid").isEmpty ? req.string("id") : req.string("mid")
         guard !mid.isEmpty else { return .json(400, ["code": 400, "error": "mid required"]) }
-        let data: [String: Any]
-        do {
-            data = try await cgi(path: "/lyric/fcgi-bin/fcg_query_lyric_new.fcg",
-                                 params: ["songmid": mid,
-                                          "pcachetime": String(Int(Date().timeIntervalSince1970 * 1000))])
-        } catch {
-            // 上游抛错也试一次兜底（LRCLIB 是另一个 host）；兜底失败再原样抛，
-            // handle 回 502，不改变原来的失败面。
-            if let fb = await qqLrclibFallback(mid: mid) {
-                return .json(200, ["code": 200, "lyric": fb.lyric, "tlyric": "", "yrc": "",
-                                    "format": "lrc"])
+        let empty: [String: Any] = ["code": 200, "mainText": "", "wordByWordText": "",
+                                    "translationText": "", "romanizationText": "",
+                                    "isPureMusic": false, "source": "qq"]
+        guard let detail = await songDetail(mid: mid), let t = qqTrack(detail) else { return .json(200, empty) }
+        let songId = t["songId"] as? Int ?? 0
+        let name = t["name"] as? String ?? ""
+        guard songId > 0, !name.isEmpty else { return .json(200, empty) }
+        let artists = t["artists"] as? String ?? ""
+        let album = t["album"] as? String ?? ""
+        let interval = (t["duration"] as? Int ?? 0) / 1000
+        guard let data = try? await lyricMusicu(songId: songId, songName: name,
+                                                albumName: album, singerName: artists,
+                                                interval: interval) else { return .json(200, empty) }
+        let lyricQrc = Self.qrcDecryptHex(scStr(data, "lyric")) ?? ""
+        let transQrc = Self.qrcDecryptHex(scStr(data, "trans")) ?? ""
+        let romaQrc = Self.qrcDecryptHex(scStr(data, "roma")) ?? ""
+        return .json(200, ["code": 200,
+                           "mainText": Self.qrcToLrc(lyricQrc),
+                           "wordByWordText": Self.qrcToYrc(lyricQrc),
+                           "translationText": Self.qrcToLrc(transQrc),
+                           "romanizationText": Self.qrcToLrc(romaQrc),
+                           "isPureMusic": false,
+                           "source": "qq"])
+    }
+
+    /// Folia requestQQ 同款直连（只学接口形状：{comm, request:{method,module,
+    /// param}} + 匿名头；不用 Lizi 现成的 musicu()，那只是 req_0 形状）。
+    /// comm 用 QQ 音乐轻版客户端标识（ct 11 / cv 1003006 / tmeAppID
+    /// qqmusiclight），param 按 GetPlayLyricInfo 要求：歌名/专辑/歌手为
+    /// UTF-8 Base64，interval 为整秒，crypt/qrc/trans/roma 全开。
+    private func lyricMusicu(songId: Int, songName: String, albumName: String,
+                             singerName: String, interval: Int) async throws -> [String: Any] {
+        func b64(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
+        let body: [String: Any] = [
+            "comm": ["ct": 11, "cv": "1003006", "v": "1003006", "os_ver": "15",
+                     "tmeAppID": "qqmusiclight", "nettype": "NETWORK_WIFI",
+                     "udid": "0", "uid": "0"],
+            "request": ["method": "GetPlayLyricInfo",
+                        "module": "music.musichallSong.PlayLyricInfo",
+                        "param": ["songID": songId, "songName": b64(songName),
+                                  "albumName": b64(albumName), "singerName": b64(singerName),
+                                  "interval": interval, "crypt": 1, "qrc": 1, "qrc_t": 0,
+                                  "trans": 1, "trans_t": 0, "roma": 1, "roma_t": 0,
+                                  "lrc_t": 0, "type": 0, "ct": 19, "cv": 2111]]]
+        guard let bodyData = qqJSONData(body), let url = URL(string: qqMusicuURL) else {
+            throw QQUpstreamError(code: -1, message: "musicu 请求构造失败")
+        }
+        let headers = ["Content-Type": "application/json",
+                       "Cookie": "tmeLoginType=-1;",
+                       "User-Agent": "okhttp/3.14.9"]
+        let (data, resp) = try await Upstream.fetch(url, headers: headers, timeout: 20,
+                                                    method: "POST", body: bodyData)
+        guard resp.statusCode == 200, let obj = Upstream.jsonObject(data),
+              scInt(obj, "code") == 0,
+              let req = obj["request"] as? [String: Any], scInt(req, "code") == 0,
+              let d = req["data"] as? [String: Any] else {
+            throw QQUpstreamError(code: -1, message: "GetPlayLyricInfo 上游错误")
+        }
+        return d
+    }
+
+    // MARK: - QRC 解密与换算（r55 Folia 歌词：qrcDecrypt + parseQRC 的流程，
+    // 全部按 DES 公开规范 + 实测行为自己重写，不搬 Folia 代码）
+
+    /// QRC 十六进制密文 → 明文 QRC 文本（XML 包裹，LyricContent 里是
+    /// `[起点ms,持续ms](起点ms,持续ms)字…` 行）。失败回 nil（调用方按无词走）。
+    /// 步骤：十六进制转字节 → 每 8 字节一组做 QQ 版 3DES 解密 → zlib 解压。
+    static func qrcDecryptHex(_ hex: String) -> String? {
+        let clean = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, clean.count % 2 == 0 else { return nil }
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(clean.count / 2)
+        var idx = clean.startIndex
+        while idx < clean.endIndex {
+            let next = clean.index(idx, offsetBy: 2)
+            guard let b = UInt8(clean[idx..<next], radix: 16) else { return nil }
+            bytes.append(b)
+            idx = next
+        }
+        guard !bytes.isEmpty else { return nil }
+        let decrypted = qqTripleDESDecrypt(bytes, key: Array(qrcKey24.utf8))
+        guard let text = qqZlibInflate(Data(decrypted)) else { return nil }
+        return text.isEmpty ? nil : text
+    }
+
+    /// QRC 24 字节密钥（接口常量，Folia qrcDecrypt.ts 同值；只读这个常量，
+    /// 解密实现是下面自己写的 DES 变体）。
+    static let qrcKey24 = "!@#)(*$%123ZXC!@!@#)(NHL"
+
+    /// QQ 版 3DES 解密：DES-EDE 顺序 D(K3) → E(K2) → D(K1)，每组独立
+    /// （ECB 式分组，末组不足 8 字节补 0，与 Folia 的垫块口径一致）。
+    /// 注意它不是标准 3DES——2026-11-23 VM 实测：标准 3DES（openssl
+    /// des-ede3-ecb）解 QQ 密文得到乱码、zlib 解压失败，而下面这套变体
+    /// 解出的字节与 Folia 的解密结果逐字节一致、zlib 解压后得到 QRC 明文。
+    /// 两处偏差（都是 QQ 服务端加密沿用的同一套做法，解密必须原样对上）：
+    /// ① 数据块与密钥在进 DES 前、解密出 DES 后，各按「每 4 字节半区内
+    /// 字节倒序」重排（等价于 Folia 位寻址把每 32 位字当小端读）；
+    /// ② 密钥编排 PC-2 取 D 半区时下标多 1（标准是值-28，这里是值-27，
+    /// 越界的那一位恒为 0）。其余（IP/FP/E/S盒/P/PC-1/轮次）均为标准 DES。
+    static func qqTripleDESDecrypt(_ data: [UInt8], key key24: [UInt8]) -> [UInt8] {
+        guard key24.count == 24 else { return data }
+        var out = [UInt8]()
+        out.reserveCapacity(data.count)
+        var i = 0
+        while i < data.count {
+            var block = Array(data[i..<min(i + 8, data.count)])
+            let validCount = block.count
+            while block.count < 8 { block.append(0) }
+            var t = qqDESBlock(block, key: Array(key24[16..<24]), decrypt: true)
+            t = qqDESBlock(t, key: Array(key24[8..<16]), decrypt: false)
+            t = qqDESBlock(t, key: Array(key24[0..<8]), decrypt: true)
+            out.append(contentsOf: t.prefix(validCount))
+            i += 8
+        }
+        return out
+    }
+
+    /// 单组 DES（FIPS 46-3 表驱动，0 基下标）：IP → 16 轮 Feistel →
+    /// FP；decrypt 时子密钥倒序。输入/输出块先按①做半区字节倒序。
+    static func qqDESBlock(_ block: [UInt8], key key8: [UInt8], decrypt: Bool) -> [UInt8] {
+        guard block.count == 8, key8.count == 8 else { return block }
+        let inBytes = qqReverseHalves(block)
+        let keyBytes = qqReverseHalves(key8)
+        var v = qqPermute(qqU64BE(inBytes), table: qqIPTable, inputBits: 64)
+        var left = UInt32(v >> 32)
+        var right = UInt32(v & 0xFFFFFFFF)
+        var subkeys = qqDESSubkeys(keyBytes)
+        if decrypt { subkeys.reverse() }
+        for k in subkeys {
+            let next = left ^ qqDESRound(right, subkey: k)
+            left = right
+            right = next
+        }
+        v = (UInt64(right) << 32) | UInt64(left)
+        let out = qqBytesBE(qqPermute(v, table: qqFPTable, inputBits: 64))
+        return qqReverseHalves(out)
+    }
+
+    /// 每 4 字节半区内字节倒序：[b0 b1 b2 b3 b4 b5 b6 b7] → [b3 b2 b1 b0 b7 b6 b5 b4]。
+    static func qqReverseHalves(_ b: [UInt8]) -> [UInt8] {
+        guard b.count == 8 else { return b }
+        return [b[3], b[2], b[1], b[0], b[7], b[6], b[5], b[4]]
+    }
+
+    /// 通用位重排：按表（0 基，MSB 优先）从 inputBits 位的 value 里取值拼出新值。
+    static func qqPermute(_ value: UInt64, table: [Int], inputBits: Int) -> UInt64 {
+        var out: UInt64 = 0
+        for pos in table {
+            out = (out << 1) | ((value >> (inputBits - 1 - pos)) & 1)
+        }
+        return out
+    }
+
+    /// 子密钥编排：PC-1 分 C/D 各 28 位 → 每轮左旋（1,1,2,2,…）→ PC-2
+    /// 压成 48 位。D 半区取位用 QQ 口径值-27（标准是值-28），越界读 0。
+    static func qqDESSubkeys(_ keyBytes: [UInt8]) -> [UInt64] {
+        let kb = UInt64(bigEndianBytes: keyBytes)
+        var c = qqPermute(kb, table: qqPC1CTable, inputBits: 64) // 28 位
+        var d = qqPermute(kb, table: qqPC1DTable, inputBits: 64) // 28 位
+        var out: [UInt64] = []
+        for shift in qqDESShifts {
+            c = ((c << shift) | (c >> (28 - shift))) & 0xFFFFFFF
+            d = ((d << shift) | (d >> (28 - shift))) & 0xFFFFFFF
+            var k: UInt64 = 0
+            for i in 0..<24 {
+                k = (k << 1) | ((c >> (27 - qqPC2Table[i])) & 1)
             }
-            throw error
+            for i in 24..<48 {
+                let idx = qqPC2Table[i] - 27
+                let bit: UInt64 = (idx >= 0 && idx < 28) ? ((d >> (27 - idx)) & 1) : 0
+                k = (k << 1) | bit
+            }
+            out.append(k)
         }
-        let lyricText = Data(base64Encoded: scStr(data, "lyric"))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
-        let tlyricText = Data(base64Encoded: scStr(data, "trans"))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
-        if lyricText.isEmpty, let fb = await qqLrclibFallback(mid: mid) {
-            return .json(200, ["code": 200, "lyric": fb.lyric, "tlyric": "", "yrc": "",
-                                "format": "lrc"])
+        return out
+    }
+
+    /// DES 轮函数 f：E 扩展（32→48）→ 异或子密钥 → 8 个 S 盒 → P 置换。
+    static func qqDESRound(_ r: UInt32, subkey: UInt64) -> UInt32 {
+        let expanded = qqPermute(UInt64(r), table: qqETable, inputBits: 32)
+        let x = expanded ^ subkey
+        var s: UInt32 = 0
+        for i in 0..<8 {
+            let grp = Int((x >> (42 - 6 * i)) & 0x3F)
+            let row = ((grp & 0x20) >> 4) | (grp & 1)
+            let col = (grp >> 1) & 0xF
+            s = (s << 4) | UInt32(qqSBoxes[i][row * 16 + col])
         }
-        return .json(200, ["code": 200, "lyric": lyricText, "tlyric": tlyricText, "yrc": "",
-                            "format": lyricText.isEmpty ? "none" : "lrc"])
+        return UInt32(qqPermute(UInt64(s), table: qqPTable, inputBits: 32))
+    }
+
+    /// zlib 解压（COMPRESSION_ZLIB；QRC 解密后是带 78 9C 头的 zlib 流，
+    /// 不是裸 deflate——VM 实测解密字节以 78 9C 开头）。失败回 nil。
+    static func qqZlibInflate(_ data: Data) -> String? {
+        var size = max(data.count * 4, 65536)
+        for _ in 0..<4 {
+            var out = Data(count: size)
+            var decoded = 0
+            let ok: Bool = data.withUnsafeBytes { src in
+                out.withUnsafeMutableBytes { dst in
+                    guard let s = src.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                          let d = dst.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return false }
+                    decoded = compression_decode_buffer(d, size, s, data.count, nil, COMPRESSION_ZLIB)
+                    return decoded > 0
+                }
+            }
+            if ok { return String(data: out.prefix(decoded), encoding: .utf8) }
+            size *= 4
+        }
+        return nil
+    }
+
+    /// 8 字节大端 → UInt64。
+    static func qqU64BE(_ b: [UInt8]) -> UInt64 {
+        var v: UInt64 = 0
+        for byte in b.prefix(8) { v = (v << 8) | UInt64(byte) }
+        return v
+    }
+
+    /// UInt64 → 8 字节大端。
+    static func qqBytesBE(_ v: UInt64) -> [UInt8] {
+        (0..<8).map { UInt8((v >> (56 - 8 * $0)) & 0xFF) }
+    }
+
+    // MARK: - DES 常量表（FIPS 46-3 标准表，0 基下标；与上面变体口径
+    // 配合使用——实测模型与 Folia 解密结果逐字节一致，见回报）
+
+    /// 初始置换 IP（64 位）。
+    static let qqIPTable = [57,49,41,33,25,17,9,1,59,51,43,35,27,19,11,3,61,53,45,37,29,21,13,5,63,55,47,39,31,23,15,7,56,48,40,32,24,16,8,0,58,50,42,34,26,18,10,2,60,52,44,36,28,20,12,4,62,54,46,38,30,22,14,6]
+    /// 末置换 FP（IP 的逆，64 位）。
+    static let qqFPTable = [39,7,47,15,55,23,63,31,38,6,46,14,54,22,62,30,37,5,45,13,53,21,61,29,36,4,44,12,52,20,60,28,35,3,43,11,51,19,59,27,34,2,42,10,50,18,58,26,33,1,41,9,49,17,57,25,32,0,40,8,48,16,56,24]
+    /// E 扩展（32→48 位）。
+    static let qqETable = [31,0,1,2,3,4,3,4,5,6,7,8,7,8,9,10,11,12,11,12,13,14,15,16,15,16,17,18,19,20,19,20,21,22,23,24,23,24,25,26,27,28,27,28,29,30,31,0]
+    /// P 置换（32 位）。
+    static let qqPTable = [15,6,19,20,28,11,27,16,0,14,22,25,4,17,30,9,1,7,23,13,31,26,2,8,18,12,29,5,21,10,3,24]
+    /// PC-1 的 C 半区（28 位）。
+    static let qqPC1CTable = [56,48,40,32,24,16,8,0,57,49,41,33,25,17,9,1,58,50,42,34,26,18,10,2,59,51,43,35]
+    /// PC-1 的 D 半区（28 位）。
+    static let qqPC1DTable = [62,54,46,38,30,22,14,6,61,53,45,37,29,21,13,5,60,52,44,36,28,20,12,4,27,19,11,3]
+    /// PC-2 压缩置换（56→48 位；D 半区取位时 QQ 口径减 27，见 qqDESSubkeys）。
+    static let qqPC2Table = [13,16,10,23,0,4,2,27,14,5,20,9,22,18,11,3,25,7,15,6,26,19,12,1,40,51,30,36,46,54,29,39,50,44,32,47,43,48,38,55,33,52,45,41,49,35,28,31]
+    /// 每轮 C/D 左旋位数。
+    static let qqDESShifts = [1,1,2,2,2,2,2,2,1,2,2,2,2,2,2,1]
+    /// 8 个 S 盒（各 64 项，行 = 首尾两位，列 = 中间四位）。
+    static let qqSBoxes: [[Int]] = [
+        [14,4,13,1,2,15,11,8,3,10,6,12,5,9,0,7,0,15,7,4,14,2,13,1,10,6,12,11,9,5,3,8,4,1,14,8,13,6,2,11,15,12,9,7,3,10,5,0,15,12,8,2,4,9,1,7,5,11,3,14,10,0,6,13],
+        [15,1,8,14,6,11,3,4,9,7,2,13,12,0,5,10,3,13,4,7,15,2,8,15,12,0,1,10,6,9,11,5,0,14,7,11,10,4,13,1,5,8,12,6,9,3,2,15,13,8,10,1,3,15,4,2,11,6,7,12,0,5,14,9],
+        [10,0,9,14,6,3,15,5,1,13,12,7,11,4,2,8,13,7,0,9,3,4,6,10,2,8,5,14,12,11,15,1,13,6,4,9,8,15,3,0,11,1,2,12,5,10,14,7,1,10,13,0,6,9,8,7,4,15,14,3,11,5,2,12],
+        [7,13,14,3,0,6,9,10,1,2,8,5,11,12,4,15,13,8,11,5,6,15,0,3,4,7,2,12,1,10,14,9,10,6,9,0,12,11,7,13,15,1,3,14,5,2,8,4,3,15,0,6,10,10,13,8,9,4,5,11,12,7,2,14],
+        [2,12,4,1,7,10,11,6,8,5,3,15,13,0,14,9,14,11,2,12,4,7,13,1,5,0,15,10,3,9,8,6,4,2,1,11,10,13,7,8,15,9,12,5,6,3,0,14,11,8,12,7,1,14,2,13,6,15,0,9,10,4,5,3],
+        [12,1,10,15,9,2,6,8,0,13,3,4,14,7,5,11,10,15,4,2,7,12,9,5,6,1,13,14,0,11,3,8,9,14,15,5,2,8,12,3,7,0,4,10,1,13,11,6,4,3,2,12,9,5,15,10,11,14,1,7,6,0,8,13],
+        [4,11,2,14,15,0,8,13,3,12,9,7,5,10,6,1,13,0,11,7,4,9,1,10,14,3,5,12,2,15,8,6,1,4,11,13,12,3,7,14,10,15,6,8,0,5,9,2,6,11,13,8,1,4,10,7,9,5,0,15,14,2,3,12],
+        [13,2,8,4,6,15,11,1,10,9,3,14,5,0,12,7,1,15,13,8,10,3,7,4,12,5,6,11,0,14,9,2,7,11,4,1,9,12,14,2,0,6,10,13,15,3,5,8,2,1,14,7,4,10,8,13,15,12,9,0,3,5,6,11],
+    ]
+
+    // MARK: - QRC → YRC / LRC（Folia parseQRC 的行/词结构，自己重写）
+
+    /// QRC 一行：`[起点ms,持续ms](起点ms,持续ms[,0])字…`，词起点为绝对毫秒；
+    /// 文本可能包在 XML 的 LyricContent 属性里（`<Lyric_1 …>` 行与 `"/>` 行
+    /// 不合行首正则，直接跳过）。无词标签的行（纯文本行）words 为空。
+    struct QQRCLine {
+        var startMs: Int
+        var durMs: Int
+        var words: [(startMs: Int, durMs: Int, text: String)]
+        var text: String
+    }
+
+    static func qrcLines(_ qrc: String) -> [QQRCLine] {
+        guard !qrc.isEmpty else { return [] }
+        let headRe = liziRegex(#"^\[(\d+),(\d+)\](.*)$"#)
+        let tagRe = liziRegex(#"\((\d+),(\d+)(?:,\d+)?\)"#)
+        var out: [QQRCLine] = []
+        for raw in qrc.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let m = headRe?.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+                  let r1 = Range(m.range(at: 1), in: line),
+                  let r2 = Range(m.range(at: 2), in: line),
+                  let r3 = Range(m.range(at: 3), in: line),
+                  let start = Int(line[r1]), let dur = Int(line[r2]) else { continue }
+            let rest = String(line[r3])
+            let ns = rest as NSString
+            let matches = tagRe?.matches(in: rest, range: NSRange(location: 0, length: ns.length)) ?? []
+            var words: [(startMs: Int, durMs: Int, text: String)] = []
+            for (i, tm) in matches.enumerated() {
+                guard tm.numberOfRanges == 3,
+                      let s = Int(ns.substring(with: tm.range(at: 1))),
+                      let d = Int(ns.substring(with: tm.range(at: 2))) else { continue }
+                let textStart = tm.range.location + tm.range.length
+                let textEnd = (i + 1 < matches.count) ? matches[i + 1].range.location : ns.length
+                guard textEnd >= textStart else { continue }
+                let text = ns.substring(with: NSRange(location: textStart, length: textEnd - textStart))
+                guard !text.isEmpty else { continue }
+                words.append((startMs: s, durMs: d, text: text))
+            }
+            let text: String
+            if words.isEmpty {
+                text = rest.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                text = words.map { $0.text }.joined()
+            }
+            guard !text.isEmpty else { continue }
+            out.append(QQRCLine(startMs: start, durMs: dur, words: words, text: text))
+        }
+        return out
+    }
+
+    /// QRC → YRC：`[行起点,行时长](字绝对起点,字时长,0)字…`（客户端
+    /// parseYRCLine 只认三段式词标签，这里统一补 `,0`）。无词的行跳过。
+    static func qrcToYrc(_ qrc: String) -> String {
+        qrcLines(qrc).compactMap { line -> String? in
+            guard !line.words.isEmpty else { return nil }
+            let body = line.words.map { "(\($0.startMs),\($0.durMs),0)\($0.text)" }.joined()
+            return "[\(line.startMs),\(line.durMs)]\(body)"
+        }.joined(separator: "\n")
+    }
+
+    /// QRC → LRC：`[mm:ss.xx]行文本`（翻译/音译轨道同样先解密、再按此转
+    /// 行级形，客户端按行起点对齐）。
+    static func qrcToLrc(_ qrc: String) -> String {
+        qrcLines(qrc).map { line in
+            let mm = line.startMs / 60000
+            let ss = Double(line.startMs % 60000) / 1000.0
+            return "[\(String(format: "%02d:%05.2f", mm, ss))]\(line.text)"
+        }.joined(separator: "\n")
     }
 
     private func songUrl(req: HttpRequest) async -> HttpResponse {

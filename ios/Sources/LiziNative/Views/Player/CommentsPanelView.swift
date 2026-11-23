@@ -229,7 +229,9 @@ struct CommentsPanelView: View {
             errorMessage = error
             return
         }
-        comments += result.comments
+        // r55：分页 += 可 overlap（同用户同毫秒同文时 SongComment.id 会撞）——
+        // 合并后再按 id 去重。offset 仍按服务端实际回的条数进（分页游标不动）。
+        comments = dedupedById(comments + result.comments)
         total = result.total
         hasMore = result.hasMore
         offset += result.comments.count

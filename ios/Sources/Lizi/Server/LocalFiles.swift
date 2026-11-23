@@ -33,7 +33,10 @@ enum LocalMusic {
     private static let indexFileName = "index.json"
 
     static var directory: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        // r55：.first! 改回落——沙盒目录正常情况下一定有，万一取不到
+        // （系统异常）回 temporaryDirectory，不猝死。
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
         return docs.appendingPathComponent("LocalMusic", isDirectory: true)
     }
 

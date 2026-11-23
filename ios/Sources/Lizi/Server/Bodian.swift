@@ -567,8 +567,7 @@ final class BodianService {
     /// start = trunc(|(a+b)/(2*startFactor)|)，duration = trunc(|(a-b)/(2*durationFactor)|)。
     private static func bdWordTiming(_ content: String) -> String? {
         var factors = 11
-        if let m = liziRegex(#"\[kuwo:([0-7]+)\]"#)
-            ?.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
+        if let m = liziRegex(#"\[kuwo:([0-7]+)\]"#)?.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
            let r = Range(m.range(at: 1), in: content) {
             factors = Int(String(content[r]), radix: 8) ?? 11
         }

@@ -1693,8 +1693,7 @@ actor FoliaKugouService {
     /// type 1 翻译；每轨的行与主歌词行按序号对齐（Folia parseKRC 同款），
     /// 用主 LRC 行的时间戳拼回 `[mm:ss.xx]文本` 行级文本。无内嵌轨回空串。
     private static func krcEmbeddedTracks(krc: String, lrc: String) -> (translation: String, romanization: String) {
-        guard let m = liziRegex(#"\[language:([^\]]*)\]"#)
-                ?.firstMatch(in: krc, range: NSRange(krc.startIndex..., in: krc)),
+        guard let m = liziRegex(#"\[language:([^\]]*)\]"#)?.firstMatch(in: krc, range: NSRange(krc.startIndex..., in: krc)),
               let r = Range(m.range(at: 1), in: krc) else { return ("", "") }
         var b64 = String(krc[r]).trimmingCharacters(in: .whitespacesAndNewlines)
         while b64.count % 4 != 0 { b64 += "=" }

@@ -29,6 +29,9 @@ import Foundation
 ///   置起时 `loadRailPage` 绕开缓存重拉（见 HomeViewModel），缓存本身不
 ///   管旗子，只管存取。
 /// - 缓存就是只拉一次：不做手动刷新（用户没要）。
+///
+/// r59：本文件原文已是干净实现（全部 guard 守卫、零强制解包、
+// r59：无下标、无异步任务），重写只照抄原文，不改行为。
 @MainActor
 final class HomeDataCache {
     static let shared = HomeDataCache()

@@ -37,12 +37,15 @@ import UniformTypeIdentifiers
 /// - r28：订阅 `DownloadStore.downloadCompletedNotification`，下载一完成
 ///   就 `refresh()`——只在完成那一刻刷一次，不轮询、不跟进度走；
 ///   订阅随视图走（`.onReceive`），视图消失即取消，不留泄漏。
+/// - r59：导入任务仍是 `Task.detached`（拷文件不在主线程），但存句柄，视图消失时取消。
 struct LocalMusicSectionView: View {
     @EnvironmentObject private var playback: PlaybackStore
     @State private var entries: [LocalMusic.Entry] = []
     @State private var isExpanded = false
     @State private var isPickerPresented = false
     @State private var statusLine: String? = nil
+    /// r59：导入任务句柄——取消入口；视图消失/再次导入时先取消旧任务。
+    @State private var importTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -136,6 +139,7 @@ struct LocalMusicSectionView: View {
         .onReceive(NotificationCenter.default.publisher(for: DownloadStore.downloadCompletedNotification)) { _ in
             refresh()
         }
+        .onDisappear { importTask?.cancel(); importTask = nil }
         .sheet(isPresented: $isPickerPresented) {
             LocalMusicDocumentPicker(
                 onPick: { urls in
@@ -162,9 +166,13 @@ struct LocalMusicSectionView: View {
 
     private func refresh() { entries = LocalMusic.list() }
 
+    /// r59：`Task.detached` 存句柄——视图消失/再次导入时
+    /// 取消旧任务；`LocalMusic.importFiles` 是同步拷文件，detached
+    /// 跑在后台线程、主线程不等人，完成后再回主线程刷新列表 + 状态行。
     private func importPicked(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
-        Task.detached {
+        importTask?.cancel()
+        importTask = Task.detached {
             let result = LocalMusic.importFiles(urls: urls)
             await MainActor.run {
                 refresh()

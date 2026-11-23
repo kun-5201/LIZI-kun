@@ -1,6 +1,18 @@
 import SwiftUI
 import UIKit
 
+/// r59 重写注记：本文件行为照抄 r58 原文（环几何公式、常量、跟随语义、
+/// 删除注记一字不动）；唯一改动是四处安全改造：
+/// ① `hitTestRingCard` 的强制解包点改成安全绑定（原唯一强制解包点）；
+/// ② openRing/closeRing/scheduleHoldClose 的裸 `Task { @MainActor in }`
+/// 改成带句柄（entryTask/closeTask/holdTask），起手先取消旧任务、
+/// deinit 里统一取消，闭包一律 `[weak self]`（原 close/hold 任务强持
+/// self，句柄存回模型后会成循环引用）；
+/// ③ prefetchRingCovers 的 `Task.detached` 存句柄数组，新一轮预取先取消
+/// 上一轮的等待（只取消等待，CoverImageLoader 保证拉图本身继续跑完进缓存，
+/// 不丢封面）；④ 其余下标全部走已守卫的取法（见下文各守卫注释），
+/// 不留裸下标。
+
 /// 首页 3D 封面环（r21）：平面跑马带常态 + 手势展开全屏 3D 圆环。
 ///
 /// 视频逐帧规格（~/workspace/user/media_library/video/9e/9ee7dd02…3203.mp4，
@@ -845,6 +857,11 @@ final class HomeCoverRingModel: ObservableObject {
         flatWatchdog?.invalidate()
         ringSpringLink?.invalidate()
         if let frameRateObserver { NotificationCenter.default.removeObserver(frameRateObserver) }
+        // r59：取消本模型存的全部延迟任务句柄（entry/close/hold/预取）。
+        entryTask?.cancel()
+        closeTask?.cancel()
+        holdTask?.cancel()
+        for task in prefetchTasks { task.cancel() }
     }
     /// 平面带上的按压判定（非 Published：只在手势闭包里读写，不驱动渲染）。
     var stripPress: StripPress?
@@ -905,6 +922,15 @@ final class HomeCoverRingModel: ObservableObject {
     /// 收回），会把还没跑的展开动画误杀（手指开环后 16ms 内抬起就中招，
     /// 环会一直 entryT=0 不可见、直到 1s 后收回）。
     var entryGeneration = 0
+    /// r59：延迟任务句柄——openRing 的 16ms 展开任务（entryTask）、
+    /// closeRing 的收尾任务（closeTask）、scheduleHoldClose 的 1s 松手收回
+    /// 任务（holdTask）、prefetchRingCovers 的取图等待任务（prefetchTasks）。
+    /// 起手先取消旧任务；闭包一律 [weak self]（句柄存回模型后强持会循环引用）；
+    /// deinit 里统一取消。取消只省一次无效收尾，不改代号守卫的语义。
+    private var entryTask: Task<Void, Never>?
+    private var closeTask: Task<Void, Never>?
+    private var holdTask: Task<Void, Never>?
+    private var prefetchTasks: [Task<Void, Never>] = []
     /// 上次预取封面时的中心槽位（r33，第 2 条）：中心槽位没变不重复预取。
     var lastPrefetchCenterSlot: Int?
 
@@ -1573,7 +1599,8 @@ final class HomeCoverRingModel: ObservableObject {
         // 不复用 closeGeneration。时长先取到局部量，闭包里不再碰 Self。
         let entryGen = entryGeneration
         let enterSec = Self.enterMs / 1000
-        Task { @MainActor [weak self] in
+        entryTask?.cancel()
+        entryTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 16_000_000)
             guard let self else { return }
             guard entryGen == self.entryGeneration,
@@ -1617,8 +1644,10 @@ final class HomeCoverRingModel: ObservableObject {
             overlayOpacity = 0
         }
         let gen = closeGeneration
-        Task { @MainActor in
+        closeTask?.cancel()
+        closeTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(ms * 1_000_000) + 140_000_000)
+            guard let self else { return }
             guard gen == self.closeGeneration else { return }
             self.ringPhase = .closed
             self.entryT = 0
@@ -1865,8 +1894,10 @@ final class HomeCoverRingModel: ObservableObject {
     func scheduleHoldClose() {
         closeGeneration += 1
         let gen = closeGeneration
-        Task { @MainActor in
+        holdTask?.cancel()
+        holdTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard let self else { return }
             guard gen == self.closeGeneration,
                   self.ringPhase == .open, !self.ringDragging else { return }
             self.closeRing()
@@ -1897,7 +1928,11 @@ final class HomeCoverRingModel: ObservableObject {
             let idx = mod(center + d, itemCount)
             if let url = itemCard(at: idx).coverURL { urls.append(url) } // r43-2：第 2 件——通用卡取封面，曲目路与旧 tracks[idx].coverURL 同值
         }
-        for url in urls {
+        // r59：预取等待任务存句柄——新一轮预取先取消上一轮的等待
+        // （只取消等待，CoverImageLoader 保证拉图本身继续跑完进缓存，
+        // 不丢封面；见 CoverImageLoader.image(for:) 注释）。
+        for task in prefetchTasks { task.cancel() }
+        prefetchTasks = urls.map { url in
             Task.detached { _ = await CoverImageLoader.shared.image(for: url) }
         }
     }
@@ -2219,7 +2254,12 @@ final class HomeCoverRingModel: ObservableObject {
             let halfW = ringCard * 0.55
             let halfH = ringCardHeight / 2
             if abs(point.x - x) <= halfW, abs(point.y - slotCy) <= halfH {
-                if best == nil || abs(slot.world) < abs(best!.world) {
+                // r59：原强制解包点改成安全绑定。
+                if let currentBest = best {
+                    if abs(slot.world) < abs(currentBest.world) {
+                        best = (slot.trackIndex, slot.world)
+                    }
+                } else {
                     best = (slot.trackIndex, slot.world)
                 }
             }

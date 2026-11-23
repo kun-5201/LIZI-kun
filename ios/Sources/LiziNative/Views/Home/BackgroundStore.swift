@@ -67,12 +67,23 @@ final class BackgroundStore: ObservableObject {
         didSet { UserDefaults.standard.set(videoFileName, forKey: Self.videoFileKey) }
     }
 
+    /// r59：启动读盘任务句柄——后台读盘，一次性；读完回主线程发布。
+    /// 单例常驻，任务只跑一次就结束，不用等谁取消。
+    private var loadTask: Task<Void, Never>?
+
     private init() {
         // 启动即读盘：图片文件在就读进内存；不在（用户在文件 App 里
         // 删了、或旧版残留）也不崩——mode 照留，首页显示默认背景，
         // 设置页状态行写明未选图/未选视频，用户重选一张就行。
-        if let url = Self.imageFileURL(), let data = try? Data(contentsOf: url) {
-            backgroundImage = UIImage(data: data)
+        // r59：读盘不再在 init 里主线程同步等 IO——后台任务读盘，
+        // 读完回主线程发布；读盘没完成前 backgroundImage 仍是 nil，
+        // 首页先显示默认背景，图到了当场换上（@Published 重绘）。
+        loadTask = Task.detached(priority: .userInitiated) { [weak self] in
+            if let url = Self.imageFileURL(), let data = try? Data(contentsOf: url) {
+                await MainActor.run {
+                    self?.backgroundImage = UIImage(data: data)
+                }
+            }
         }
     }
 
@@ -85,8 +96,7 @@ final class BackgroundStore: ObservableObject {
         return mode
     }
 
-    /// 背景文件目录（Application Support/lizi.background，不存在就建；
-    /// 与 DiagLog 面包屑、SessionStore 同一个沙盒目录约定）。
+    /// 背景文件目录（Application Support/lizi.background，不存在就建）。
     static func backgroundDirectory() -> URL? {
         let fm = FileManager.default
         guard let base = fm.urls(for: .applicationSupportDirectory,

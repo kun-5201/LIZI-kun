@@ -3,6 +3,15 @@ import SwiftUI
 
 /// 首页状态：平台选择、每日推荐拉取、上次播放持久化。
 ///
+/// r59 重写注记：本文件行为照抄 r58 原文（全部取数链路、代际守卫、
+/// defer 结算、r58 railEntries 守卫、closeOpened 格式一字不动）；
+/// 唯一改动是裸 `Task {}` 全部改成带句柄、可取消：
+/// spinner/watchdog/预取/rail 任务各存句柄，新加载起手先取消旧任务、
+/// 加载结算时取消 spinner/watchdog、切台时取消预取与各栏任务。
+/// 不写 deinit——@MainActor 类的 deinit 里访问隔离状态在 Swift 6 下是
+/// 硬错（见 PlaybackStore.swift:388 先例），取消只走显式生命周期点
+/// （切台/结算/新加载起手/closeOpened），不留孤儿任务。
+///
 /// r26（用户 2026-11-20 22:39–22:40 决定）：首页 5 个来源 chips 全删、
 /// 只留每日推荐。来源切换（`Source` 枚举 / `selectedSource` /
 /// `selectSource` / 四条 rails 的 `rails` / `railLoading` / `loadRail` /
@@ -156,6 +165,15 @@ final class HomeViewModel: ObservableObject {
     /// 后起的先 cancel 前一个；closeOpened 关时 cancel，省一次无效请求；
     /// 取数回来仍有 openedPlaylist/openedAlbum 代际守卫，cancel 只是省请求）。
     private var openedTask: Task<Void, Never>?
+    /// r59：延迟亮 spinner / 看门狗 / 网易预取 / 各栏取数的句柄（裸 Task
+    /// 改带句柄：新加载起手先取消旧任务，加载结算时取消 spinner 与看门狗，
+    /// 切台时取消预取与各栏任务；取消只省请求/防串味，不改结果语义）。
+    private var dailySpinnerTask: Task<Void, Never>?
+    private var dailyWatchdogTask: Task<Void, Never>?
+    private var rankSpinnerTask: Task<Void, Never>?
+    private var neteasePrefetchTask: Task<Void, Never>?
+    private var railTasks: [HomeRailPage: Task<Void, Never>] = [:]
+    private var railSpinnerTasks: [HomeRailPage: Task<Void, Never>] = [:]
     /// 首页首加载防重入（r33 第 3 件 b）：HomeView .task 在视图重建时重跑，
     /// 首加载只跑一次，重建视图不再重拉每日推荐。
     private var didInitialLoad = false
@@ -187,7 +205,8 @@ final class HomeViewModel: ObservableObject {
         // 已有当日缓存或否定缓存时不拉。预取任务不进 dailyTask（不拦
         // 切台取消，不碰代际），取数走 dailyRecommend 自己的 120 秒壳。
         if selectedPlatform != "netease" {
-            Task {
+            neteasePrefetchTask?.cancel()
+            neteasePrefetchTask = Task {
                 guard HomeDataCache.shared.dailyIfFresh(platform: "netease") == nil,
                       HomeDataCache.shared.dailyNegativeIfFresh(platform: "netease") == nil else { return }
                 let result = await NativeBridge.dailyRecommend(platform: "netease")
@@ -269,6 +288,11 @@ final class HomeViewModel: ObservableObject {
         dailyTask = nil
         rankTask?.cancel()
         rankTask = nil
+        // r59：切台时连同取消网易预取与各栏在飞任务（dailyTask/rankTask 同款；
+        // 栏结果有 fetched.platform 守卫，取消只省请求、不改语义）。
+        neteasePrefetchTask?.cancel()
+        neteasePrefetchTask = nil
+        cancelRailTasks()
         selectedPlatform = id
         UserDefaults.standard.set(id, forKey: Self.platformKey)
         resetHomeContent()
@@ -390,7 +414,8 @@ final class HomeViewModel: ObservableObject {
         // +1，旧的延迟任务回来对不上 epoch 就不亮。
         dailySpinnerEpoch += 1
         let spinnerEpoch = dailySpinnerEpoch
-        Task {
+        dailySpinnerTask?.cancel()
+        dailySpinnerTask = Task {
             try? await Task.sleep(nanoseconds: 250_000_000)
             if spinnerEpoch == dailySpinnerEpoch, isLoadingDaily {
                 dailySpinnerVisible = true
@@ -404,7 +429,8 @@ final class HomeViewModel: ObservableObject {
         dailyWatchdogEpoch += 1
         let watchdogEpoch = dailyWatchdogEpoch
         dailyLoadStartedAt = Date()
-        Task {
+        dailyWatchdogTask?.cancel()
+        dailyWatchdogTask = Task {
             try? await Task.sleep(nanoseconds: 130_000_000_000)
             guard watchdogEpoch == dailyWatchdogEpoch,
                   generation == homeLoadGeneration,
@@ -421,6 +447,12 @@ final class HomeViewModel: ObservableObject {
                 isLoadingDaily = false
                 dailySpinnerVisible = false
             }
+            // r59：本单结算时取消 spinner 与看门狗（250ms 延迟任务与
+            // 130s 看门狗不再孤儿跑——取消只防串味，不改结算语义）。
+            dailySpinnerTask?.cancel()
+            dailySpinnerTask = nil
+            dailyWatchdogTask?.cancel()
+            dailyWatchdogTask = nil
         }
         let result = await NativeBridge.dailyRecommend(platform: platform)
         // r28 根因（a）：旧写法三条件一个 guard、早退不碰任何状态——
@@ -497,7 +529,8 @@ final class HomeViewModel: ObservableObject {
         // 250ms 后仍未回来才亮 spinner（loadDaily 同款 epoch 防串味）。
         rankSpinnerEpoch += 1
         let spinnerEpoch = rankSpinnerEpoch
-        Task {
+        rankSpinnerTask?.cancel()
+        rankSpinnerTask = Task {
             try? await Task.sleep(nanoseconds: 250_000_000)
             if spinnerEpoch == rankSpinnerEpoch, isLoadingRank {
                 rankSpinnerVisible = true
@@ -508,6 +541,9 @@ final class HomeViewModel: ObservableObject {
                 isLoadingRank = false
                 rankSpinnerVisible = false
             }
+            // r59：本单结算时取消 spinner 延迟任务（同 loadDaily）。
+            rankSpinnerTask?.cancel()
+            rankSpinnerTask = nil
         }
         let result = await NativeBridge.rankBoards(platform: platform)
         guard generation == homeLoadGeneration else { return }
@@ -561,11 +597,13 @@ final class HomeViewModel: ObservableObject {
                 isLoadingDaily = false
                 dailySpinnerVisible = false
                 dailyEmptyReason = "每日推荐拉取超时（130 秒无响应），请检查网络后重试。"
-                Task { await loadDaily() }
+                dailyTask?.cancel()
+                dailyTask = Task { await loadDaily() }
             }
             return
         }
-        Task { await loadDaily() }
+        dailyTask?.cancel()
+        dailyTask = Task { await loadDaily() }
     }
 
     /// 切来源（菜单点选唯一入口；点当前来源且数据已在就直接 return，
@@ -593,14 +631,16 @@ final class HomeViewModel: ObservableObject {
             if page == selectedSource {
                 if !rankBoards.isEmpty || rankEmptyReason != nil { return }
                 if !isLoadingRank {
-                    Task { await loadRankBoards() }
+                    rankTask?.cancel()
+                    rankTask = Task { await loadRankBoards() }
                 }
                 return
             }
             selectedSource = page
             UserDefaults.standard.set(page.rawValue, forKey: Self.sourceKey)
             if rankBoards.isEmpty && rankEmptyReason == nil && !isLoadingRank {
-                Task { await loadRankBoards() }
+                rankTask?.cancel()
+                rankTask = Task { await loadRankBoards() }
             }
             return
         }
@@ -720,11 +760,15 @@ final class HomeViewModel: ObservableObject {
             UserDefaults.standard.set(false, forKey: PlaybackStore.likedNeedsRefreshKey)
         }
         railLoadingPages.insert(page)
-        Task {
+        // r59：栏取数任务存句柄（同栏重复起时先取消旧任务；切台时
+        // cancelRailTasks() 统一取消；任务结束时自清句柄，不留孤儿）。
+        railTasks[page]?.cancel()
+        railTasks[page] = Task {
             let platform = selectedPlatform
             // r35-9（P0-2）：250ms 后仍在拉取才亮 spinner（没旧内容时；
             // 有旧内容时视图留旧内容，不看这面旗子）。250ms 内回来不闪。
-            Task {
+            railSpinnerTasks[page]?.cancel()
+            railSpinnerTasks[page] = Task {
                 try? await Task.sleep(nanoseconds: 250_000_000)
                 if railLoadingPages.contains(page) {
                     railSpinnerVisiblePages.insert(page)
@@ -756,6 +800,9 @@ final class HomeViewModel: ObservableObject {
             guard selectedPlatform == fetched.platform else {
                 railLoadingPages.remove(page)
                 railSpinnerVisiblePages.remove(page)
+                railSpinnerTasks[page]?.cancel()
+                railSpinnerTasks[page] = nil
+                railTasks[page] = nil
                 return
             }
             // r48-7：第 7 件——下拉刷新失败时旧内容保留（见函数头
@@ -773,7 +820,21 @@ final class HomeViewModel: ObservableObject {
             }
             railLoadingPages.remove(page)
             railSpinnerVisiblePages.remove(page)
+            // r59：本栏取数落下时取消 spinner 延迟任务并自清句柄。
+            railSpinnerTasks[page]?.cancel()
+            railSpinnerTasks[page] = nil
+            railTasks[page] = nil
         }
+    }
+
+    /// r59：取消全部在飞的栏取数任务（切台时调；与 dailyTask/rankTask
+    /// 同款。`railLoadingPages` 不在这里清——在飞任务被取消后走到
+    /// 自己的收尾分支清掉；取消只是省请求，不改结果语义）。
+    private func cancelRailTasks() {
+        for task in railTasks.values { task.cancel() }
+        railTasks = [:]
+        for task in railSpinnerTasks.values { task.cancel() }
+        railSpinnerTasks = [:]
     }
 
     /// r48-7：第 7 件——首页下拉刷新：重新拉取当前模式的内容。

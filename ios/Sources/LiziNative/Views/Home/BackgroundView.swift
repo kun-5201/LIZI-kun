@@ -6,8 +6,7 @@ import UIKit
 ///
 /// 挂在 HomeView 最外层 GeometryReader 的 `.background` 里——在全部内容
 /// 之下，只做底色，永远不盖内容（本层 `allowsHitTesting(false)`，
-/// 上面 Hero/面板/本地音乐/顶栏照常点按；滚动区底色已改透明，
-/// 见 HomeView 那两处注释）。
+/// 上面 Hero/面板/本地音乐/顶栏照常点按；滚动区底色已改透明）。
 ///
 /// 三态（`BackgroundStore.mode`，`@ObservedObject` 跟着变，当场重绘）：
 /// - 默认：底层就是原来的纸色 `LiziTokens.paper`，与 r30 视觉一致。

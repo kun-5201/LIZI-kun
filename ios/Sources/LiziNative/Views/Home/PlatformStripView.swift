@@ -1,14 +1,10 @@
 import SwiftUI
 import UIKit
 
-/// 平台条：模板 v2（~/workspace/lizi-home-template-portrait.png /
-/// lizi-home-template-landscape.png）+ 壳版铺色面板顶部的 `.hall-plat__bar`。
+/// 平台条：模板 v2 + 壳版铺色面板顶部的 `.hall-plat__bar`。
 ///
 /// - 面板头行（一行三列，左→右）：标题（当前来源名，默认「每日推荐」，
-///   r30：19pt 粗体——逐帧规格（verification/shell-video-39s-home-3d.md）
-///   与 v4 图（~/workspace/lizi-home-daily-v4.png）量：约 36px ≈ 19pt；
-///   旧模板 v2 的 24pt 已作废）→ 7 个平台图标（r30：26pt、间距 5，
-///   逐帧规格每枚约 48px ≈ 26pt；旧 28pt 已作废）→ 返回键
+///   r30：19pt 粗体）→ 7 个平台图标（r30：26pt、间距 5）→ 返回键
 ///   （r39-6：第 6 件——右端搜索放大镜改成返回键 `chevron.left`，点按回到上一层，
 ///   见 `onBackTap`；字形 19pt、触摸框 28×28，与旧搜索钮同尺寸同位置）。
 ///   r30：标题是来源切换入口——点标题弹来源小菜单（壳版
@@ -28,15 +24,11 @@ import UIKit
 ///   「我喜欢的音乐」估 144，避免第一帧按 0 算出满宽溢出。
 /// - 顺序与壳版 hall/accounts.js 注册表一致（7 个）：
 ///   网易云 / QQ 音乐 / 酷狗 / 汽水 / 波点 / 酷我音乐 / Apple Music。
-///   酷狗走 Folia 实现：登录是 Folia 移植（`FoliaKugouLoginView`，
-///   `kugouProvider.ts` auth），取链 / 每日推荐走 `/api/kugou/*`
-///   Folia 接口（`NativeBridge` 里 kugou 分支）。
 /// - 切台只换数据、不拆音频（见 HomeViewModel.selectPlatform 注释）。
-///   未登录图标壳版是 opacity .45（`.pstrip__i.is-off`）；原生首页
-///   平台条图标仍一律全亮度、不按登录态明暗区分（r22j 驱动 3h 的原决定，
-///   现状仍如此）。登录本身已不是 P4：登录底座 r23 已落地
-///   （`LoginStore` / `LoginSheetView`），登录态由设置页账号行消费，
-///   不由平台条图标表达。
+///   未登录图标壳版是 opacity .45；原生首页平台条图标仍一律全亮度、
+///   不按登录态明暗区分（r22j 驱动 3h 的原决定）。登录本身已不是 P4：
+///   登录底座 r23 已落地（`LoginStore` / `LoginSheetView`），登录态由
+///   设置页账号行消费，不由平台条图标表达。
 /// - 图标渲染：真 logo（`Assets.xcassets` 里的 `Platform<Name>` imageset，
 ///   由 `public/assets/platforms/*.svg` 渲染成 48/96/144 PNG）。图标本身自带圆角
 ///   底色与字形，这里只按 28pt 框定、描选中圈；不联网拉图。品牌色 +
@@ -45,7 +37,7 @@ import UIKit
 ///   的真封面；模板图里的示例封面不进包、不当数据。
 struct PlatformStripView: View {
     @ObservedObject var viewModel: HomeViewModel
-    /// App 根部经 .environmentObject 下发的 PlaybackStore（LiziNativeApp）；
+    /// App 根部经 .environmentObject 下发的 PlaybackStore；
     /// 切台时传给 selectPlatform 做 advanceGeneration()（取消在飞取链）。
     /// 本文件是 selectPlatform 的唯一调用点，所以接线只放这里。
     @EnvironmentObject private var playback: PlaybackStore

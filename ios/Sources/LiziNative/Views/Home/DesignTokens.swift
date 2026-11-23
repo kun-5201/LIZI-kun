@@ -4,15 +4,13 @@ import UIKit
 /// 设计令牌：照抄壳版 `public/tokens.css`，只做 SwiftUI 能用的近似。
 ///
 /// - 字体：Fraunces（品牌 / 大标题）已随包提供（`Sources/LiziNative/Fonts/`
-///   三档静态 TTF，`UIAppFonts` 注册；见 Fonts/README.md），
-///   `liziDisplay` 用 `Font.custom("Fraunces")`，注册缺失时回落系统 serif；
-///   中文不在 Fraunces 字库内，由系统字体兜底。Geist（正文）未随包提供，
-///   仍用系统字体近似。
+///   三档静态 TTF，`UIAppFonts` 注册），`liziDisplay` 用 `Font.custom("Fraunces")`，
+///   注册缺失时回落系统 serif；中文不在 Fraunces 字库内，由系统字体兜底。
+///   Geist（正文）未随包提供，仍用系统字体近似。
 /// - 字号：12 / 13 / 14 / 16 / 20 / 25 / 31 / 39（tokens.css 的 1.25 级数）。
 /// - 圆角：10 / 14 / 20 / 28。
 /// - 颜色：浅色纸面 + 墨色文字；accent 只有一个——网易云红 #EA3E3C。
-///   颜色值是 tokens.css 里 OKLCH 值的 sRGB 近似（Xcode 取色器量得），
-///   不是另起的色板。
+///   颜色值是 tokens.css 里 OKLCH 值的 sRGB 近似（Xcode 取色器量得）。
 /// - 禁缩放：SwiftUI 原生没有缩放手势；全 App 不加任何 magnification 手势。
 enum LiziTokens {
     // MARK: - 颜色（tokens.css --paper / --paper-2 / --ink / --ink-2 / --ink-3 / --accent）
@@ -88,5 +86,17 @@ extension Font {
     /// 数字 / 时长字体：tokens.css --font-mono（Geist Mono），用系统等宽近似。
     static func liziMono(size: CGFloat, weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight, design: .monospaced)
+    }
+}
+
+// MARK: - r59 安全下标（首页重写共用）
+
+/// r59：全仓零未守卫下标——任何数组/集合下标先判界。
+/// 用法：`xs[safe: i]` 越界回 nil，调用方用 `guard let` / `??` 接住，
+/// 不再写裸 `xs[i]`。本 helper 是首页重写唯一的下标入口，
+/// 除算法内已用 `indices.contains` 守卫的取法外，一律走它。
+extension Collection {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }

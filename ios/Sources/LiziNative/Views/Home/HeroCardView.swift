@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// 首页 Hero 大卡：r22j 模板 v2（~/workspace/lizi-home-template-portrait.png /
-/// lizi-home-template-landscape.png）+ 壳版 `.hall-hero` 兜底。
+/// 首页 Hero 大卡：r22j 模板 v2 + 壳版 `.hall-hero` 兜底。
 ///
 /// - 模板 v2：竖屏是首屏上半块（高 = (屏高−110)/2，402×874 档 382pt），
 ///   横屏是满宽横幅（高 = (屏高−110)×9/16，932×430 档 180pt）；高度由
@@ -10,24 +9,20 @@ import SwiftUI
 ///   圆角 17（模板量：顶行/左列都从 16 往里收 17pt；壳版是 3px，
 ///   模板为准）。标题 26pt（r28：39.6s 视频实测约 26pt 白字；
 ///   旧模板量 42/46 已作废），由 HomeView 按朝向传 `titleSize`；
-///   内边距左/右 24、上/下 20
-///   （壳版 badge left 24 top 20、meta left/right 24 bottom 20）；阴影
-///   0 30/35 0.5（壳版 0 30px 70px -34px / .5，SwiftUI 无 spread，
-///   radius≈blur/2 近似）。
+///   内边距左/右 24、上/下 20；阴影 0 30/35 0.5（壳版 0 30px 70px -34px / .5，
+///   SwiftUI 无 spread，radius≈blur/2 近似）。
 /// - 显示上次播放的歌（PlaybackStore.currentTrack，空时取持久化的上次播放；
 ///   两者都没有时标题是「从下面挑一个平台开始」）。
-/// - 封面宽图铺满 + 底部渐变；左上角「上次听到 · 时间」徽章（r28：
-///   13pt，视频实测）；
-///   左下角歌名 / 副标题（r28：歌名 26pt、副标题 15pt，视频实测）；
-///   右下角播放键（r28：白圆 ⌀40pt，视频实测 75px；
-///   播放中三角变均衡条动画，照抄壳版 .hall-hero__play-bars）。模板里没有「打开歌单」pill，
-///   已拿掉——整卡点按就是进播放页，pill 是重复入口，功能没丢。
+/// - 封面宽图铺满 + 底部渐变；左上角「上次听到 · 时间」徽章（r28：13pt）；
+///   左下角歌名 / 副标题（歌名 26pt、副标题 15pt）；右下角播放键
+///   （r28：白圆 ⌀40pt；播放中三角变均衡条动画，照抄壳版 .hall-hero__play-bars）。
+///   模板里没有「打开歌单」pill，已拿掉——整卡点按就是进播放页。
 /// - 右上角锁按钮：有海报时才出现；锁定 = 闭锁图标，解锁 = 开锁图标；
 ///   状态 UserDefaults 持久化（`lizi.native.hall.heroLocked`），默认解锁。
 /// - 点按整卡进播放页；双击整卡也进播放页（r20：单 / 双击都落传统
-///   PlayerView，见 `openClassicPlayer()`）。左右滑切歌（左滑 = 上一首、
-///   右滑 = 下一首，锁定时失效）。上下拖动改卡片尺寸是 P5 的活，P1 不做；
-///   竖向滚动用 simultaneousGesture 保证不被横滑手势吃掉。
+///   PlayerView）。左右滑切歌（左滑 = 上一首、右滑 = 下一首，锁定时失效）。
+///   上下拖动改卡片尺寸是 P5 的活，P1 不做；竖向滚动用 simultaneousGesture
+///   保证不被横滑手势吃掉。
 /// - 壳版悬停才展开的歌词 / 方形封面是桌面 hover 交互，原生触屏没有 hover，
 ///   P1 不做；歌词在播放页看。
 /// - 封面只用真数据：`track?.coverURL`（正在播那首歌的封面），不用模板图。
@@ -71,11 +66,8 @@ struct HeroCardView: View {
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             // 底图：正在播那首的真封面（track = currentTrack ?? lastTrack，
-            // 本来就跟当前播放走，切歌即换——r22j 原设计，不动）。
-            // 取图走 CoverImageView（ProxyImageView 同款链路 + 3 次重试，
-            // r36 第⑥件）；加载失败 / 没封面画深色 DefaultCoverArt，
-            // 不许白——旧 `ProxyImageView { LiziTokens.paper2 }`（#FCFCFD
-            // 近白）已删，那是真机上大卡白块的最后一处。
+            // 本来就跟当前播放走，切歌即换）。取图走 CoverImageView；
+            // 加载失败 / 没封面画深色 DefaultCoverArt，不许白。
             // 从未播过歌（track == nil）才用纸面渐变空态 + 墨字标题
             // （「从下面挑一个平台开始」，不是封面占位）。
             if track != nil {
@@ -123,7 +115,7 @@ struct HeroCardView: View {
 
                 Spacer()
 
-                // 底行：歌名 / 副标题 + 打开歌单 + 播放键。
+                // 底行：歌名 / 副标题 + 播放键。
                 HStack(alignment: .bottom, spacing: 24) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(track?.title ?? "从下面挑一个平台开始")
@@ -147,7 +139,7 @@ struct HeroCardView: View {
                     if track != nil {
                         // r28：右下角只有播放键，白圆 ⌀40pt（视频实测 75px ≈ 40pt；
                         // 旧 52pt 已作废）。没有「打开歌单」pill——
-                        // 整卡点按就是进播放页，pill 是重复入口（见文件头）。
+                        // 整卡点按就是进播放页，pill 是重复入口。
                         Button(action: togglePlay) {
                             ZStack {
                                 Circle()
@@ -177,20 +169,14 @@ struct HeroCardView: View {
         .shadow(color: .black.opacity(isBleeding ? 0 : 0.5), radius: 35, x: 0, y: 30)
         .contentShape(Rectangle())
         // r20 双击进播放页：双击优先、单击兜底的排他组合，一只手势包办单 / 双击。
-        // - `TapGesture(count: 2).exclusively(before: TapGesture(count: 1))`：
-        //   系统先等双击窗口（约 0.3 秒）：两下都落在卡片上 → 只走双击分支，
-        //   单击分支绝不触发；只有一下、双击失败 → 才走单击分支。
-        //   所以双击一次只进一次播放页（且单击动作要等双击窗口过后才执行，
-        //   轻微延迟是这个写法的固有代价，任务书已接受）。
-        // - 不能写成两个独立的 `.onTapGesture`（一个 count: 1、一个 count: 2）：
-        //   两个手势互不协调，双击会先触发两次单击再触发双击。
-        // - 滑动不会误触双击：滑动是一次连续触摸、只有一次抬手，成不了两次
-        //   点按；且手指移动超出点按容差后两个 TapGesture 都会失败，
-        //   下面 simultaneousGesture 里的 DragGesture 照常接管切歌。
-        // - 卡片里的三个 Button（锁 / 打开歌单 / 播放键）是子视图手势，
-        //   优先级高于父视图的 `.gesture`，点它们时父手势不触发，和原来
-        //   `.onTapGesture` 时的行为一致；双击锁按钮只会开关锁两次，不进播放页。
-        // - 禁缩放：这里没有任何捏合手势。
+        // 不能写成两个独立的 `.onTapGesture`（一个 count: 1、一个 count: 2）：
+        // 两个手势互不协调，双击会先触发两次单击再触发双击。
+        // 滑动不会误触双击：滑动是一次连续触摸、只有一次抬手，成不了两次
+        // 点按；且手指移动超出点按容差后两个 TapGesture 都会失败，
+        // 下面 simultaneousGesture 里的 DragGesture 照常接管切歌。
+        // 卡片里的三个 Button（锁 / 播放键）是子视图手势，
+        // 优先级高于父视图的 `.gesture`，点它们时父手势不触发。
+        // 禁缩放：这里没有任何捏合手势。
         .gesture(
             TapGesture(count: 2)
                 .onEnded { openClassicPlayer() }
@@ -212,19 +198,17 @@ struct HeroCardView: View {
         )
     }
 
-    /// 进传统播放器（单击 / 双击大卡片共用；「打开歌单」按钮走同一路由）。
+    /// 进传统播放器（单击 / 双击大卡片共用）。
     ///
     /// 强制传统的办法就是只走 `.player` 路由、不碰持久化键：
     /// RootView 的 `.player` 分支永远渲染传统 PlayerView，从不读
     /// `lizi.native.playerMode`，所以不管上次停留在哪个舞台形态，进来的
     /// 都是传统播放器；同时也不改键，舞台页里点「形态」仍走 `.stage()`、
-    /// 默认读保存的形态，页内切换的持久化不受影响（播放页顶栏已无舞台
-    /// 入口，r20 首页也已去舞台，舞台只从形态选择器进）。
+    /// 默认读保存的形态，页内切换的持久化不受影响。
     /// 千万别在这里 `StageCatalog.saveFormId("classic")`：
     /// `isAvailable(classic)` 恒为 false（classic 没有 HTML 文件），
     /// `savedFormId()` 读到 "classic" 会回落到默认 "001"，下次点舞台就
     /// 丢了用户上次用的形态。
-    ///
     /// 空态：`track == nil` 时也照常进 `.player`，和单击现有行为一致；
     /// PlayerView 自带空态（标题「未在播放」），不编假数据、不崩。
     private func openClassicPlayer() {
@@ -275,6 +259,8 @@ struct HeroCardView: View {
 
 /// 播放中的三条均衡条（壳版 .hall-hero__play-bars：三条 scaleY 呼吸，
 /// 周期 0.82 / 0.62 / 0.94 秒，错开相位）。
+/// r59：三条参数数组只用安全下标取——数组恰 3 项是构造事实，
+// r59：下标仍走 [safe:]，数组长度将来变了也不 trap。
 private struct EQBarsView: View {
     @State private var animating = false
 
@@ -288,11 +274,11 @@ private struct EQBarsView: View {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(LiziTokens.ink)
                     .frame(width: 3, height: 14)
-                    .scaleEffect(y: animating ? peaks[i] : 0.35, anchor: .center)
+                    .scaleEffect(y: animating ? (peaks[safe: i] ?? 0.35) : 0.35, anchor: .center)
                     .animation(
-                        Animation.easeInOut(duration: durations[i])
+                        Animation.easeInOut(duration: durations[safe: i] ?? 0.82)
                             .repeatForever(autoreverses: true)
-                            .delay(delays[i]),
+                            .delay(delays[safe: i] ?? 0),
                         value: animating
                     )
             }

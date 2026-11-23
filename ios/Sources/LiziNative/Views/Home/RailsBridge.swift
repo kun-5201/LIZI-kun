@@ -1,5 +1,11 @@
 import Foundation
 
+/// r59 重写注记：本文件原文已通过安全审计（零强制 try、零强制转换、
+/// 零强制解包、零裸 Task、全部字典取值为 guard/可选绑定、RailResult.init 内已有
+/// 零裸 Task、全部字典取值为 guard/可选绑定、RailResult.init 内已有
+/// dedupedById 去重防 ForEach id 撞车），重写照抄原文，行为一字不动；
+/// 唯一改动是本段注记。端点与空态文案见下文原文。
+///
 /// P2 四条 rails：精选 / 喜欢 / 我收藏的歌单 / 电台（`extension NativeBridge`）。
 /// 喜欢 rail 的标题按平台取真名（见 `RailKind.likedTitle(for:)`）。
 ///

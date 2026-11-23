@@ -1,6 +1,18 @@
 import SwiftUI
 import UIKit
 
+/// r59 重写注记：本文件行为照抄 r58 原文（布局公式、面板/环/菜单/取色、
+/// 删除注记一字不动）；唯一改动是三处安全改造：
+/// ① `.onChange(of: playback.currentTrack)` 里的裸 `Task { @MainActor in
+/// viewModel.notePlayed(track) }` 改成带句柄（noteTask），新任务起手先取消
+/// 旧任务、视图消失时取消；
+/// ② `AlbumToneExtractor.tone(from:)` 取 stops[2]/[3]/[4] 前先判
+/// stops.count >= 5（paletteStops 恒返 5 档，守卫只是最后一道防线），
+/// ③ `fieldIsDark` 取 stops[1..3] 前先判 stops.count >= 4；
+/// 其余下标（sample32 的 bytes[i*4]、聚类的 centers[j]/groups[best]/
+/// assigns[i]、ramp 的 cs[seg]/cs[seg+1]）都已有 count/区间判界在前，
+/// 见各处注释，不动。SwiftUI `.task`/`.task(id:)` 由框架管理取消，不动。
+
 /// 首页（大厅）：顶栏 + Hero 大卡 + 铺色面板（平台条 + 跑马带/环）+ 本地音乐。
 /// r26（用户 2026-11-20 22:39–22:40 决定）：首页 5 个来源 chips
 /// （每日推荐 / 精选 / 我的喜欢 / 我收藏的歌单 / 电台）全删，只留每日推荐；
@@ -448,6 +460,10 @@ struct HomeView: View {
         (playback.currentTrack ?? viewModel.lastTrack)?.coverURL
     }
 
+    /// r59：notePlayed 任务句柄——`.onChange(of: currentTrack)` 里每次
+    /// 切歌起的任务存下来，新任务起手先取消旧任务、视图消失时取消。
+    @State private var noteTask: Task<Void, Never>?
+
     /// r45-fix：分隔条拖动手势——从 body 里抽出来单独成函数。r45 首轮
     /// 构建时编译器报 HomeView.swift:679 类型检查超时（整条 body 大
     /// 表达式已到临界）；抽出来后 body 与手势各查各的。行为一字未动：
@@ -837,9 +853,11 @@ struct HomeView: View {
         }
         .onChange(of: playback.currentTrack) { track in
             if let track = track {
-                Task { @MainActor in viewModel.notePlayed(track) }
+                noteTask?.cancel()
+                noteTask = Task { @MainActor in viewModel.notePlayed(track) }
             }
         }
+        .onDisappear { noteTask?.cancel(); noteTask = nil }
         .onChange(of: playback.queue.map(\.queueId)) { _ in
             // r47-4：点播（setQueue 重建队列，queueId 全是新 UUID）后面板
             // 切到「正在播放」，不再留在今日推荐；已在正在播放时
@@ -1916,10 +1934,15 @@ enum AlbumToneExtractor {
     static func tone(from image: UIImage) -> AlbumTone? {
         guard let pixels = sample32(image) else { return nil }
         let stops = paletteStops(pixels: pixels)
+        // r59：取 stops[2]/[3]/[4] 前先判界——paletteStops 恒返 5 档
+        // （rampFromCenters count=5），守卫只是最后一道防线，不足 5 档
+        // 说明取色链已坏，返回 nil 让调用方回默认色，不 trap。
+        guard stops.count >= 5,
+              let a = stops[safe: 2], let b = stops[safe: 3], let c = stops[safe: 4] else { return nil }
         return AlbumTone(
-            a: color(stops[2]),
-            b: color(stops[3]),
-            c: color(stops[4]),
+            a: color(a),
+            b: color(b),
+            c: color(c),
             isDark: fieldIsDark(stops: stops)
         )
     }
@@ -1946,6 +1969,9 @@ enum AlbumToneExtractor {
         var out: [Pixel] = []
         out.reserveCapacity(side * side)
         for i in 0..<(side * side) {
+            // r59：下标先判界——i < side*side 时 i*4+3 < bytes.count 恒成立，
+            // 守卫只是最后一道防线（bytes 长度被改坏时直接停，不越界）。
+            guard i * 4 + 3 < bytes.count else { break }
             out.append(Pixel(
                 r: Double(bytes[i * 4]),
                 g: Double(bytes[i * 4 + 1]),
@@ -2047,8 +2073,11 @@ enum AlbumToneExtractor {
     }
 
     /// 深/浅场：中间三档（stops[1..3]）平均相对亮度 < 0.30 → 深场（壳版 pickInk）。
+    /// r59：取 stops[1..3] 前先判界——不足 4 档时回默认深场（与 fallback 一致）。
     private static func fieldIsDark(stops: [(r: Int, g: Int, b: Int)]) -> Bool {
-        (relLum(stops[1]) + relLum(stops[2]) + relLum(stops[3])) / 3 < 0.30
+        guard stops.count >= 4,
+              let s1 = stops[safe: 1], let s2 = stops[safe: 2], let s3 = stops[safe: 3] else { return true }
+        return (relLum(s1) + relLum(s2) + relLum(s3)) / 3 < 0.30
     }
 
     private static func color(_ rgb: (r: Int, g: Int, b: Int)) -> Color {

@@ -62,54 +62,18 @@ body{font-family:"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft
 .screen{position:absolute;inset:6px;border-radius:50px;overflow:hidden;background:#fff;
         isolation:isolate;display:flex;flex-direction:column}
 
-/* --- 灵动岛 --- */
-.island{position:absolute;top:11px;left:50%;z-index:60;transform:translateX(-50%);
-        width:124px;height:36px;border-radius:19px;background:#060608;
-        display:flex;align-items:center;padding:0 10px;gap:10px;overflow:hidden;
-        box-shadow:0 1px 2px rgba(0,0,0,.3);
-        transition:width .58s cubic-bezier(.22,1.2,.36,1),
-                   height .58s cubic-bezier(.22,1.2,.36,1),
-                   border-radius .45s ease,padding .45s ease,gap .45s ease}
-.island.open{width:212px;height:60px;border-radius:22px;padding:0 13px;gap:10px}
-.island__art{width:16px;height:16px;border-radius:5px;flex:none;overflow:hidden;position:relative;
-             background:linear-gradient(140deg,rgba(var(--ac),.85),rgba(var(--ac),1));
-             display:grid;place-items:center;
-             transition:width .45s cubic-bezier(.22,1.2,.36,1),height .45s cubic-bezier(.22,1.2,.36,1),border-radius .45s}
-.island__art b{font-size:9px;font-weight:600;color:rgba(255,255,255,.95);line-height:1;
-               transition:font-size .4s ease}
-.island.open .island__art{width:38px;height:38px;border-radius:10px}
-.island.open .island__art b{font-size:16px}
-.island__art img{width:100%;height:100%;object-fit:cover;display:none;position:absolute;inset:0}
-.island__meta{flex:1 1 0;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:1px;
-              opacity:0;transform:translateX(-5px);transition:opacity .28s ease,transform .38s ease}
-.island.open .island__meta{opacity:1;transform:none;transition-delay:.13s}
-.island__n{font-size:12.5px;font-weight:600;color:#fff;letter-spacing:-.1px;
-           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.island__a{font-size:10.5px;color:rgba(255,255,255,.5);letter-spacing:.1px;
-           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.island__wave{flex:none;display:flex;align-items:center;gap:2px;height:11px;
-              transition:height .45s ease}
-.island.open .island__wave{height:17px;gap:2.5px}
-.island__wave i{width:2.5px;height:100%;border-radius:2px;background:rgba(255,255,255,.88);
-                transform:scaleY(.24);transform-origin:center;transition:transform .12s linear}
-
-/* --- 状态栏 --- */
+/* --- 状态栏（r53：时间/信号/WiFi/电量已删，只留 54px 空占位） --- */
 .sbar{height:54px;flex:none;display:flex;align-items:center;justify-content:space-between;
       padding:0 30px;position:relative;z-index:10}
-.sbar__t{font-size:15px;font-weight:600;color:#000;letter-spacing:-.2px;
-         font-variant-numeric:tabular-nums}
-.sbar__i{display:flex;align-items:center;gap:5px;transition:opacity .4s ease}
-.screen.island-open .sbar__i{opacity:.16}
-.sbar__i svg{display:block}
 
-/* --- 导航条 --- */
-.nav{height:42px;flex:none;display:flex;align-items:center;padding:0 8px 0 6px;gap:2px;position:relative;z-index:10}
-.nav__b{width:26px;height:26px;display:grid;place-items:center;flex:none}
+/* --- 导航条（r53：返回箭头已删，只留名字；左 padding 30px 让名字 x 不动） --- */
+.nav{height:42px;flex:none;display:flex;align-items:center;padding:0 8px 0 30px;gap:2px;position:relative;z-index:10}
 .nav__n{font-size:13px;font-weight:600;color:#000;letter-spacing:-.1px;
         max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.88}
 
-/* --- 会话头 --- */
-.hd{flex:none;display:flex;flex-direction:column;align-items:center;gap:6px;padding:2px 0 15px}
+/* --- 会话头（r53：头像上移与导航文字平齐——.hd 负边距上提 58px，
+   头像中心 133→75pt，与导航文字中心同高；横屏在 .ls .hd 里抵消） --- */
+.hd{flex:none;display:flex;flex-direction:column;align-items:center;gap:6px;padding:2px 0 15px;margin-top:-58px}
 .hd__av{width:70px;height:70px;border-radius:50%;overflow:hidden;position:relative;
         background:linear-gradient(142deg,rgba(var(--ac),.55),rgba(var(--ac),.92));
         display:grid;place-items:center;
@@ -119,6 +83,8 @@ body{font-family:"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft
 .hd__av img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:none;z-index:1}
 .hd__av b{font-size:27px;font-weight:500;color:rgba(255,255,255,.94);position:relative;z-index:1}
 .hd__n{font-size:15.5px;font-weight:600;color:#000;letter-spacing:-.2px;max-width:82%;
+       white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:8px}
+.hd__a{font-size:12px;color:#6e6e76;letter-spacing:.2px;max-width:82%;
        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .hd__s{font-size:11px;color:#9c9ca4;letter-spacing:.35px}
 
@@ -129,7 +95,7 @@ body{font-family:"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft
               background:linear-gradient(#fff 22%,rgba(255,255,255,0))}
 .thread{position:absolute;left:0;right:0;top:0;height:0;
         transition:transform .56s cubic-bezier(.24,.86,.3,1)}
-.stamp{position:absolute;left:0;right:0;top:10px;z-index:5;text-align:center;
+.stamp{position:absolute;left:0;right:0;top:10px;z-index:7;text-align:center;
        font-size:10.5px;font-weight:500;color:#b6b6be;letter-spacing:.5px;pointer-events:none;
        transition:opacity .4s ease}
 
@@ -246,9 +212,9 @@ body{font-family:"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft
 /* ================= 横屏：手机横放放大（r52-4） ================= */
 /* 横屏不再是竖着的小手机（旧 k 下 874×402 只有约 152×329pt）：手机横过来，
    机身换向为 844×390 贴满横屏，屏幕内容按横屏 iMessage 重排——状态栏在上、
-   导航与会话头同一行、气泡左右交替、语音条 + 输入框在底；灵动岛竖在
-   左侧边中部。竖屏一字不动（竖屏仍走上面 @media (max-aspect-ratio: 9/10)
-   那套）；.ls 由 fit() 按 W/H < 0.9 挂/摘，横屏挂、竖屏摘。 */
+   导航与会话头同一行、气泡左右交替、语音条 + 输入框在底。竖屏一字不动（竖屏仍走上面 @media (max-aspect-ratio: 9/10)
+   那套）；.ls 由 fit() 按 W/H < 0.9 挂/摘，横屏挂、竖屏摘。r53：假灵动岛已删，
+   横屏左侧边不再有竖岛，左气泡/输入指示回落默认 12px。 */
 .ls .anchor{left:50%;top:50%}
 .ls .halo{display:none}
 .ls .tilt{transform:none}   /* 基础机位是平的；运镜仍走 JS 内联 transform（applyShot），与竖屏同款写法 */
@@ -260,49 +226,33 @@ body{font-family:"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft
 .ls .screen{inset:5px;border-radius:38px;display:grid;
   grid-template-columns:1fr auto 1fr;
   grid-template-rows:auto auto 1fr auto auto}
-/* 状态栏：整行置顶（时间左、信号右）；岛已挪到左侧边，不用给岛让位 */
+/* 状态栏：整行置顶（r53：内容已删，只留 34px 空行） */
 .ls .sbar{grid-column:1 / -1;grid-row:1;height:34px;padding:0 20px}
-.ls .sbar__t{font-size:13px}
 /* 导航在左列，会话头在中列（1fr auto 1fr，中列居中） */
 .ls .nav{grid-column:1;grid-row:2;align-self:center;height:40px}
 .ls .nav__n{font-size:14px}
-.ls .hd{grid-column:2;grid-row:2;display:grid;
-  grid-template-columns:auto auto;grid-template-rows:auto auto;
+/* r53：会话头改 3 行（歌名/歌手/正在播放），头像跨 3 行；竖屏的负边距与
+   歌名 margin-top 在此抵消；头像与导航文字同 grid row 居中，本来就平齐 */
+.ls .hd{grid-column:2;grid-row:2;display:grid;margin-top:0;
+  grid-template-columns:auto auto;grid-template-rows:auto auto auto;
   align-items:center;column-gap:10px;padding:0}
-.ls .hd__av{grid-column:1;grid-row:1 / span 2;width:40px;height:40px;flex:none}
+.ls .hd__av{grid-column:1;grid-row:1 / span 3;width:40px;height:40px;flex:none}
 .ls .hd__av b{font-size:15px}
-.ls .hd__n{grid-column:2;grid-row:1;font-size:17px;max-width:420px;text-align:left}
-.ls .hd__s{grid-column:2;grid-row:2;font-size:11px;text-align:left}
+.ls .hd__n{grid-column:2;grid-row:1;font-size:17px;max-width:420px;text-align:left;margin-top:0}
+.ls .hd__a{grid-column:2;grid-row:2;font-size:12px;color:#6e6e76;text-align:left;max-width:420px}
+.ls .hd__s{grid-column:2;grid-row:3;font-size:11px;text-align:left}
 /* 对话区占满中段；语音条 + 输入框各占底下一行；home 条横屏不要 */
 .ls .chat{grid-column:1 / -1;grid-row:3}
-/* 左气泡/输入指示右移 56px：岛竖在左侧边（收起 6..42px、展开 6..66px），
-   左气泡仍从 12px 起会被岛盖住头几个字；56px 起，文字从 70px 起，
-   展开时也不盖字（尾巴尖 51px 只在展开 2 秒里轻擦岛边）。 */
-.ls .bub.l{left:56px}
-.ls .typing.l{left:56px}
 .ls .rec{grid-column:1 / -1;grid-row:4;padding:2px 12px 6px}
 .ls .bar{grid-column:1 / -1;grid-row:5;height:44px;padding:0 12px 4px}
 .ls .bar__in{height:29px}
 .ls .bar__p,.ls .bar__m{width:28px;height:28px}
 .ls .home{display:none}
-/* 灵动岛：左侧边中部竖着（与竖屏顶中横着同一只岛，只换向；开合动画照常） */
-.ls .island{top:50%;left:6px;transform:translateY(-50%);
-  width:36px;height:124px;flex-direction:column;padding:10px 0;gap:8px;border-radius:18px}
-.ls .island.open{width:60px;height:212px;padding:12px 0;gap:9px;border-radius:20px}
-.ls .island__art{width:16px;height:16px}
-.ls .island.open .island__art{width:34px;height:34px;border-radius:9px}
-.ls .island.open .island__art b{font-size:14px}
-.ls .island__meta{flex:1 1 0;min-height:0;align-items:center}
-.ls .island__n,.ls .island__a{writing-mode:vertical-rl;white-space:nowrap}
-.ls .island__wave{height:11px}
-.ls .island.open .island__wave{height:17px}
 
 @media (prefers-reduced-motion: reduce){
   .phone{animation:none}
   .rec__w i{transition:none}
   .typing i{animation:none;opacity:.6}
-  .island{transition:none}
-  .island.open .island__meta{transition:none}
 }
 </style>
 </head>
@@ -324,38 +274,19 @@ body{font-family:"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft
 
       <div class="screen">
 
-        <!-- 灵动岛 -->
-        <div class="island" id="island">
-          <div class="island__art" id="islArt"><b id="islCh">♪</b><img id="islImg" alt=""></div>
-          <div class="island__meta">
-            <div class="island__n" id="islN">—</div>
-            <div class="island__a" id="islA">—</div>
-          </div>
-          <div class="island__wave" id="islWave"></div>
-        </div>
+        <!-- 状态栏（r53：时间/信号/WiFi/电量已删，只留 54px 空占位） -->
+        <div class="sbar"></div>
 
-        <!-- 状态栏 -->
-        <div class="sbar">
-          <div class="sbar__t" id="clock">9:41</div>
-          <div class="sbar__i">
-            <svg width="17" height="11" viewBox="0 0 17 11" fill="#000"><rect x="0" y="7.5" width="3" height="3.5" rx="1"/><rect x="4.5" y="5.2" width="3" height="5.8" rx="1"/><rect x="9" y="2.6" width="3" height="8.4" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
-            <svg width="16" height="11" viewBox="0 0 16 11" fill="none"><path d="M8 10.2 5.7 7.7a3.3 3.3 0 0 1 4.6 0L8 10.2Z" fill="#000"/><path d="M3.6 5.4a6.4 6.4 0 0 1 8.8 0" stroke="#000" stroke-width="1.5" stroke-linecap="round"/><path d="M1.2 2.6a9.9 9.9 0 0 1 13.6 0" stroke="#000" stroke-width="1.5" stroke-linecap="round"/></svg>
-            <svg width="25" height="12" viewBox="0 0 25 12" fill="none"><rect x=".5" y=".5" width="21" height="11" rx="3.2" stroke="#000" stroke-opacity=".32"/><rect x="2" y="2" width="16.5" height="8" rx="2" fill="#000"/><path d="M23 4.2v3.6a2 2 0 0 0 0-3.6Z" fill="#000" fill-opacity=".38"/></svg>
-          </div>
-        </div>
-
-        <!-- 导航 -->
+        <!-- 导航（r53：返回箭头已删，只留名字） -->
         <div class="nav">
-          <div class="nav__b">
-            <svg width="12" height="21" viewBox="0 0 12 21" fill="none"><path d="M10.4 1.6 2 10.5l8.4 8.9" stroke="#0b84ff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </div>
           <div class="nav__n" id="navN">—</div>
         </div>
 
-        <!-- 会话头 -->
+        <!-- 会话头（r53：头像上移与导航文字平齐；歌名下加歌手行） -->
         <div class="hd">
           <div class="hd__av" id="av"><b id="avCh">♪</b><img id="avImg" alt=""></div>
           <div class="hd__n" id="hdN">—</div>
+          <div class="hd__a" id="hdA">—</div>
           <div class="hd__s">正在播放</div>
         </div>
 
@@ -382,10 +313,10 @@ body{font-family:"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft
           </div>
         </div>
 
-        <!-- 输入条 -->
+        <!-- 输入条（r53：iMessage 占位字已删，留空框） -->
         <div class="bar">
           <div class="bar__p">+</div>
-          <div class="bar__in">iMessage</div>
+          <div class="bar__in"></div>
           <div class="bar__m">
             <svg width="14" height="18" viewBox="0 0 14 18" fill="none"><rect x="4.6" y="1" width="4.8" height="9.4" rx="2.4" stroke="#8a8a90" stroke-width="1.5"/><path d="M1.6 8.2a5.4 5.4 0 0 0 10.8 0" stroke="#8a8a90" stroke-width="1.5" stroke-linecap="round"/><path d="M7 13.9V16.6" stroke="#8a8a90" stroke-width="1.5" stroke-linecap="round"/></svg>
           </div>
@@ -515,8 +446,7 @@ var root    = document.documentElement;
 var anchor  = $('anchor'), phone = $('phone');
 var chat    = $('chat'), thread = $('thread'), stamp = $('stamp'), typing = $('typing');
 var emptyEl = $('empty');
-var island  = $('island'), islWave = $('islWave'), islArt = $('islArt'), islCh = $('islCh');
-var islImg  = $('islImg'), avImg = $('avImg'), avCh = $('avCh');
+var avImg = $('avImg'), avCh = $('avCh'); /* r53：岛已删 */
 var recWave = $('recWave'), recT = $('recT');
 var glow    = $('glow'), metaEl = $('meta');
 var mBar    = $('mBar'), mCur = $('mCur'), mDur = $('mDur');
@@ -682,7 +612,7 @@ function layout(){
   TEXTW = Math.max(80, TW - 28);
   clearBubbles();
   offs = []; hgt = [];
-  var y = 0;
+  var y = 30; /* r53：首句从 30 起——时间戳占 10–24px，气泡紧跟时间戳排满到语音条 */
   for (var i = 0; i < S.lines.length; i++){
     var txt = S.lines[i].text || '';
     var h = txt ? estH(txt, TEXTW) : 0;
@@ -791,7 +721,7 @@ function setIdx(i){
   var prev = curIdx;
   curIdx = i; S.idx = i;
   var h = (i >= 0 && hgt[i]) ? hgt[i] : 0;
-  var ty = CH * 0.72 - h - (i >= 0 ? (offs[i] || 0) : 0);
+  var ty = Math.min(0, CH - 12 - h - (i >= 0 ? (offs[i] || 0) : 0)); /* r53：当前句锚到底部（原 CH*0.72）：句少时 ty=0 从顶排，句多时上滚、当前句钉在对话区底 12px，气泡排满到语音条 */
   var jump = Math.abs(i - prev) > 3 || prev === -2 || i < prev;
   threadTY = ty;
   thread.style.transitionDuration = jump ? '0s' : '.56s';
@@ -1047,28 +977,7 @@ addEventListener('wheel', function(e){
   applyFree();
 }, { passive: false });
 
-/* ==========================================================
-   11) 灵动岛
-   ========================================================== */
-var islandTimer = 0;
-var islandDone = false;
-var screenEl = null;
-/* 只在进全屏时展开一次（2 秒），之后永远收起 */
-function expandIslandOnce(){
-  if (RM || islandDone) return;
-  islandDone = true;
-  if (!screenEl) screenEl = document.querySelector('.screen');
-  island.classList.add('open');
-  if (screenEl) screenEl.classList.add('island-open');
-  if (islandTimer) clearTimeout(islandTimer);
-  islandTimer = setTimeout(function(){
-    islandTimer = 0;
-    island.classList.remove('open');
-    if (screenEl) screenEl.classList.remove('island-open');
-  }, 2000);
-}
-
-var barsRec = [], barsIsl = [], noiseSeed = 0;
+var barsRec = [], noiseSeed = 0; /* r53：岛已删 */
 
 function mkBars(host, n){
   host.innerHTML = '';
@@ -1120,19 +1029,14 @@ function setAccent(a){
 function setArt(url, name){
   var initial = (name && name.length) ? Array.from(name)[0] : '♪';
   avCh.textContent = initial;
-  islCh.textContent = initial;
 
   var ok = !!(url && typeof url === 'string' && url.length > 4);
   avImg.style.display = 'none';
-  islImg.style.display = 'none';
   if (!ok) return;
 
   avImg.onload  = function(){ avImg.style.display = 'block'; };
   avImg.onerror = function(){ avImg.style.display = 'none'; };
   avImg.src = url;
-  islImg.onload  = function(){ islImg.style.display = 'block'; };
-  islImg.onerror = function(){ islImg.style.display = 'none'; };
-  islImg.src = url;
 }
 
 function onInit(p){
@@ -1155,11 +1059,10 @@ function onInit(p){
   setArt(song.cover, name);
 
   $('hdN').textContent = name;
+  $('hdA').textContent = ar; /* r53：歌手行，歌名下、正在播放上 */
   $('navN').textContent = ar;
   $('mN').textContent  = name;
   $('mA').textContent  = ar;
-  $('islN').textContent = name;
-  $('islA').textContent = ar;
   metaEl.classList.add('on');
   syncMeta();
 
@@ -1202,8 +1105,6 @@ function onInit(p){
     applyShot(first, true);
   }
   S.err = '';
-  /* 首次拿到歌（= 已进全屏）时，灵动岛展开一次就永远收起 */
-  setTimeout(expandIslandOnce, 260);
 }
 
 var liveAmp = 0.1;
@@ -1216,7 +1117,6 @@ function onLive(p){
   liveAmp = clamp(ba * 0.5 + mi * 0.28 + tr * 0.22 + lv * 0.26 + 0.04, 0.03, 1);
   noiseSeed += 0.7;
   setBars(barsRec, S.playing ? liveAmp : 0.02, noiseSeed);
-  setBars(barsIsl, S.playing ? liveAmp * 0.9 : 0.06, noiseSeed + 1.3);
 }
 
 function onBeat(p){
@@ -1226,7 +1126,6 @@ function onBeat(p){
   if (!S.playing) return;
   noiseSeed += 0.5;
   setBars(barsRec, clamp(lv * 0.9 + 0.16, 0, 1), noiseSeed + 0.4);
-  setBars(barsIsl, clamp(lv * 0.85 + 0.2, 0, 1), noiseSeed + 1.7);
 }
 
 /* 设置项变更：宿主在 ready 后会把已存的值逐条推一遍 */
@@ -1380,13 +1279,14 @@ function frame(now){
   requestAnimationFrame(frame);
 }
 
-/* 时钟 */
+/* 时钟（r53：#clock 已删，只剩「今天」时间戳；必须用中国大陆时间
+   Asia/Shanghai，不跟设备时区；toLocaleTimeString 一旦抛错/格式不对就
+   回落本地时间，stamp 绝不能停更） */
 function tickClock(){
-  try {
-    var d = new Date();
-    $('clock').textContent = d.getHours() + ':' + pad2(d.getMinutes());
-    stamp.textContent = '今天 ' + d.getHours() + ':' + pad2(d.getMinutes());
-  } catch(e){}
+  var d = new Date(), s = '';
+  try { s = d.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: 'numeric', minute: '2-digit', hour12: false }); } catch(e){}
+  if (!s || s.indexOf(':') < 0) s = d.getHours() + ':' + pad2(d.getMinutes());
+  try { stamp.textContent = '今天 ' + s; } catch(e){}
 }
 tickClock();
 setInterval(tickClock, 15000);
@@ -1395,8 +1295,7 @@ setInterval(tickClock, 15000);
    13) 启动
    ========================================================== */
 try {
-  barsRec = mkBars(recWave, 40);
-  barsIsl = mkBars(islWave, 4);
+  barsRec = mkBars(recWave, 48); /* r53：波形 40→48 条，语音条约 210pt（54%） */
   var wn = $('recWave');
   for (var wq = 0; wq < barsRec.length; wq++){
     barsRec[wq].style.left = (wq * 2.5 + 0.5).toFixed(1) + 'px';

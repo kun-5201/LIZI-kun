@@ -29,6 +29,11 @@ private let qqQrCooldown: TimeInterval = 15
 private let qqQrRateLimitCooldown: TimeInterval = 30
 private let qqQrClaim: TimeInterval = 60
 private let qqCredentialRejectionCodes: Set<Int> = [1000, 104401, 104400]
+
+/// r58 Folia 口径：传输层连不上的 URLError 码（musicu 原样带进
+/// QQUpstreamError.code）。-1001 超时 / -1003 找不到 host / -1004 连不上
+/// host / -1005 连接断开 / -1006 DNS 失败 / -1009 断网 / -1200 TLS 失败。
+private let qqUnreachableCodes: Set<Int> = [-1001, -1003, -1004, -1005, -1006, -1009, -1200]
 private let qqWechatAppId = "wx48db31d50e334801"
 
 /// 上游抛出的业务码（global code / req_0.code / CGI code）。
@@ -284,7 +289,17 @@ actor QQService {
                 throw e
             } catch {
                 lastError = error
-                if attempt == attempts - 1 { throw QQUpstreamError(code: -1, message: "musicu 请求失败：\(error.localizedDescription)") }
+                if attempt == attempts - 1 {
+                    // r58 Folia 口径：传输失败（超时/断网）要和上游业务拒绝分开——
+                    // 取链层靠它决定「停链报连不上」还是「继续降档」。URLError 的
+                    // code 原样进 QQUpstreamError.code（-1001 超时、-1009 断网等）；
+                    // 非 URLError 仍回 -1。凭证拒码表不含这些码，
+                    // isCredentialRejection 不受影响。
+                    if let urlError = error as? URLError {
+                        throw QQUpstreamError(code: urlError.code.rawValue, message: "musicu 请求失败：\(error.localizedDescription)")
+                    }
+                    throw QQUpstreamError(code: -1, message: "musicu 请求失败：\(error.localizedDescription)")
+                }
             }
         }
         throw lastError
@@ -1950,6 +1965,18 @@ extension QQService {
         return false
     }
 
+    /// 传输层连不上（r58 Folia `isQqUnreachable` 同款：超时/断网/没带拒绝码的
+    /// 5xx）。URLError 网络码（musicu 已把 code 原样带进 QQUpstreamError）
+    /// 或 LiziUpstream 5xx 都算；业务码（QQUpstreamError 其它码）不算——
+    /// 上游明确拒绝（空链接/拒码）走降档与试听，不走这条。
+    private func isUnreachable(_ error: Error) -> Bool {
+        if let e = error as? QQUpstreamError {
+            return qqUnreachableCodes.contains(e.code)
+        }
+        if let e = error as? NSError, e.domain == "LiziUpstream", e.code >= 500 { return true }
+        return false
+    }
+
     /// r31-cookie：空结果时的凭证存活复核（只在取数已通、但回空时调）。
     /// 背景（VM 实测，真上游）：`CgiGetDiss`（喜欢，dirid 201）、
     /// `GetPlaylistByUin`（歌单）、`uniform_get_Dissinfo`（每日，dirid 202）
@@ -2182,8 +2209,22 @@ extension QQService {
     /// 第 13 轮第 12 件：返回实际命中的档位（served），前端只显示它。
     /// 所选档拿不到时沿梯子向低档重试：master → atmos51 → atmos20 → hires
     /// → flac → 320 → 128（与 music-lib 的 VIP 优先级一致）。
-    private func resolvePlayUrl(mid: String, quality: String) async -> (url: String, loginRequired: Bool, served: String) {
+    /// r58 Folia 口径（qqProvider.ts getAudioSource 同款规则，原生重写）：
+    /// - 档位 ladder 自上而下（master→…→128；best 按 file.size 排 flac/320/128）；
+    /// - 一档超时/断网（isUnreachable）→ 立即停链，不再试更低档（同网只会一样慢），
+    ///   也不拿试听顶上——试听一交出去播放层就当成功，会员碰上一次网络抖动
+    ///   就只听到一分钟；报 unreachable，播放层以后重试；
+    /// - 凭证被拒 → 停链，loginRequired = true（更低档同一凭证一样被拒）；
+    /// - 上游正常回答但没给链接（空链接）→ 记 sawEmpty，继续降档；标准档
+    ///   （ladder 最后一档，即 128）也空 → standardTierEmpty，账号拿不到整首，
+    ///   有会话时才取试听（songUrl 里判）；
+    /// - 其它业务错 → 继续降档（旧行为）。
+    /// 返回：url / 是否要登录 / 实际档 / 是否见过空链接 / 是否连不上 / 标准档是否空。
+    private func resolvePlayUrl(mid: String, quality: String) async -> (url: String, loginRequired: Bool, served: String, sawEmpty: Bool, unreachable: Bool, standardTierEmpty: Bool) {
         var loginRequired = false
+        var sawEmpty = false
+        var unreachable = false
+        var standardTierEmpty = false
         let q = ["m4a", "128", "320", "ape", "flac", "best", "master", "atmos51", "atmos20", "hires"].contains(quality) ? quality : "128"
         let detail = await songDetail(mid: mid)
         let file = detail?["file"] as? [String: Any] ?? [:]
@@ -2205,28 +2246,40 @@ extension QQService {
             order = [q]
         }
         let guid = UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        for attemptQuality in order {
-            let filename = qqVkeyFilename(quality: attemptQuality, mid: mid, mediaMid: mediaMid)
+        // 一次 vkey 请求：回（直链、purl、是否停链、本档是否空链接）。
+        func requestOnce(filename: String) async -> (url: String?, purl: String?, stop: Bool, empty: Bool) {
             do {
                 let data = try await vkeyRequest(mid: mid, filename: filename, guid: guid)
                 let (url, purl) = urlFromVkey(data, mid: mid)
-                if let url { return (url, loginRequired, attemptQuality) }
-                if let purl { return (await cdnFallbackUrl(purl: purl, guid: guid), loginRequired, attemptQuality) }
+                return (url, purl, false, url == nil && purl == nil)
             } catch {
-                if isCredentialRejection(error) { loginRequired = true }
-            }
-            // m4a/128 登录分支：首次无链接时同一 guid、同一文件名再要一次。
-            if loadCredential() != nil && (attemptQuality == "m4a" || attemptQuality == "128") {
-                do {
-                    let data = try await vkeyRequest(mid: mid, filename: filename, guid: guid)
-                    let (url, _) = urlFromVkey(data, mid: mid)
-                    if let url { return (url, loginRequired, attemptQuality) }
-                } catch {
-                    if isCredentialRejection(error) { loginRequired = true }
-                }
+                if isCredentialRejection(error) { loginRequired = true; return (nil, nil, true, false) }
+                if isUnreachable(error) { unreachable = true; return (nil, nil, true, false) }
+                return (nil, nil, false, false)
             }
         }
-        return ("", loginRequired, "")
+        func finish(url: String, served: String) -> (url: String, loginRequired: Bool, served: String, sawEmpty: Bool, unreachable: Bool, standardTierEmpty: Bool) {
+            (url, loginRequired, served, sawEmpty, unreachable, standardTierEmpty)
+        }
+        for attemptQuality in order {
+            let filename = qqVkeyFilename(quality: attemptQuality, mid: mid, mediaMid: mediaMid)
+            var (url, purl, stop, empty) = await requestOnce(filename: filename)
+            if empty { sawEmpty = true }
+            if attemptQuality == order.last, empty { standardTierEmpty = true }
+            if let url { return finish(url: url, served: attemptQuality) }
+            if let purl { return finish(url: await cdnFallbackUrl(purl: purl, guid: guid), served: attemptQuality) }
+            if stop { break }
+            // m4a/128 登录分支：首次无链接时同一 guid、同一文件名再要一次。
+            if loadCredential() != nil && (attemptQuality == "m4a" || attemptQuality == "128") {
+                (url, purl, stop, empty) = await requestOnce(filename: filename)
+                if empty { sawEmpty = true }
+                if attemptQuality == order.last, empty { standardTierEmpty = true }
+                if let url { return finish(url: url, served: attemptQuality) }
+                if let purl { return finish(url: await cdnFallbackUrl(purl: purl, guid: guid), served: attemptQuality) }
+                if stop { break }
+            }
+        }
+        return ("", loginRequired, "", sawEmpty, unreachable, standardTierEmpty)
     }
 
     /// 试听：RS02<14 位 mediaId>.mp3，仅 size_try > 0 时取。
@@ -3029,15 +3082,25 @@ extension QQService {
         guard !mid.isEmpty else { return .json(400, ["code": 400, "error": "mid required"]) }
         let quality = req.string("quality", "128")
         _ = await ensureCredential()
-        let (url, loginRequired, served) = await resolvePlayUrl(mid: mid, quality: quality)
+        let (url, loginRequired, served, sawEmpty, unreachable, standardTierEmpty) = await resolvePlayUrl(mid: mid, quality: quality)
         if !url.isEmpty {
             return .json(200, ["code": 200, "mid": mid, "url": url, "preview": false,
                                 "quality": served, "reason": NSNull(), "restriction": NSNull()])
         }
-        let preview = await previewUrl(mid: mid)
-        if !preview.isEmpty {
-            return .json(200, ["code": 200, "mid": mid, "url": preview, "preview": true,
-                                "quality": "preview", "reason": NSNull(), "restriction": NSNull()])
+        // r58 Folia 口径：连不上的档（超时/断网）且标准档没回过空链接时，
+        // 不拿试听顶上——试听一交出去播放层就当成功、预取还会存下来照放，
+        // 会员碰上一次网络抖动就只听到一分钟。报 unreachable，播放层以后重试。
+        // 只有上游明确回过空链接（账号拿不到整首）时，才取试听片段。
+        if unreachable && !standardTierEmpty {
+            return .json(200, ["code": 200, "mid": mid, "url": "", "preview": false,
+                                "quality": quality, "reason": "unreachable", "restriction": NSNull()])
+        }
+        if sawEmpty {
+            let preview = await previewUrl(mid: mid)
+            if !preview.isEmpty {
+                return .json(200, ["code": 200, "mid": mid, "url": preview, "preview": true,
+                                    "quality": "preview", "reason": NSNull(), "restriction": NSNull()])
+            }
         }
         return .json(200, ["code": 200, "mid": mid, "url": "", "preview": false,
                             "quality": quality, "reason": loginRequired ? "login" : "unavailable",

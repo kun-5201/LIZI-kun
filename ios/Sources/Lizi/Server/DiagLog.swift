@@ -322,6 +322,105 @@ final class DiagLog {
     /// 从 r55 起死亡快照里补版本）。
     private(set) var lastDeathVersion: String = ""
 
+    // MARK: - r58 心跳鉴别器（死因三分：同步 trap / 看门狗冻主线程 / jetsam）
+    //
+    // 背景：r55 与 r57 两份诊断都只有「最后一步是 closeOpened / 封面 ready」
+    // 这一级线索，.ips 拿不到，三种死法分不开——r57 的修没拦住，不能再靠猜。
+    // 本心跳是唯一的鉴别手段：
+    // - 后台 detached 任务每 1 秒写一个样本 [tsMs, 常驻内存 MB, 主线程 tickMs]
+    //   到 Application Support/lizi.heartbeat.json（最多 30 个样本，约 30 秒窗），
+    //   原子写，不走 DiagLog 的 NSLock、不碰任何被怀疑的路径；
+    // - 主线程 tick：每秒向主队列 fire-and-forget 发一个小 block，跑到就记
+    //   mainTickAt（不 await——主线程卡住时 await 会把心跳任务也挂住，
+    //   文件就停了，分辨力全丢）；
+    // - 下次启动 markLaunched 读这份文件快照：
+    //   lastMainTickAgeMs 大（>5000，主线程死前已卡住数秒）+ 内存平 → 看门狗/冻主线程；
+    //   lastMainTickAgeMs 小（<2000，主线程死前还活着）+ 内存平 → 同步 trap；
+    //   maxHeartbeatMemoryMB 大或一路爬升 → jetsam（内存被杀）。
+    // 代价：每秒 1 次主队列投递 + 1 次约 2KB 原子写，可忽略。
+    // 注意：心跳文件只在不干净退出时才有诊断意义；干净退出/首次启动没有
+    // 上次心跳时四项全回 -1。
+    /// 上次心跳样本距发现死亡的时间（ms；<2000 说明死前心跳还在走）。
+    private(set) var lastHeartbeatAgeMs: Int = -1
+    /// 上次心跳样本里的常驻内存（MB）。
+    private(set) var lastHeartbeatMemoryMB: Int = -1
+    /// 心跳窗口（死前约 30 秒）里的最大常驻内存（MB；一路爬升 → jetsam 嫌疑）。
+    private(set) var maxHeartbeatMemoryMB: Int = -1
+    /// 主线程最后一次 tick 距发现死亡的时间（ms；>5000 说明死前主线程已卡住数秒）。
+    private(set) var lastMainTickAgeMs: Int = -1
+
+    private static let heartbeatFileName = "lizi.heartbeat.json"
+    private static let heartbeatMaxSamples = 30
+    private let heartbeatLock = NSLock()
+    private var heartbeatStarted = false
+    private var heartbeatMainTickMs: Int = 0
+
+    private static func heartbeatFileURL() -> URL? {
+        let fm = FileManager.default
+        guard let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent(heartbeatFileName)
+    }
+
+    /// 读上次心跳文件，快照四项（markLaunched 的不干净分支调；必须在
+    /// startHeartbeat 覆盖文件之前读）。文件坏/没有回全 -1。
+    private func snapshotHeartbeat() {
+        let nowMs = Int(Date().timeIntervalSince1970 * 1000)
+        guard let url = Self.heartbeatFileURL(),
+              let data = try? Data(contentsOf: url),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[Int]],
+              let last = arr.last, last.count == 3 else {
+            lastHeartbeatAgeMs = -1; lastHeartbeatMemoryMB = -1
+            maxHeartbeatMemoryMB = -1; lastMainTickAgeMs = -1
+            return
+        }
+        lastHeartbeatAgeMs = nowMs - last[0]
+        lastHeartbeatMemoryMB = last[1]
+        maxHeartbeatMemoryMB = arr.map { $0[1] }.max() ?? last[1]
+        lastMainTickAgeMs = nowMs - last[2]
+    }
+
+    /// 启动心跳（markLaunched 末尾调一次；重复调无害）。进程生命周期内一直跑。
+    func startHeartbeat() {
+        heartbeatLock.lock()
+        guard !heartbeatStarted else { heartbeatLock.unlock(); return }
+        heartbeatStarted = true
+        heartbeatLock.unlock()
+        heartbeatMainTickMs = Int(Date().timeIntervalSince1970 * 1000)
+        Task.detached { [weak self] in
+            while true {
+                // 主线程 tick：fire-and-forget，绝不 await。
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.heartbeatLock.lock()
+                    self.heartbeatMainTickMs = Int(Date().timeIntervalSince1970 * 1000)
+                    self.heartbeatLock.unlock()
+                }
+                self?.writeHeartbeatSample()
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+    }
+
+    private func writeHeartbeatSample() {
+        heartbeatLock.lock()
+        let tick = heartbeatMainTickMs
+        heartbeatLock.unlock()
+        let nowMs = Int(Date().timeIntervalSince1970 * 1000)
+        let mem = Self.memoryFootprintMB()
+        guard let url = Self.heartbeatFileURL() else { return }
+        var samples: [[Int]] = []
+        if let data = try? Data(contentsOf: url),
+           let arr = try? JSONSerialization.jsonObject(with: data) as? [[Int]] {
+            samples = arr
+        }
+        samples.append([nowMs, mem, tick])
+        if samples.count > Self.heartbeatMaxSamples { samples.removeFirst(samples.count - Self.heartbeatMaxSamples) }
+        if let data = try? JSONSerialization.data(withJSONObject: samples) {
+            try? data.write(to: url, options: [.atomic])
+        }
+    }
+
     private enum RunKey {
         static let hadRun = "lizi.runHadRun"
         static let cleanExit = "lizi.runCleanExit"
@@ -330,6 +429,10 @@ final class DiagLog {
         static let lastDeathAt = "lizi.lastDeathAt"
         static let lastDeathMemoryMB = "lizi.lastDeathMemoryMB"
         static let lastDeathVersion = "lizi.lastDeathVersion"
+        static let lastHeartbeatAgeMs = "lizi.lastHeartbeatAgeMs"
+        static let lastHeartbeatMemoryMB = "lizi.lastHeartbeatMemoryMB"
+        static let maxHeartbeatMemoryMB = "lizi.maxHeartbeatMemoryMB"
+        static let lastMainTickAgeMs = "lizi.lastMainTickAgeMs"
     }
 
     /// 本进程 bundle 版本（shortVersion + build，如 "1.0(12)"；读不到回 ""）。
@@ -359,11 +462,17 @@ final class DiagLog {
             lastDeathAt = Date().timeIntervalSince1970
             lastDeathMemoryMB = Self.memoryFootprintMB()
             lastDeathVersion = Self.appVersion()
+            // r58 心跳：必须在 startHeartbeat 覆盖文件之前快照。
+            snapshotHeartbeat()
             ud.set(lastDeathStep, forKey: RunKey.lastDeathStep)
             ud.set(lastDeathActivity, forKey: RunKey.lastDeathActivity)
             ud.set(lastDeathAt, forKey: RunKey.lastDeathAt)
             ud.set(lastDeathMemoryMB, forKey: RunKey.lastDeathMemoryMB)
             ud.set(lastDeathVersion, forKey: RunKey.lastDeathVersion)
+            ud.set(lastHeartbeatAgeMs, forKey: RunKey.lastHeartbeatAgeMs)
+            ud.set(lastHeartbeatMemoryMB, forKey: RunKey.lastHeartbeatMemoryMB)
+            ud.set(maxHeartbeatMemoryMB, forKey: RunKey.maxHeartbeatMemoryMB)
+            ud.set(lastMainTickAgeMs, forKey: RunKey.lastMainTickAgeMs)
         } else {
             previousRunClean = true
             lastDeathStep = ud.string(forKey: RunKey.lastDeathStep) ?? ""
@@ -371,9 +480,14 @@ final class DiagLog {
             lastDeathAt = ud.double(forKey: RunKey.lastDeathAt)
             lastDeathMemoryMB = ud.integer(forKey: RunKey.lastDeathMemoryMB)
             lastDeathVersion = ud.string(forKey: RunKey.lastDeathVersion) ?? ""
+            lastHeartbeatAgeMs = ud.integer(forKey: RunKey.lastHeartbeatAgeMs)
+            lastHeartbeatMemoryMB = ud.integer(forKey: RunKey.lastHeartbeatMemoryMB)
+            maxHeartbeatMemoryMB = ud.integer(forKey: RunKey.maxHeartbeatMemoryMB)
+            lastMainTickAgeMs = ud.integer(forKey: RunKey.lastMainTickAgeMs)
         }
         ud.set(true, forKey: RunKey.hadRun)
         ud.set(false, forKey: RunKey.cleanExit)
+        startHeartbeat()
     }
 
     /// 正常退出时调（applicationWillTerminate）：下次启动不再报死亡。
@@ -422,6 +536,11 @@ final class DiagLog {
         lastDeathAt = 0
         lastDeathMemoryMB = -1
         lastDeathVersion = ""
+        // r58 心跳：快照四项归 -1（心跳任务本身不停，下次启动重写文件）。
+        lastHeartbeatAgeMs = -1
+        lastHeartbeatMemoryMB = -1
+        maxHeartbeatMemoryMB = -1
+        lastMainTickAgeMs = -1
         let ud = UserDefaults.standard
         ud.removeObject(forKey: PersistKey.logs)
         ud.removeObject(forKey: PersistKey.requests)
@@ -463,6 +582,11 @@ final class DiagLog {
                 // r55：死亡快照回落 + 版本（见 markLaunched 注释）。
                 "lastDeathActivity": lastDeathActivity,
                 "lastDeathVersion": lastDeathVersion,
+                // r58 心跳鉴别器：死前主线程 tick 与内存（见文件内注释）。
+                "lastHeartbeatAgeMs": lastHeartbeatAgeMs,
+                "lastHeartbeatMemoryMB": lastHeartbeatMemoryMB,
+                "maxHeartbeatMemoryMB": maxHeartbeatMemoryMB,
+                "lastMainTickAgeMs": lastMainTickAgeMs,
                 "activityLog": activityLog,
                 "appVersion": Self.appVersion()]
     }

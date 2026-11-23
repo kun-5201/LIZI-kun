@@ -16,13 +16,17 @@ import Foundation
 /// 会员校验（r31-membership，见 `Membership.swift`）：只识别、不卡档。
 /// - 网易：`/api/session` 的 `sessionVerify()` 先取 profile 再取 vipInfo
 ///  （weapi `/music-vip-membership/client/vip/info`）；`LoginState.vipInfo`
-///   是最终判定的一半：`isVip() = vipType > 0 || vipInfo.isActive`
+///   是最终判定的一半：`isVip() = vip || vipType > 0 || vipInfo.isActive`
 ///   （只信 vipType 会把部分 SVIP 账号误判成非会员）。
 /// - QQ / 酷狗：会员查询挂在两个 SessionStore 的 `refreshProfile()` 里
 ///   （登录成功 + 每次 refreshProfile 后各验一次，无定时轮询；登出清会员态；
 ///   资料接口失败时先保登录态、只把会员态标未知——见 `refreshNativeSession`）。
-/// - 酷我 / Apple Music / 汽水 / 波点没有会员校验接口（Moumusic 也没有），
-///   `vipInfo` 恒为 nil，显示为未知，不编 VIP 状态。
+/// - r58 Folia 口径：`LoginState.vipType` 是统一等级（Int?，nil = 未知，
+///   不当免费；0 = 明确免费，>0 = VIP；QQ/酷狗/汽水归一 1 = VIP、2 = SVIP，
+///   网易取 profile 原值）。SVIP 显示仍单独分，不并进普通 VIP。
+/// - 波点 / 酷我 / Apple Music 没有会员校验接口（Moumusic / Folia 也没有），
+///   `vipInfo` 与 `vipType` 恒为 nil，显示为未知，不编 VIP 状态。
+///   汽水 r58 起有（status 的 user.isVip → vipType 1/0）。
 ///
 /// 接口约定（r23f `LoginSheetTarget.swift` 文件头 + r23b–r23e 各 flow 已写好的调用点）：
 /// 调用形式定稿只留一种（r23a 定稿，2026-11-20）：
@@ -102,12 +106,13 @@ final class LoginStore: ObservableObject {
         state(for: platform).avatarURL
     }
 
-    /// 平台返回的 VIP 状态（r31-membership：最终判定 =
-    /// vipType > 0 || vipInfo.isActive；只信 vipType 会把部分 SVIP
-    /// 账号误判成非会员。会员校验只识别、不卡档——取链不问它）。
+    /// 平台返回的 VIP 状态（r58 Folia 口径对齐：最终判定 =
+    /// vipType > 0 || vipInfo.isActive || vip；只信 vipType 会把部分 SVIP
+    /// 账号误判成非会员（网易 profile.vipType 回 0 的 SVIP 账号）。
+    /// 会员校验只识别、不卡档——取链不问它）。
     func isVip(platform: String) -> Bool {
         let s = state(for: platform)
-        return s.vip || s.vipType > 0 || s.vipInfo?.isActive == true
+        return s.vip || (s.vipType ?? 0) > 0 || s.vipInfo?.isActive == true
     }
 
     /// 是否 SVIP（网易 redplus / QQ iSuperVip / 酷狗 svip_level·svip 在期）。
@@ -352,8 +357,8 @@ final class LoginStore: ObservableObject {
     /// - 酷我 `/api/kuwo/status`：`{ loggedIn, uid, nickname, avatar, vip: false,
     ///   note }`（Cookie 登录无校验接口，vip 一律 false 不编；昵称 / 头像尽力
     ///   调 `/api/v1/www/user/userInfo` 取，取不到留空，不编）。
-    /// - 汽水 `/api/qishui/status`：`{ loggedIn, user: { nickname, avatar }, uid }`，
-    ///   续期失败时另带 `stale: true`。
+    /// - 汽水 `/api/qishui/status`：`{ loggedIn, user: { nickname, avatar, isVip }, uid }`，
+    ///   续期失败时另带 `stale: true`。r58：user.isVip → vipType 1/0（Folia 同款）。
     /// - 波点 `/api/bodian/status`：`{ loggedIn, user: { nickname, avatarUrl }, uid }`。
     /// - 酷狗 `/api/kugou/status`：`{ loggedIn, nickname, avatar, uid,
     ///   vip: Bool?, isSuperVIP, vipKnown }`（资料接口实算：任一会员字段 > 0
@@ -375,12 +380,17 @@ final class LoginStore: ObservableObject {
             ?? firstString([user], keys: ["avatar", "avatarUrl", "picUrl", "medium_avatar_url", "avatar_url"]) ?? ""
         s.avatarURL = Self.normalizedAvatarURL(avatar)
         if let vip = dict["vip"] as? NSNumber { s.vip = vip.boolValue }
-        // 网易：profile.vipType 只作辅助——部分 SVIP 账号 vipType 回 0，
-        // 只信它会误判（r31-membership）。vipType 先存下来，最终判定
-        // 在 isVip() 里做：vipType > 0 || vipInfo.isActive。
-        if let vipType = profile["vipType"] as? NSNumber { s.vipType = vipType.intValue }
-        if let vipType = profile["vipType"] as? String, let n = Int(vipType) { s.vipType = n }
-        if s.vipType > 0 { s.vip = true }
+        // r58 Folia 口径：profile.vipType 在场即已知（0 = 明确免费，不是未知；
+        // 缺字段才留 nil）。网易取原值；部分 SVIP 账号 vipType 回 0，
+        // 只信它会误判（r31-membership），最终判定在 isVip() 里做。
+        if let vipType = profile["vipType"] as? NSNumber {
+            s.vipType = vipType.intValue
+            s.vipKnown = true
+        } else if let vipType = profile["vipType"] as? String, let n = Int(vipType) {
+            s.vipType = n
+            s.vipKnown = true
+        }
+        if (s.vipType ?? 0) > 0 { s.vip = true }
         // 会员详情：网易取 vip/info（sessionVerify 已连调），QQ / 酷狗
         // 取各自 status 的 vip/isSuperVIP；vipInfo 到过即 vipKnown。
         if let vi = dict["vipInfo"] as? [String: Any], let info = VIPInfo.fromDictionary(vi) {
@@ -394,6 +404,20 @@ final class LoginStore: ObservableObject {
             let isSuper = (dict["isSuperVIP"] as? NSNumber)?.boolValue ?? false
             s.vipInfo = VIPStatus(isVIP: vip.boolValue, isSuperVIP: isSuper).info()
             s.vipKnown = (dict["vipKnown"] as? NSNumber)?.boolValue ?? true
+            // r58：QQ / 酷狗 status 只回布尔时，把 vip/isSuperVIP 归一成
+            // Folia 的 vipType 0/1/2（SVIP → 2，VIP → 1，明确非会员 → 0；
+            // Folia QQ /user/vip 同款分级）。网易不动（上面已取 profile 原值）。
+            if platform != "netease" {
+                s.vipType = isSuper ? 2 : (vip.boolValue ? 1 : 0)
+            }
+        } else if platform == "qishui",
+                  let isVip = (user["isVip"] as? NSNumber)?.boolValue ?? (user["isVip"] as? Bool) {
+            // r58：汽水 Folia 口径 vipType = isVip ? 1 : 0（qishuiNormalize 同款）。
+            // 后端 status 的 user 字典已带 isVip（Qishui.getUser 的 /me/info/
+            // is_vip），这里只归一，不另发请求。
+            s.vipType = isVip ? 1 : 0
+            s.vip = isVip
+            s.vipKnown = true
         } else if let vipKnown = dict["vipKnown"] as? NSNumber {
             s.vipKnown = vipKnown.boolValue
         }
@@ -456,9 +480,14 @@ struct LoginState {
     var avatarURL: URL?
     /// 是否 VIP（平台返回的 VIP 状态；最终判定见 `LoginStore.isVip()`）。
     var vip: Bool = false
-    /// 网易 profile.vipType（只作辅助：部分 SVIP 账号 vipType 回 0，
-    /// 最终判定还要看 vipInfo.isActive；其余平台为 0）。
-    var vipType: Int = 0
+    /// 统一会员等级（r58 Folia 口径对齐：0 = 普通/免费，>0 = VIP，
+    /// nil = 判不出（未知），不当成免费。Folia 各平台 `ProviderUser.vipType`
+    /// 同款语义：QQ /user/vip 免费 0、绿钻 1、超级会员 2；
+    /// 酷狗资料 vip_type / is_vip；汽水 isVip ? 1 : 0；网易取 profile 原值）。
+    /// 归一（Lizi 侧 status 只回布尔时）：SVIP → 2，VIP → 1，明确非会员 → 0。
+    /// SVIP 显示仍单独分（见 isSuperVip），vipType 2 只是等级值。
+    /// 其余平台（波点/酷我/Apple Music）没有会员校验接口，恒为 nil。
+    var vipType: Int? = nil
     /// 会员详情（r31-membership）：isActive + label + expireTime；
     /// nil = 会员查询还没回来 / 该平台没有会员校验接口（未知，不当非会员）。
     var vipInfo: VIPInfo?

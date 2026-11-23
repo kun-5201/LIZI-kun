@@ -315,6 +315,33 @@ final class NetEaseService {
         return out
     }
 
+    /// cloudsearch type 10 的专辑行 → 平铺字典（客户端 albumFrom 直接认：
+    /// id / name / picUrl / artist / trackCount）。没 id 或没名不要（坏行跳过，
+    /// 不拖垮整页——Folia qishui searchPlaylists 同款做法）。
+    func toAlbum(_ s: [String: Any]) -> [String: Any]? {
+        guard let id = s["id"] as? Int ?? (s["id"] as? NSNumber)?.intValue,
+              !str(s, "name").isEmpty else { return nil }
+        let artists = (s["artists"] as? [[String: Any]]) ?? (s["ar"] as? [[String: Any]]) ?? []
+        let names = artists.compactMap { $0["name"] as? String }
+        return ["id": id, "name": str(s, "name"),
+                "picUrl": str(s, "picUrl"),
+                "artist": names.joined(separator: " / "),
+                "trackCount": int(s, "size")]
+    }
+
+    /// cloudsearch type 1000 的歌单行 → 平铺字典（客户端 playlistFrom 直接认：
+    /// id / name / coverImgUrl / creator{nickname} / trackCount / description）。
+    func toPlaylist(_ s: [String: Any]) -> [String: Any]? {
+        guard let id = s["id"] as? Int ?? (s["id"] as? NSNumber)?.intValue,
+              !str(s, "name").isEmpty else { return nil }
+        let creator = (s["creator"] as? [String: Any]) ?? [:]
+        return ["id": id, "name": str(s, "name"),
+                "coverImgUrl": str(s, "coverImgUrl"),
+                "creator": ["nickname": str(creator, "nickname")],
+                "trackCount": int(s, "trackCount"),
+                "description": str(s, "description")]
+    }
+
     /// 每批最多 500 个 id 调 /v3/song/detail，收集各批 d.songs。
     func fetchTrackDetails(_ ids: [Int]) async -> [[String: Any]] {
         guard !ids.isEmpty else { return [] }
@@ -572,9 +599,14 @@ extension NetEaseService {
         case "user/detail":
             p = ["uid": int(p, "uid") != 0 ? int(p, "uid") : int(p, "userId")]
         case "search":
-            // kun 对齐（MusicAPI.search）：eapi /cloudsearch/pc，total: true。
+            // r58 Folia 口径：搜索类型透传（song=1、album=10、playlist=1000，
+            // Folia neteaseProvider searchSongs/searchAlbums/searchPlaylists
+            // 同款：同一 /cloudsearch/pc 端点，只换 type）。默认 1。
+            let typeStr = str(p, "type")
+            let typeCode = ["song": 1, "album": 10, "playlist": 1000][typeStr]
+                ?? (Int(typeStr) ?? 1)
             p = ["s": str(p, "s").isEmpty ? str(p, "keywords") : str(p, "s"),
-                 "type": 1, "limit": intOr(p, "limit", 30), "offset": intOr(p, "offset", 0),
+                 "type": typeCode, "limit": intOr(p, "limit", 30), "offset": intOr(p, "offset", 0),
                  "total": true]
         case "top/playlist":
             p = ["cat": str(p, "cat").isEmpty ? "全部" : str(p, "cat"),
@@ -596,6 +628,21 @@ extension NetEaseService {
         switch routeKey {
         case "search":
             let result = dict(data, "result")
+            // r58 Folia 口径：type 10 专辑 / 1000 歌单走同一端点回的
+            // result.albums / result.playlists（Folia searchAlbums /
+            // searchPlaylists 同款字段），归一成客户端 playlistFrom /
+            // albumFrom 直接认的平铺字典；默认 type 1 仍是歌。
+            let typeCode = (payload["type"] as? NSNumber)?.intValue ?? 1
+            if typeCode == 10 {
+                let albums = arr(result, "albums").compactMap { toAlbum($0) }
+                let count = (result["albumCount"] as? Int) ?? albums.count
+                return ["code": code, "albums": albums, "albumCount": count]
+            }
+            if typeCode == 1000 {
+                let playlists = arr(result, "playlists").compactMap { toPlaylist($0) }
+                let count = (result["playlistCount"] as? Int) ?? playlists.count
+                return ["code": code, "playlists": playlists, "playlistCount": count]
+            }
             let tracks = arr(result, "songs").compactMap { toTrack($0) }
             // kun 对齐后搜索走 eapi /cloudsearch/pc：回的歌自带 al.picUrl，
             // toTrack 直接取封面；前端对可见行调 /api/song/detail 懒补的

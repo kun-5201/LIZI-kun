@@ -35,19 +35,3 @@ Fraunces-Medium|…`（族名保持 `Fraunces`，`Font.custom("Fraunces")`
 `resources` 列出三个文件进包；使用处是 `Views/Home/DesignTokens.swift`
 的 `Font.liziDisplay`（`Font.custom("Fraunces", size:)` + weight 透传，
 字体缺失时回落系统 serif）。
-
----
-
-# 小米兰亭 Pro（r57：首页字体）
-
-- `MiLanPro-Thin.ttf`（8,793,804 B，md5 b331d8a963757559683cc265fe9c1572，
-  28,666 字形）：用户 2026-11-23 认定的 2017 微博字体（小米兰亭魔改版），
-  从小米主题市场 MTZ 解出；源文件见 `~/workspace/douyin-dl/fonts/MiLanPro-Thin.ttf`。
-- 族名 `MI Lan Pro`，仅 Thin（字重 100）一档；中文在字库内。
-- 注册：与 Fraunces 同路——`ios/project.yml` 里 LiziNative target 的
-  `resources` 列文件进包根、`info.properties` 的 `UIAppFonts` 列文件名；
-  使用处是 `Views/Home/DesignTokens.swift` 的 `Font.liziHome`
-  （`Font.custom("MI Lan Pro", size:)` + weight 透传，全部字重都落到 Thin；
-  字体缺失时回落系统字体）。只给首页用（Views/Home/），其他页面不动。
-- 注意：stages/ 目录里还有一份同名同 md5 的 `MiLanPro-Thin.ttf`，那份是给
-  504 舞台网页用的（@font-face），与原生侧这份路径不同、互不通用。

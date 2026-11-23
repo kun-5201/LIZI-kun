@@ -662,7 +662,13 @@ final class HomeViewModel: ObservableObject {
         let mineIdx = entries.firstIndex(where: isMineGroupHeader)
         let subIdx = entries.firstIndex(where: isSubGroupHeader)
         if let mineIdx {
-            return Array(entries[mineIdx..<(subIdx ?? entries.endIndex)])
+            let end = subIdx ?? entries.endIndex
+            // r58 闪退：分组头顺序异常（「我收藏的歌单」头排在「我创建的歌单」头之前，
+            // subIdx <= mineIdx）时 mineIdx..<end 是非法区间，Array 切片直接 trap。
+            // 崩只在数据顺序异常时发生，平时走不到——和 r54 的 itemCard 越界守卫同一类。
+            // 异常时创建组取到末尾，不崩、不丢歌。
+            if end > mineIdx { return Array(entries[mineIdx..<end]) }
+            return Array(entries[mineIdx...])
         }
         return []
     }

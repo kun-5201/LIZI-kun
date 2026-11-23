@@ -228,13 +228,27 @@ enum NativeBridge {
                                       "page": "\(page)", "type": "song"]
         switch platform {
         case "netease":
-            guard let d = await call(path: "/api/search", query: base) else {
+            // r58 Folia 口径：歌 + 专辑 + 歌单三路并发（Folia searchSongs /
+            // searchAlbums / searchPlaylists 同款：同一 /cloudsearch/pc，
+            // 只换 type）。专辑/歌单只取第一页，分页仍按歌走；专辑/歌单
+            // 请求失败不拖垮歌曲结果（空数组即无此栏）。
+            var albumBase = base; albumBase["type"] = "album"
+            var playlistBase = base; playlistBase["type"] = "playlist"
+            async let songsCall = call(path: "/api/search", query: base)
+            async let albumsCall = call(path: "/api/search", query: albumBase)
+            async let playlistsCall = call(path: "/api/search", query: playlistBase)
+            guard let d = await songsCall else {
                 return SearchResult(errors: ["netease": Self.searchErrorText])
             }
             guard let rows = d["tracks"] as? [[String: Any]] else { return SearchResult() }
             let tracks = rows.compactMap { Track.from(dict: $0, platform: "netease") }
             let total = (d["songCount"] as? NSNumber)?.intValue ?? tracks.count
-            return SearchResult(tracks: tracks, hasMore: offset + tracks.count < total,
+            let albums = ((await albumsCall)?["albums"] as? [[String: Any]] ?? [])
+                .compactMap { albumFrom(dict: $0, platform: "netease") }
+            let playlists = ((await playlistsCall)?["playlists"] as? [[String: Any]] ?? [])
+                .compactMap { playlistFromSearch(dict: $0, platform: "netease") }
+            return SearchResult(tracks: tracks, playlists: playlists, albums: albums,
+                                hasMore: offset + tracks.count < total,
                                 totalCount: total)
         case "qq", "kuwo", "qishui", "bodian", "applemusic", "kugou":
             guard let d = await call(path: "/api/\(platform)/search", query: base) else {
@@ -244,7 +258,15 @@ enum NativeBridge {
             let tracks = rows.compactMap { Track.from(dict: $0, platform: platform) }
             let total = (d["songCount"] as? NSNumber)?.intValue ?? tracks.count
             let more = (d["more"] as? NSNumber)?.boolValue ?? (offset + tracks.count < total)
-            return SearchResult(tracks: tracks, hasMore: more, totalCount: total)
+            // r58 Folia 口径：汽水有 searchPlaylists（search_playlists），其余
+            // 五家 Folia 没有专辑/歌单搜索，不编。歌单失败不拖垮歌曲结果。
+            var playlists: [Playlist] = []
+            if platform == "qishui",
+               let pd = await call(path: "/api/qishui/search/playlists", query: base),
+               let lists = pd["playlists"] as? [[String: Any]] {
+                playlists = lists.compactMap { playlistFromSearch(dict: $0, platform: "qishui") }
+            }
+            return SearchResult(tracks: tracks, playlists: playlists, hasMore: more, totalCount: total)
         default:
             return SearchResult()
         }
@@ -435,10 +457,17 @@ servedLabel: sidecarClaimed == nil && !served.isEmpty ? served : nil)
 ///   （GET gateway /bsstrackercdngz/v2/query_musicclound_url，key=signCloudKey）；
 ///   本轮之前原生编排没接线（cloudSongURL 只认 netease），本轮接上。
 /// - QQ：产品上有「音乐云盘」（微云音乐网盘；Folia 前端 qqLists.ts 有
-///   /user/cloud 路由，只列对上曲库且 playable 的歌），但 Lizi 的 QQ 服务端
-///   是按 jsososo QQMusicApi / Moumusic 接口移植的，那套接口里没有云盘
-///   列出/取链的上游 CGI，本轮未核实到可直接用的上游模块——不编接口、不留
-///   空壳，cloudSongURL 对 qq 回 nil。
+///   /user/cloud 路由，只列对上曲库且 playable 的歌，取链走通用 music_play）。
+///   r58 核查结论：Folia 的 /user/cloud 上游在它私有的 qq-music-api 3.3.x
+///   后端包里，不在 folia-check 仓库内；公开实现（jsososo QQMusicApi、
+///   Rain120 qq-music-api v2、L-1124 Python 版）都没有 QQ 云盘列表接口，
+///   Moumusic 的 QQ 接口里也没有——没有可直接用的上游 CGI，不编接口、不留
+///   空壳，cloudSongURL 对 qq 仍回 nil。前端契约已核实（见下），上游一到
+///   即可按它接：`user_cloud {offset, limit}` → `{count, data:
+///   [{playable, song}]}`，只留 playable==true 且 song 能对上曲库（有
+///   qqMid）的歌；count 含放不了的文件，offset 按云盘位置算（含放不了的）；
+///   云盘空时不出现该入口；封面取首首可播歌的专辑封面、没有取用户头像。
+///   取链仍走通用 music_play（QQ 云盘没有专用取链接口）。
 /// - 酷我：没有。客户端只有本地下载/离线缓存，没有个人云盘上传/列表/取链
 ///   的可用接口；Folia 里也没有 kuwo 的 user_cloud。
 /// - 汽水：没有。只有「本地音乐」扫描（本机文件），没有云端网盘与可用接口。
@@ -1668,6 +1697,36 @@ servedLabel: lxClaimed == nil && !served.isEmpty ? served : nil)
     /// fee / mid / hash。解析不到关键字段返回 nil（不编假曲目）。
     static func trackFrom(dict: [String: Any], platform: String) -> Track? {
         Track.from(dict: dict, platform: platform)
+    }
+
+    /// 歌单行 id（Int 或 String；都没有回 ""，playlistFromSearch 会丢弃空 id 行，
+    /// 不编 id）。r58 搜索专辑/歌单用。
+    private static func playlistId(_ d: [String: Any]) -> String {
+        if let n = d["id"] as? NSNumber { return n.stringValue }
+        if let s = d["id"] as? String { return s }
+        return ""
+    }
+
+    /// 搜索歌单行 → Playlist（r58：空 id 的行直接丢，不编 id、不进列表，
+    /// 免得 ForEach 空 id 撞键；详情页的 playlistFrom 不动）。
+    private static func playlistFromSearch(dict d: [String: Any], platform: String) -> Playlist? {
+        let id = playlistId(d)
+        guard !id.isEmpty else { return nil }
+        return playlistFrom(dict: d, platform: platform, id: id)
+    }
+
+    /// 专辑行 → Album（r58：网易 cloudsearch type 10 的 toAlbum 平铺字典，
+    /// 或其它平台的同形字典；没 id 或没名不要）。
+    private static func albumFrom(dict d: [String: Any], platform: String) -> Album? {
+        let id = playlistId(d)
+        guard !id.isEmpty else { return nil }
+        let title = (d["name"] as? String) ?? (d["title"] as? String) ?? ""
+        guard !title.isEmpty else { return nil }
+        let cover = (d["picUrl"] as? String) ?? (d["cover"] as? String) ?? (d["coverImgUrl"] as? String) ?? ""
+        let artist = (d["artist"] as? String) ?? (d["artists"] as? String) ?? ""
+        return Album(id: id, title: title, artist: artist,
+                     coverURL: URL(string: cover), source: platform,
+                     trackCount: (d["trackCount"] as? NSNumber)?.intValue ?? 0)
     }
 
     private static func playlistFrom(dict d: [String: Any], platform: String, id: String) -> Playlist {

@@ -169,13 +169,37 @@ final class DiagLog {
         }
         breadcrumbSteps = UserDefaults.standard.stringArray(forKey: "lizi.playbackBreadcrumb") ?? []
     }
+
+    /// r57-④：UserDefaults 镜像写节流——每次 record 都写镜像会立刻触发
+    /// UserDefaults.didChangeNotification；r55 的 NowPlayingCoordinator
+    /// 订阅它且不节流：写盘 → writeNowPlaying →（守门恒真时）再起 fetch
+    /// → 再记面包屑 → 再写盘，形成自反馈（diag-20261123-2221：同首歌
+    /// 11 次取封面，死前一秒）。文件才是诊断真相（同步原子写，读端以
+    /// 文件为准），镜像只是文件坏了的兜底读——镜像最多 1 秒写一次，
+    /// 1 秒内的记录只在文件里，兜底读最多丢 1 秒；didChange 的燃料降
+    /// 到 ≤1 次/秒。只用于已有文件兜底的两处（面包屑/活动日志）；
+    /// persist()（日志/请求/事件，无文件备份）与 playStart 表、干净退
+    /// 出旗标不动——它们不是环路的燃料，丢 1 秒反而丢诊断。
+    /// 调用方已持 lock，只读/写本字段，不另加锁。
+    private var lastMirrorWriteAt: Date = .distantPast
+    private static let mirrorMinInterval: TimeInterval = 1.0
+    private func mirrorThrottled(_ write: () -> Void) {
+        guard Date().timeIntervalSince(lastMirrorWriteAt) >= Self.mirrorMinInterval else { return }
+        lastMirrorWriteAt = Date()
+        write()
+    }
+
     private func persistBreadcrumb() {
         if let url = Self.breadcrumbFileURL(),
            let data = try? JSONSerialization.data(withJSONObject: breadcrumbSteps) {
             try? data.write(to: url, options: [.atomic])
         }
         // 兼容镜像：旧版只读 UserDefaults，文件坏了还能从这里兜底。
-        UserDefaults.standard.set(breadcrumbSteps, forKey: "lizi.playbackBreadcrumb")
+        // r57-④：镜像写节流（见 mirrorThrottled 注释）——文件已同步写完，
+        // 镜像只是兜底读，晚 1 秒无妨。
+        mirrorThrottled {
+            UserDefaults.standard.set(breadcrumbSteps, forKey: "lizi.playbackBreadcrumb")
+        }
     }
 
     func recordPlaybackStep(_ step: String) {
@@ -216,7 +240,10 @@ final class DiagLog {
            let data = try? JSONSerialization.data(withJSONObject: activityLog) {
             try? data.write(to: url, options: [.atomic])
         }
-        UserDefaults.standard.set(activityLog, forKey: "lizi.activityLog")
+        // r57-④：同 persistBreadcrumb，镜像写节流（见 mirrorThrottled）。
+        mirrorThrottled {
+            UserDefaults.standard.set(activityLog, forKey: "lizi.activityLog")
+        }
     }
 
     func recordActivity(_ step: String) {

@@ -408,6 +408,41 @@ final class NowPlayingCoordinator: ObservableObject {
         return nil
     }
 
+    /// r57-④：下载 + 解码离主线程——diag-20261123-2221 里 11 次同歌取封面
+    /// 全跑在 MainActor 上（本类是 @MainActor，`Task { await fetchArtwork }`
+    /// 继承它），每次解码 + 磁盘读写都在主线程；风暴时 11× 叠加在主线程
+    /// 上。下载 / 解码 / 写盘走 detached 任务（DiskCache 自带 NSLock，
+    /// 本就支持 detached 调用，见 DiskCache.swift 注释；Proxies 两腿
+    /// 也是 CoverImageLoader 的 detached 任务早就在调的路），只把到货
+    /// 的图交回主线程做状态更新。调用方仍受 r56 在飞去重守门（同首歌
+    /// 最多一个 fetchCoverImage 在跑），不是多路并行。
+    private static func fetchCoverImage(url: URL, urlString: String) async -> UIImage? {
+        var image: UIImage?
+        // r48-11：磁盘缓存优先——上次加载过直接读本地，不联网；联网取到再写盘。
+        if let cached = DiskCache.data(kind: .cover, key: DiskCache.coverKey(for: url)) {
+            image = UIImage(data: cached)
+        }
+        if image == nil {
+            // 先走图片代理（进程内调 Proxies，含 mzstatic 白名单 + Referer）。
+            let proxyReq = HttpRequest(method: "GET", path: "/api/img",
+                                       query: ["url": urlString], headers: [:], body: Data())
+            let proxyResp = await Proxies.proxyImage(proxyReq)
+            if (200...299).contains(proxyResp.status) {
+                image = UIImage(data: proxyResp.body)
+                if image != nil { DiskCache.store(proxyResp.body, kind: .cover, key: DiskCache.coverKey(for: url)) }
+            }
+        }
+        if image == nil {
+            // r24：走 Proxies.directImageData——同一个门、6s 上限、入口 https
+            // 归一；旧写法 URLSession.shared.data(from:) 默认 60s。
+            if let data = await Proxies.directImageData(url) {
+                image = UIImage(data: data)
+                if image != nil { DiskCache.store(data, kind: .cover, key: DiskCache.coverKey(for: url)) }
+            }
+        }
+        return image
+    }
+
     /// 锁屏专辑图：先走 https 下整张原图；到货后写静态 artwork，并触发
     /// AnimatedArtworkManager 渲染动态视频（就绪后 onReady 回调补写 Now Playing）。
     private func fetchArtwork(for track: Track) async {
@@ -452,29 +487,14 @@ final class NowPlayingCoordinator: ObservableObject {
         lastCoverURL = urlString
         let key = AnimatedArtworkManager.key(forCoverURL: urlString)
         lastCoverKey = key
-        var image: UIImage?
-        // r48-11：磁盘缓存优先——上次加载过直接读本地，不联网；联网取到再写盘。
-        if let cached = DiskCache.data(kind: .cover, key: DiskCache.coverKey(for: url)) {
-            image = UIImage(data: cached)
-        }
-        if image == nil {
-            // 先走图片代理（进程内调 Proxies，含 mzstatic 白名单 + Referer）。
-            let proxyReq = HttpRequest(method: "GET", path: "/api/img",
-                                       query: ["url": urlString], headers: [:], body: Data())
-            let proxyResp = await Proxies.proxyImage(proxyReq)
-            if (200...299).contains(proxyResp.status) {
-                image = UIImage(data: proxyResp.body)
-                if image != nil { DiskCache.store(proxyResp.body, kind: .cover, key: DiskCache.coverKey(for: url)) }
-            }
-        }
-        if image == nil {
-            // r24：走 Proxies.directImageData——同一个门、6s 上限、入口 https
-            // 归一；旧写法 URLSession.shared.data(from:) 默认 60s。
-            if let data = await Proxies.directImageData(url) {
-                image = UIImage(data: data)
-                if image != nil { DiskCache.store(data, kind: .cover, key: DiskCache.coverKey(for: url)) }
-            }
-        }
+        // r57-④：下载 + 解码离主线程（见 fetchCoverImage 注释）；到货的图
+        // 回到主线程继续走零尺寸检查 / 状态更新 / writeNowPlaying。
+        // 注意：这里只挪了取图本身，lastCoverURL / lastCoverKey 的赋值、
+        // 失败分支的重试、成功后的 kick 都还在主线程，语义一字不动。
+        // 注意：下面零尺寸分支会把坏图置 nil，所以这里用 var（不是 let）。
+        var image = await Task.detached {
+            await Self.fetchCoverImage(url: url, urlString: urlString)
+        }.value
         // 第 21 轮第 3 件：零尺寸图（坏数据解出来 0x0）按下载失败处理，
         // 不进 lockScreenSized / prepare（见 AnimatedArtwork 的注释）。
         if let img = image, img.size.width <= 0 || img.size.height <= 0 {

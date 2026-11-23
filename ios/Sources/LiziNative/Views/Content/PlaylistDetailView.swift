@@ -32,7 +32,6 @@ struct PlaylistDetailView: View {
     /// r36：排行榜详情的封面轮播状态机（独立实例，与首页环分开；
     /// 只在 isRank 分支用，普通歌单详情不用）。
     @StateObject private var rankRingModel = HomeCoverRingModel()
-    @Environment(\.horizontalSizeClass) private var sizeClass
 
     init(platform: String, id: String, isRank: Bool = false,
          title: String? = nil, coverURL: URL? = nil) {
@@ -42,8 +41,6 @@ struct PlaylistDetailView: View {
         _viewModel = StateObject(wrappedValue: PlaylistDetailViewModel(
             platform: platform, id: id, isRank: isRank, title: title, coverURL: coverURL))
     }
-
-    private var isCompact: Bool { sizeClass == .compact }
 
     var body: some View {
         Group {
@@ -110,9 +107,26 @@ struct PlaylistDetailView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
                 } else {
-                    ForEach(Array(playlist.tracks.enumerated()), id: \.offset) { index, track in
-                        trackRow(track, in: playlist.tracks, at: index)
-                    }
+                    // r54（用户 2026-11-23：自建歌单「精选」——点开歌单后，
+                    // 里面的歌要像「今日推荐」那样变成卡片显示出来）：
+                    // 普通歌单详情的曲目也走 HomeCoverRingView（与上面 isRank
+                    // 分支、首页每日推荐同一套卡片，不另起一套样子；
+                    // coverOnly: true 与每日推荐同款——封面未到先盖歌名占位；
+                    // 入口提示行不隐藏，与每日推荐一致。点卡播歌走环自带的
+                    // playTrack：整份歌单 setQueue、从点中的起播，队列就是
+                    // 该歌单的歌；封面跟换走 r54 的 ProxyImageView 修法）。
+                    HomeCoverRingView(
+                        model: rankRingModel,
+                        dailyTracks: playlist.tracks,
+                        marqueeSpeed: 24,
+                        tier: PlayerTokens.sizeTier(for: UIScreen.main.bounds.size, topInset: 0),
+                        panelIsDark: false,
+                        coverOnly: true,
+                        screenWidth: geo.size.width, // r39-5：第 5 件——实测宽，不回落旧分档
+                        screenHeight: geo.size.height // r43-1：第 1 件——实测高，判横竖屏用（成员初始化器顺序：screenHeight 是末位存储属性，调用点必须放最后）
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
                 }
             }
             .padding(.bottom, 24)
@@ -223,30 +237,6 @@ struct PlaylistDetailView: View {
         .disabled(playlist.tracks.isEmpty)
         .opacity(playlist.tracks.isEmpty ? 0.4 : 1)
         .accessibilityLabel("播放全部")
-    }
-
-    // MARK: - 点行播放（与 SearchView.trackRow 同一套规则）
-
-    /// 点行播放：同队列同位置（当前在播的同一首）点则 toggle 播放/暂停；
-    /// 否则把整队歌单设为队列并从该位置开始播。
-    @ViewBuilder
-    private func trackRow(_ track: Track, in list: [Track], at index: Int) -> some View {
-        let isCurrent = playback.currentTrack?.id == track.id
-            && playback.currentTrack?.platform == track.platform
-            && playback.currentIndex >= 0
-            && playback.queue.indices.contains(playback.currentIndex)
-            && playback.queue[playback.currentIndex].track.id == track.id
-            && playback.queue[playback.currentIndex].track.platform == track.platform
-        let row = TrackRowView(track: track, isCurrent: isCurrent, isCompact: isCompact) {
-            if isCurrent {
-                playback.togglePlay()
-            } else {
-                playback.setQueue(list, startAt: index)
-            }
-        }
-        // r36（用户 21:43）：行首排名数字作废（r35-10 的 P0-3 已删）——
-        // 榜单详情页的歌正常显示，不带排名数字。点行播放逻辑不动。
-        row
     }
 
     // MARK: - 空态

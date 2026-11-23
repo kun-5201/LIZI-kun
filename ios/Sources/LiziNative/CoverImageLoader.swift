@@ -145,6 +145,13 @@ actor CoverImageLoader {
 /// scaledToFill` 铺满调用方给的 frame；加载中 / 失败 / 无 URL 时显示
 /// 调用方传的 `placeholder`（各调用点原来的占位原样保留，不改视觉）。
 /// URL 变化时旧图先留着（不闪白），新图到了再换；URL 变空时回占位。
+/// r54（用户 2026-11-23：自建歌单「精选」里点歌后封面还是原来那首的）：
+/// 根因就是这里——旧 while 条件里有 `uiImage == nil`：URL 一换、
+/// `.task(id:)` 重开新任务时 uiImage 里还是旧图（非 nil），循环体一次
+/// 都不进、新图永远不取，旧封面就一直留在屏上（Hero/播放页/小播放条
+/// 都是常驻视图，@State 不重建，全中招）。修法：循环条件去掉
+/// `uiImage == nil`，URL 换了就一定重取；旧图在取到新图之前仍显示
+/// （uiImage 只在取到后才赋值），「旧图先留着、新图到了再换」的原意不变。
 /// r36（第⑥件）：失败重试——旧写法一次拿不到就永远占位（单次 6s 超时 /
 /// 代理 502 / 门排队超时都直接判死刑，视图不重建就不重试；真机上几十张
 /// 封面同时起取图，尾部请求很容易撞上超时，就是「全站封面全白」的
@@ -181,7 +188,9 @@ struct ProxyImageView<Placeholder: View>: View {
                 return
             }
             var attempt = 0
-            while !Task.isCancelled, uiImage == nil, url == self.url {
+            // r54：循环条件不再含 `uiImage == nil`——旧图非 nil 时新 URL
+            // 也要取（见文件头 r54 节），否则 URL 一换新图永远不到。
+            while !Task.isCancelled, url == self.url {
                 if let loaded = await CoverImageLoader.shared.image(for: url),
                    url == self.url {
                     uiImage = loaded

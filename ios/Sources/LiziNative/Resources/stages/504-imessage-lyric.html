@@ -848,6 +848,16 @@ function applyShot(i, force){
   if (PORTRAIT){ tiltEl.style.transform = ''; return; }
   /* 自由视角：镜头归用户，这里什么都不做 */
   if (P.mode === 'free') return;
+  /* r54：横屏自动/固定运镜也停掉——横屏跟竖屏一样静止，手机平放、居中、
+     贴满，不平移、不旋转、不缩放、不回弹。换句/转屏/改设置只清镜头。
+     同时清掉待发的伺服回弹，左曲目信息不再让位。
+     SHOTS/shotTransform/settleTimer 的定义留着（自由视角入口 enterFree
+     还用 SHOTS 当起始角度），自动调用全部停掉；下面运镜代码成死代码，
+     留着不动。 */
+  if (settleTimer){ clearTimeout(settleTimer); settleTimer = 0; }
+  tiltEl.style.transform = '';
+  metaZoomHide = false; syncMeta();
+  return;
 
   var si, sh, dur, ease;
   if (P.mode === 'hold'){

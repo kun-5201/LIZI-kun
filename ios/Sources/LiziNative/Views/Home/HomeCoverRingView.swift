@@ -967,6 +967,14 @@ final class HomeCoverRingModel: ObservableObject {
     /// id = platform:id、subtitle = 歌手、onTap 不填、VoiceOver「播放：标题」）。
     func itemCard(at index: Int) -> HomeRingCard {
         if let cards = genericCards, cards.indices.contains(index) { return cards[index] }
+        // r54（自建歌单「精选」闪退重查）：调用方现都已把下标夹进范围，
+        // 这里是最后一道防线——旧写法直取 tracks[index]，通用路
+        // tracks 为空（曲目路才有）时下标一越界就崩。越界时回空卡片，
+        // 绝不崩；正常路径一字不动。
+        guard tracks.indices.contains(index) else {
+            return HomeRingCard(id: "invalid:\(index)", coverURL: nil, title: "", subtitle: "",
+                                accessibilityLabel: "")
+        }
         let t = tracks[index]
         return HomeRingCard(id: t.platform + ":" + t.id, coverURL: t.coverURL,
                             title: t.title, subtitle: t.artist,

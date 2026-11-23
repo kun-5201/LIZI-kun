@@ -2854,7 +2854,7 @@ extension QQService {
     /// 子密钥编排：PC-1 分 C/D 各 28 位 → 每轮左旋（1,1,2,2,…）→ PC-2
     /// 压成 48 位。D 半区取位用 QQ 口径值-27（标准是值-28），越界读 0。
     static func qqDESSubkeys(_ keyBytes: [UInt8]) -> [UInt64] {
-        let kb = UInt64(bigEndianBytes: keyBytes)
+        let kb = qqU64BE(keyBytes)
         var c = qqPermute(kb, table: qqPC1CTable, inputBits: 64) // 28 位
         var d = qqPermute(kb, table: qqPC1DTable, inputBits: 64) // 28 位
         var out: [UInt64] = []

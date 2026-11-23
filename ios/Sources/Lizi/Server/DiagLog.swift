@@ -180,7 +180,10 @@ final class DiagLog {
 
     func recordPlaybackStep(_ step: String) {
         lock.lock(); defer { lock.unlock() }
-        breadcrumbSteps.append("\(Int(Date().timeIntervalSince1970)) \(step)")
+        // r56：时间戳改毫秒（与 recordLog 的 ts 同款；秒级分辨不出 16 次
+        // 取封面风暴里同秒的先后）。读侧按空格切前缀：public/app.js 已改
+        // 成按前缀长度认秒/毫秒，老版本写的文件照样能读。
+        breadcrumbSteps.append("\(Int(Date().timeIntervalSince1970 * 1000)) \(step)")
         if breadcrumbSteps.count > 30 { breadcrumbSteps.removeFirst(breadcrumbSteps.count - 30) }
         persistBreadcrumb()
     }
@@ -218,7 +221,9 @@ final class DiagLog {
 
     func recordActivity(_ step: String) {
         lock.lock(); defer { lock.unlock() }
-        activityLog.append("\(Int(Date().timeIntervalSince1970)) \(step)")
+        // r56：时间戳改毫秒（同 recordPlaybackStep；秒级看不出同秒内
+        // closeOpened 与重起的先后）。读侧只整条展示，不解析前缀。
+        activityLog.append("\(Int(Date().timeIntervalSince1970 * 1000)) \(step)")
         if activityLog.count > 30 { activityLog.removeFirst(activityLog.count - 30) }
         persistActivity()
     }

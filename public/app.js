@@ -16451,13 +16451,15 @@
       /* 第 14 轮：播放链（playbackBreadcrumb）原来只存在接口里，设置页从来
          没渲染过 —— 崩溃前最后一步（是不是卡在取链）写在 UserDefaults 里，
          用户在诊断页却看不到。放最前面，0 步时也留一行说明，别看着像空的。
-         每条是 "<epoch秒> <步骤>"，只记步骤与结果，不记完整直链/密钥。 */
+         每条是 "<epoch毫秒> <步骤>"（r56 起毫秒；10 位前缀是旧版的秒，照样认），
+         只记步骤与结果，不记完整直链/密钥。 */
       const steps = (d && d.playbackBreadcrumb) || [];
       lines.push('播放链（' + steps.length + ' 步，崩溃前最后一步在这里）');
       if (!steps.length) lines.push('  （暂无：播一首歌、取一次链就会记）');
       steps.forEach((s) => {
         const m = String(s || '').match(/^(\d+)\s+([\s\S]*)$/);
-        const t = m ? new Date(Number(m[1]) * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : '';
+        const ms = m ? (m[1].length > 10 ? Number(m[1]) : Number(m[1]) * 1000) : 0;
+        const t = m ? new Date(ms).toLocaleTimeString('zh-CN', { hour12: false }) : '';
         lines.push('  [' + (t || '??:??:??') + '] ' + (m ? m[2] : String(s || '')));
       });
       lines.push('');

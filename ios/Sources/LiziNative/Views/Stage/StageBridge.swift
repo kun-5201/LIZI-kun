@@ -71,6 +71,10 @@ final class StageBridge: NSObject, ObservableObject {
     private var lastInitSig = ""
     private var accent: [Int] = [150, 165, 255]
     private var accentTrackId: String?
+    /// r56：updateAccent 已拉到的同一份封面 Data 转成的 data: URI（随
+    /// pushInit 的 song.cover 发给形态；无封面/没拉到时 ""，形态显示歌名
+    /// 首字）。切歌时 updateAccent 同步清掉，防上一首的封面串到新歌。
+    private var coverDataURI = ""
     private var lastLyricIndex = -1
     private var lastTrackKey = ""
     private var settings: [String: StagePanelValue] = [:]
@@ -373,6 +377,9 @@ final class StageBridge: NSObject, ObservableObject {
             lines.last.map { String($0.startMs) } ?? "0",
             lines.first.map { String($0.words.count) } ?? "0",
             accent.map(String.init).joined(separator: ","),
+            // r56：封面 data: URI 到没到进签名——updateAccent 拉到图后重发
+            // 一次 init，形态才能把头像从首字换成真封面；只记长度不记全文。
+            coverDataURI.isEmpty ? "nocover" : "cover\(coverDataURI.count)",
             // r25 #31：形态歌词档也进签名——切档后歌词文本变了，签名不变
             // 会被去重挡掉、形态收不到新词（壳版切档调 StageHost.refresh()
             // 强制重发；原生侧这里靠签名变化触发重发）。
@@ -386,7 +393,10 @@ final class StageBridge: NSObject, ObservableObject {
             "name": track?.title ?? "",
             "album": track?.album ?? "",
             "artists": track?.artist ?? "",
-            "cover": track?.coverURL?.absoluteString ?? "",
+            // r56：504 的 setArt 只认 data: URI，http(s) URL 字符串永远走
+            // else 显示 ♪；这里改发 coverDataURI（无封面发 ""，形态显示
+            // 歌名首字）。各形态 <img src> 本来就能吃 data: URI。
+            "cover": coverDataURI,
         ]
         post(type: "init", payload: [
             "song": song,
@@ -475,10 +485,14 @@ final class StageBridge: NSObject, ObservableObject {
         guard let url = track?.coverURL, let trackId = track?.id else {
             accent = [150, 165, 255]
             accentTrackId = nil
+            // r56：无封面 → coverDataURI 清掉，形态显示歌名首字。
+            coverDataURI = ""
             return
         }
         if accentTrackId == trackId { return }
         accentTrackId = trackId
+        // r56：切歌同步清掉上一首的 data: URI，防串歌；新图到了下面再填。
+        coverDataURI = ""
         // r24：走 Proxies.directImageData——同一个门、6s 上限、入口 https 归一；
         // 旧写法 dataTask 直连原地址：http 在真机上 ATS -1022，https 无超时
         // 上限（默认 60s），主色一直算不出来。
@@ -493,8 +507,15 @@ final class StageBridge: NSObject, ObservableObject {
                 data = fetched
                 DiskCache.store(fetched, kind: .cover, key: DiskCache.coverKey(for: url))
             }
-            guard let data,
-                  let image = UIImage(data: data),
+            // r56：同一份封面 Data 先转 data: URI 发给形态（504 头像用；
+            // 不等主色算完，主色失败也不影响头像）。
+            guard let data else { return }
+            await MainActor.run {
+                guard self.accentTrackId == trackId else { return }
+                self.coverDataURI = "data:image/jpeg;base64," + data.base64EncodedString()
+                self.pushInit(force: false)
+            }
+            guard let image = UIImage(data: data),
                   let rgb = Self.averageColor(of: image) else { return }
             await MainActor.run {
                 guard self.accentTrackId == trackId else { return }

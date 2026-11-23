@@ -15,8 +15,14 @@
    字体（r55 用户发来的 kitty-__ing__8.ttf，内部名 kitty-加载ing长腿8，
    12,023,284 B，随舞台资源走，见 stages/kitty-__ing__8.ttf）：舞台全部文字
    的 font-family 只走 --stageFont 这一处变量，@font-face 声明 KittyStage
-   指向该文件，body 经变量用它。 */
+   指向该文件，body 经变量用它。r56 例外：已发送蓝气泡（.bub.r）改用小米兰亭
+   Pro（MiLanPro-Thin.ttf，见下 @font-face），回退仍是 --stageFont；灰气泡与
+   标题等仍走 --stageFont，一字不动。 */
 @font-face{font-family:'KittyStage';src:url('kitty-__ing__8.ttf') format('truetype');font-weight:normal;font-style:normal;font-display:swap}
+/* r56：已发送蓝气泡改用小米兰亭 Pro（MiLanPro-Thin.ttf，内部 family「MI Lan Pro」、
+   Thin 字重 = 100，28,666 字形；随舞台资源走，见 stages/MiLanPro-Thin.ttf）。
+   只给 .bub.r 用（见下），灰气泡与标题等仍走 --stageFont（KittyStage），一字不动。 */
+@font-face{font-family:'MiLanPro';src:url('MiLanPro-Thin.ttf') format('truetype');font-weight:100;font-style:normal;font-display:swap}
 :root{--ac:150,165,255;--islandPad:48px;
       --stageFont:'KittyStage',"SF Pro Text",-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif}
 *,*::before,*::after{box-sizing:border-box;-webkit-font-smoothing:antialiased}
@@ -118,7 +124,7 @@ body{font-family:var(--stageFont);
 .bub.cur{box-shadow:0 3px 14px -6px rgba(40,44,70,.30)}
 .bub span{opacity:.34;transition:opacity .32s ease}
 .bub span.on{opacity:1}
-.bub.r{right:12px;background:#0b84ff;color:#fff;border-bottom-right-radius:0}
+.bub.r{right:12px;background:#0b84ff;color:#fff;border-bottom-right-radius:0;font-family:'MiLanPro',var(--stageFont)}
 .bub.l{left:12px;background:#e9e9eb;color:#000;border-bottom-left-radius:0}
 /* 气泡尾巴：向内压 2px 与本体重叠，消除接缝 */
 .bub::after{content:'';position:absolute;bottom:0;width:9px;height:16px;
@@ -150,11 +156,11 @@ body{font-family:var(--stageFont);
 .rec__b::after{content:'';position:absolute;left:-4px;bottom:0;width:8px;height:16px;
                background:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='16'><path d='M6 0 C5.7 7.2 3.8 11.8 0 15.8 L0 16 L6 16 Z' fill='%23e9e9eb'/></svg>") no-repeat;
                background-size:8px 16px;pointer-events:none}
-.rec__i{width:0;height:0;border-left:9px solid #8e8e93;border-top:6px solid transparent;
+.rec__i{width:9px;height:12px;border-left:3px solid #8e8e93;border-right:3px solid #8e8e93;
+        border-top:0;border-bottom:0;flex:none;margin-left:1px}
+/* 暂停态（停时）：显示三角（点一下继续播）；播放时基础样式是两道竖杠（点一下暂停） */
+.rec__b.paused .rec__i{width:0;height:0;border-left:9px solid #8e8e93;border-top:6px solid transparent;
         border-bottom:6px solid transparent;flex:none;margin-left:1px}
-/* 暂停态：播放在进行时显示两道竖杠（点一下变回三角继续播） */
-.rec__b.paused .rec__i{width:9px;height:12px;border-left:3px solid #8e8e93;border-right:3px solid #8e8e93;
-        border-top:0;border-bottom:0;margin-left:1px}
 .rec__w{position:relative;flex:0 1 auto;height:18px;min-width:100px}
 .rec__w i{position:absolute;top:0;bottom:0;width:2px;background:#b0b0b7;border-radius:1px;
           transform:scaleY(.18);transform-origin:center;transition:transform .13s linear,background .3s ease}
@@ -598,6 +604,19 @@ function clearBubbles(){
   bubbles = [];
 }
 
+/* r56 闪的修法：恢复 r54 的距离淡出（r55 重写误删）。
+   闪的机制：r55 里所有气泡都以满不透明度 1 往上滚，线程每换一句只跳
+   一次、一步约 48px，而顶区白渐隐（.chat::before）只有 54px 高——
+   一个气泡一跳就从全清变全白，蓝气泡 #0b84ff→白、黑字→白，亮度一跳
+   到顶，肉眼就是「滚到上面白色区域时会闪」。r54 的 fadeFor 把淡出摊
+   到约 6 句（每远一句暗 0.10、底 0.44），气泡到顶区时已经半淡，白渐隐
+   只是再推一把，没有一跳变白的闪。只动不透明度这一条链：位置/尺寸/
+   逐字点亮/滚动模型一字不动。 */
+function fadeFor(j){
+  if (curIdx < 0) return 1;
+  return clamp(1 - Math.abs(j - curIdx) * 0.10, 0.44, 1);
+}
+
 function makeBubble(i){
   var L = S.lines[i];
   if (!L) return null;
@@ -620,9 +639,12 @@ function makeBubble(i){
   el._spans = spans;
   el.style.transform = 'translateY(10px)';
   el.style.opacity = '0';
+  /* 入场目标不是 1，是按离当前句距离算的 fadeFor（r54 同一路）：刚发的
+     下一句 0.9、越往上越暗，最暗 0.44；.bub 的 opacity .55s 过渡接着带。 */
+  var target = fadeFor(i);
   thread.appendChild(el);
   requestAnimationFrame(function(){
-    el.style.opacity = '1'; el.style.transform = 'translateY(0)';
+    el.style.opacity = String(target); el.style.transform = 'translateY(0)';
   });
   return el;
 }
@@ -746,7 +768,12 @@ function ensureBubble(i){
 function restyle(i){
   for (var j = 0; j < bubbles.length; j++){
     var b = bubbles[j];
-    if (b) b.classList.toggle('cur', j === i);
+    if (b) {
+      b.classList.toggle('cur', j === i);
+      /* 每换一句，全窗气泡按新距离重算不透明度（.bub 的 opacity .55s
+         过渡接着带，逐句暗 0.10）；当前句恒为 1，不动逐字点亮。 */
+      b.style.opacity = String(fadeFor(j));
+    }
   }
 }
 
@@ -964,7 +991,9 @@ function syncMeta(){
   metaEl.classList.toggle('on', show);
 }
 
-function setArt(cover){
+/* r56：无封面显示歌名首字（去空格取第一个字；歌名也没有才留 ♪）。
+   Swift 侧现在发 data: URI（有封面）或 ""（无封面），不再发 http(s) URL。 */
+function setArt(cover, title){
   var img = $('avImg');
   if (!img) return;
   if (cover && typeof cover === 'string' && cover.indexOf('data:') === 0){
@@ -976,7 +1005,12 @@ function setArt(cover){
     img.style.display = 'none';
     img.removeAttribute('src');
     var ch2 = avCh;
-    if (ch2) ch2.style.display = '';
+    if (ch2) {
+      ch2.style.display = '';
+      var t = String(title || '').replace(/^\s+/, '');
+      var first = t ? t.charAt(0) : '';
+      ch2.textContent = (first && first !== '—') ? first : '♪';
+    }
   }
 }
 
@@ -1013,7 +1047,7 @@ function onInit(p){
       S.js = 0;
       S.err = '';
       setAccent(p.accent);
-      setArt(song.cover);
+      setArt(song.cover, title);
       if (S.lines.length) emptyEl.classList.remove('on');
       else emptyEl.classList.add('on');
       fit();

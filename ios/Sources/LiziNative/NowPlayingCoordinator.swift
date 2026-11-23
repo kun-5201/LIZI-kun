@@ -73,6 +73,14 @@ final class NowPlayingCoordinator: ObservableObject {
     /// 不再为它重拉（lastArtwork == nil 时每 5 秒进度复写都会触发重拉，
     /// 会无限重试）；切走再切回（lastTrackId 变化）仍会重拉。
     private var coverFailedTrackId: String?
+    /// r56：正在飞的封面拉取属于哪首歌（在飞去重）。writeNowPlaying 的守门
+    /// 在第一个 fetch 完成前恒为真（lastArtwork 还是 nil），每来一次
+    /// writeNowPlaying 就新起一个 Task；DiagLog 的 UserDefaults 镜像写又经
+    /// didChangeNotification 触发 writeNowPlaying，形成自反馈——死前进程
+    /// 16 次取封面里有 13 对是重启后新进程的突发。只拦重复起取：入口置位、
+    /// 所有返回路径 defer 清掉（换歌时旧取的 defer 只清自己的 id）；不改
+    /// 取图结果、重试语义与 coverFailedTrackId 守门。
+    private var artworkFetchInFlightTrackId: String?
     /// 第 21 轮第 3 件：动态封面准备（Route A 编码 + Route B token 抓取）
     /// 是崩溃窗口里最重的两件并发工作，原来切歌就并行启动、和挂死的 LX
     /// 挤在同一个窗口里。改成等 startedTrackId（startItem 里 player.play()
@@ -139,7 +147,14 @@ final class NowPlayingCoordinator: ObservableObject {
         // maybeKick 内部有 startedTrackId + 每首只启动一次的去重，不会多跑）。
         // 重写是幂等的：封面已到货时不重拉（lastArtwork 非空 + lastTrackId 未变
         // 不触发 fetchArtwork），远程命令也有 5 秒节流。
+        // r56：0.5 秒节流——DiagLog 每次写盘都写一份 UserDefaults 镜像，
+        // 每写一次就触发一次 didChangeNotification；不节流时写盘 →
+        // writeNowPlaying →（守门恒真时）再起 fetch → 再记面包屑 → 再写盘，
+        // 形成自反馈。节流后每 0.5 秒最多一次重写，环断掉；「动画插图」开关
+        // 拨动最多晚 0.5 秒同步，可忽略。persist()/persistBreadcrumb()/
+        // persistActivity() 的镜像写本身不动（文件坏了还靠镜像兜底读）。
         NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .throttle(for: .seconds(0.5), scheduler: DispatchQueue.main, latest: true)
             .sink { [weak self] _ in
                 guard let self else { return }
                 Task { @MainActor in
@@ -323,7 +338,8 @@ final class NowPlayingCoordinator: ObservableObject {
         // 封面还没到货（或换歌了）就去拉，到了补写一次。封面已拉取失败耗尽的
         // 歌不再重拉（coverFailedTrackId 守门，见上）；切歌时 lastTrackId 变化
         // 仍会重拉。
-        if lastTrackId != track.id || (lastArtwork == nil && coverFailedTrackId != track.id) {
+        if (lastTrackId != track.id || (lastArtwork == nil && coverFailedTrackId != track.id))
+            && artworkFetchInFlightTrackId != track.id {
             lastTrackId = track.id
             Task { await fetchArtwork(for: track) }
         }
@@ -395,6 +411,12 @@ final class NowPlayingCoordinator: ObservableObject {
     /// 锁屏专辑图：先走 https 下整张原图；到货后写静态 artwork，并触发
     /// AnimatedArtworkManager 渲染动态视频（就绪后 onReady 回调补写 Now Playing）。
     private func fetchArtwork(for track: Track) async {
+        // r56：在飞去重入口——同首歌已有 fetch 在飞时直接回（不改取图结果
+        // 与重试语义；10 秒重试那次是上一轮已返回之后才进，不会被拦）。
+        // 置位后所有返回路径由 defer 清掉；换歌时旧取的 defer 只清自己的 id。
+        guard artworkFetchInFlightTrackId != track.id else { return }
+        artworkFetchInFlightTrackId = track.id
+        defer { if artworkFetchInFlightTrackId == track.id { artworkFetchInFlightTrackId = nil } }
         // 换歌了，上一首的失败标记清掉（重试只针对同一首歌耗尽时守门）。
         if coverFailedTrackId != track.id { coverFailedTrackId = nil }
         // 第 21 轮第 3 件：路线 B 的 prepare 不再这里启动——它要抓苹果网页

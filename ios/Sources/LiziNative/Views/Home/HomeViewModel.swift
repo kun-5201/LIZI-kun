@@ -152,6 +152,10 @@ final class HomeViewModel: ObservableObject {
     /// daily 一条；initialLoad 也经这里起（r28 之前首加载是直接 await，
     /// dailyTask 是 nil，切台取消不到它，旧单只能走到代际守卫丢掉）。
     private var dailyTask: Task<Void, Never>?
+    /// r56：打开的歌单/专辑取数句柄（openPlaylist/openAlbum 各只起一个，
+    /// 后起的先 cancel 前一个；closeOpened 关时 cancel，省一次无效请求；
+    /// 取数回来仍有 openedPlaylist/openedAlbum 代际守卫，cancel 只是省请求）。
+    private var openedTask: Task<Void, Never>?
     /// 首页首加载防重入（r33 第 3 件 b）：HomeView .task 在视图重建时重跑，
     /// 首加载只跑一次，重建视图不再重拉每日推荐。
     private var didInitialLoad = false
@@ -255,6 +259,9 @@ final class HomeViewModel: ObservableObject {
     /// stop()/clearQueue()/pause()，正在播的歌继续播。
     func selectPlatform(_ id: String, playbackStore: PlaybackStore? = nil) {
         guard id != selectedPlatform, LiziPlatforms.all.contains(where: { $0.id == id }) else { return }
+        // r56：活动日志（切台在诊断里隐形——20:56 那次 closeOpened 的调用方
+        // 钉不死就是缺它；只记平台 id，不记 token/直链）。
+        DiagLog.shared.recordActivity("selectPlatform \(id)")
         playbackStore?.advanceGeneration()
         homeLoadGeneration += 1
         let generation = homeLoadGeneration
@@ -829,7 +836,8 @@ final class HomeViewModel: ObservableObject {
         openedError = nil
         openedEmptyReason = nil
         openedLoading = true
-        Task {
+        openedTask?.cancel()
+        openedTask = Task {
             let result = await NativeBridge.railPlaylistTracks(platform: playlist.source, playlist: playlist)
             guard openedPlaylist?.id == playlist.id, openedPlaylist?.source == playlist.source else { return }
             openedLoading = false
@@ -856,7 +864,8 @@ final class HomeViewModel: ObservableObject {
         openedError = nil
         openedEmptyReason = nil
         openedLoading = true
-        Task {
+        openedTask?.cancel()
+        openedTask = Task {
             let detail = await NativeBridge.albumDetail(platform: album.source, id: album.id)
             guard openedAlbum?.id == album.id, openedAlbum?.source == album.source else { return }
             openedLoading = false
@@ -872,6 +881,10 @@ final class HomeViewModel: ObservableObject {
     func closeOpened() {
         // r55：活动日志（死亡快照回落用）。
         DiagLog.shared.recordActivity("closeOpened")
+        // r56：取消在飞的 openPlaylist/openAlbum 取数（返回键/切来源/切台时
+        // 调；guard 已在，cancel 只省一次无效请求，不改结果语义）。
+        openedTask?.cancel()
+        openedTask = nil
         openedPlaylist = nil
         openedAlbum = nil
         openedTracks = []

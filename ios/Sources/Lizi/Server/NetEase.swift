@@ -311,6 +311,11 @@ final class NetEaseService {
             // weapi /v3/song/detail 全键列表均无 isrc，本字段恒为空，
             // 只是占位透传、不改任何取链逻辑）。
             "isrc": str(s, "isrc"),
+            // r58 Folia 获取标志：网易行自带 `t`（0 普通、1/2 云盘歌；
+            // Folia netease.ts normalizeSongResult：t==1||t==2 →
+            // sourceType='cloud' → sourceRef.variant='cloud'）。
+            // 只透传、不改任何取链逻辑；客户端 Track.from 按它打标志。
+            "t": int(s, "t"),
         ]
         return out
     }

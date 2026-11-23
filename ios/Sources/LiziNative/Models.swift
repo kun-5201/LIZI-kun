@@ -419,6 +419,16 @@ struct Track: Identifiable, Codable, Hashable {
     /// 路线 B 回落名字匹配。归一化（去连字符/空白、全大写、12 位校验）
     /// 在 Track.from 里由 AppleAnimatedArtworkProvider.normalizedISRC 做。
     var isrc: String
+    /// 获取标志（r58 Folia `sourceRef.variant` 同款；只取 `"cloud"` 一个值，
+    /// 其余为 nil）。含义：这首歌是从用户云盘获取的（不是平台曲库里的歌）。
+    /// Folia 里云盘歌在归一化/取云盘列表时打上（网易 `t==1||t==2`、
+    /// 酷狗 `getCloudTracks` 逐首打；QQ 云盘歌不打——Folia 的 QQ
+    /// `normalizeQqSong` 不带 variant，`getAudioSource` 也不读它）；
+    /// 取链时读它选路（酷狗云盘歌只走 `user_cloud_url` 单取，不走
+    /// song_url ladder、不走 legacy）。Lizi 里只在云盘列表命中的歌上打
+    /// （见 NativeBridge.cloudCandidate / kugouCloudSongURL），
+    /// 不改任何原有取链逻辑，只随取链请求带上（见 songURLUncached）。
+    var variant: String?
 
     /// 时长（秒，UI/播放器用）。
     var durationSeconds: TimeInterval { TimeInterval(durationMs) / 1000 }
@@ -428,7 +438,7 @@ struct Track: Identifiable, Codable, Hashable {
          durationMs: Int = 0, quality: AudioQuality? = nil, vip: Bool = false,
          isTrial: Bool = false, platformKey: String = "", albumId: String = "",
          albumAudioId: Int = 0,
-         artistIds: [String] = [], isrc: String = "") {
+         artistIds: [String] = [], isrc: String = "", variant: String? = nil) {
         self.id = id
         self.platform = platform
         self.title = title
@@ -444,6 +454,7 @@ struct Track: Identifiable, Codable, Hashable {
         self.albumAudioId = albumAudioId
         self.artistIds = artistIds
         self.isrc = isrc
+        self.variant = variant
     }
 
     /// r30：容错解码——队列持久化（PlaybackStore）存的是旧版 Track（无 isrc
@@ -468,6 +479,7 @@ struct Track: Identifiable, Codable, Hashable {
         albumAudioId = try c.decodeIfPresent(Int.self, forKey: .albumAudioId) ?? 0
         artistIds = try c.decodeIfPresent([String].self, forKey: .artistIds) ?? []
         isrc = try c.decodeIfPresent(String.self, forKey: .isrc) ?? ""
+        variant = try c.decodeIfPresent(String.self, forKey: .variant)
     }
 }
 

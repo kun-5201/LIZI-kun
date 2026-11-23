@@ -340,8 +340,13 @@ guard let id = Int(key) else { return SongURLResult(reason: "unavailable", via: 
 // callSoft 变体（(status, dict)，不新加 call()、其它调用方一字不
 // 动）：没体（dict nil）或服务端 502 → reason:"network"；有体无
 // 数据才按 per-item 码判 vip/unavailable。
+// r58 Folia 获取标志：云盘歌（`track.variant == "cloud"`）取链时把标志
+// 带进请求（Folia `sourceRef.variant` 同款；网易 `getAudioSource` 不读
+// 它、只携带，服务端忽略该参数，不改任何取链逻辑）。
+var songUrlQuery: [String: String] = ["ids": "[\(id)]", "level": param]
+if track.variant == "cloud" { songUrlQuery["variant"] = "cloud" }
 let (songUrlStatus, d) = await callSoft(path: "/api/song/url",
-query: ["ids": "[\(id)]", "level": param])
+query: songUrlQuery)
 guard let d else {
 return SongURLResult(reason: "network", via: "platform")
 }
@@ -399,9 +404,15 @@ return r
 case "kugou":
 // Folia 取链：hash（platformKey 即大写 hash）+ albumId / albumAudioId
 //（有专辑 id 时服务端先走带 album 的 song_url，再走 hash-only）。
-let d = await call(path: "/api/kugou/song/url",
-query: ["hash": key, "albumId": track.albumId,
-"albumAudioId": "\(track.albumAudioId)", "quality": param])
+// r58 Folia 获取标志：云盘歌（`track.variant == "cloud"`）取链时带
+// `cloud=true`，服务端 `songUrl` 的 `req.bool("cloud")` 分支走
+// `fetchCloudURL` 单取（Folia `kugouProvider.ts getAudioSource`
+// 同款：variant=='cloud' 时只调 `user_cloud_url`、不走 song_url
+// ladder、不走 legacy；之前没有调用方传这个参数）。
+var kugouQuery: [String: String] = ["hash": key, "albumId": track.albumId,
+"albumAudioId": "\(track.albumAudioId)", "quality": param]
+if track.variant == "cloud" { kugouQuery["cloud"] = "true" }
+let d = await call(path: "/api/kugou/song/url", query: kugouQuery)
 return songURLFromSidecar(d, platform: "kugou", quality: quality)
 case "local":
 return SongURLResult(url: nil, reason: "local", via: "local")
@@ -529,7 +540,7 @@ guard let hit = findCloudSong(track, in: candidates) else { return nil }
 let cloudId = hit.platformKey
 guard !cloudId.isEmpty else { return nil }
 var r = await songURL(track: Track(id: cloudId, platform: "netease",
-platformKey: cloudId), quality: quality)
+platformKey: cloudId, variant: "cloud"), quality: quality)
 guard r.url != nil else { return nil }
 r.via = "cloud"
 // 云盘行没有封面/时长：命中后调 /api/song/detail（ids 用裸数字串，不带
@@ -545,6 +556,8 @@ private static var cloudCacheLoggedIn: Bool = false
 
 /// 网易云盘行 -> 候选曲目（songId/name/artists/album；行里没有封面/时长，
 /// resolvedTrack 的封面/时长由 neteaseCloudDetail 另补）。
+/// r58 Folia 获取标志：云盘行就是云盘歌，`variant: "cloud"`（Folia
+/// `sourceRef.variant` 同款）。
 private static func cloudCandidate(from c: [String: Any]) -> Track? {
 let id = cloudSongId(c)
 guard !id.isEmpty else { return nil }
@@ -552,7 +565,7 @@ let name = (c["songName"] as? String) ?? (c["name"] as? String) ?? ""
 guard !name.isEmpty else { return nil }
 let artist = (c["artist"] as? String) ?? (c["artists"] as? String) ?? ""
 let album = (c["album"] as? String) ?? ""
-return Track(id: id, platform: "netease", title: name, artist: artist, album: album, platformKey: id)
+return Track(id: id, platform: "netease", title: name, artist: artist, album: album, platformKey: id, variant: "cloud")
 }
 
 /// 网易云盘命中后补元数据：/api/song/detail（/v3/song/detail）按 cloudId
@@ -588,7 +601,11 @@ if code == 401 { break }
 guard code == 200 else { break }
 loggedIn = true
 let rows = (d["tracks"] as? [[String: Any]]) ?? []
+// r58 Folia 获取标志：酷狗云盘列表里的歌逐首打 `variant: "cloud"`
+//（Folia `kugouProvider.ts getCloudTracks` 同款：`{...song,
+// sourceRef: {...song.sourceRef, variant: 'cloud'}}`）。
 let tracks = rows.compactMap { Track.from(dict: $0, platform: "kugou") }
+    .map { (t: Track) -> Track in var t = t; t.variant = "cloud"; return t }
 songs.append(contentsOf: tracks)
 if tracks.count < 50 { break }
 }
@@ -1829,11 +1846,21 @@ extension Track {
         // 见 AppleAnimatedArtwork.swift 文件头 r30 平台表）。归一化 +
         // 12 位校验不合格直接丢（空串），不把脏数据发去 catalog 查。
         let isrc = AppleAnimatedArtworkProvider.normalizedISRC((dict["isrc"] as? String) ?? "")
+        // r58 Folia 获取标志（`sourceRef.variant` 同款，只取 "cloud"）：
+        // 网易行 `t==1||t==2` 是云盘歌（Folia netease.ts normalizeSongResult /
+        // neteaseProvider.ts normalizeNeteaseSong 同款；`t` 由服务端
+        // NetEase.toTrack 透传）；`variant` 键直读（云盘列表行可带）。
+        // QQ 不打（Folia 的 QQ normalizeQqSong 不带 variant）。
+        let variant: String?
+        if let v = dict["variant"] as? String, v == "cloud" { variant = "cloud" }
+        else if platform == "netease",
+                [1, 2].contains((dict["t"] as? NSNumber)?.intValue ?? (dict["t"] as? Int) ?? 0) { variant = "cloud" }
+        else { variant = nil }
         return Track(id: idString, platform: platform, title: title,
                      artist: artist.isEmpty ? "未知歌手" : artist, album: album,
                      coverURL: URL(string: coverString),
                      durationMs: durationMs, vip: fee != 0,
                      platformKey: platformKey, albumId: albumId,
-                     albumAudioId: albumAudioId, artistIds: artistIds, isrc: isrc)
+                     albumAudioId: albumAudioId, artistIds: artistIds, isrc: isrc, variant: variant)
     }
 }

@@ -131,9 +131,13 @@ targets:
       # 用的是 post-build 脚本按结构拷的 stages/MiLanPro-Thin.ttf，
       # 原生字体只用 Fonts/ 那份（见下面 resources）；把 stages/ 那份
       # 排除出 glob，只留 Fonts/ 那份进包根。
+      # 注意：XcodeGen 的 excludes 是相对 source path 的 glob
+      # （SourceGenerator.getSourceMatches：rootSourcePath + pattern），
+      # 写全路径 Sources/LiziNative/... 匹配不到（run 45196621052
+      # 同错重现已证实），必须写相对路径 Resources/stages/...。
       - path: Sources/LiziNative      # 壳版同款图标（只含 .xcassets 资源，不含任何壳代码）。
         excludes:
-          - Sources/LiziNative/Resources/stages/MiLanPro-Thin.ttf
+          - Resources/stages/MiLanPro-Thin.ttf
       - Sources/Lizi/Assets.xcassets
       # 共享后端：7 平台服务 + LX + 歌词 + 诊断 + 会话 + 加密 + 代理 + 本地文件 + 边车。
       - Sources/Lizi/Server/NetEase.swift

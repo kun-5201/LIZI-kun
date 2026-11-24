@@ -28,6 +28,7 @@ import QuartzCore
 /// | 音质降级时提示 | `settings.qualityDowngradeNotice` | 开 | r31：实际档位低于请求档时，降级提示文案进选择器；关时只记日志 |
 /// | LX 自动切换 | `lxAutoSwitch` | 关 | LXSourceRegistry 同键 |
 /// | 120Hz 高刷 | `lizi.display.highRefreshRate` | 开 | r31-settings-sections：只控两处 CADisplayLink 的 `preferredFrameRateRange` 上限（开 120 / 关 60）；plist 的 CADisableMinimumFrameDurationOnPhone 是编译期解锁，运行时关不掉 |
+/// | 歌词系统总开关 | `lizi.lyrics.enabled` | 关（r61 诊断版；正式版改回开） | r61 诊断实验：关 = 不取词、不显示歌词（PlaybackStore 两处 lyricsTask 创建点守卫）；开 = 照旧 |
 /// | 每日自动签到 | `lizi.dailySignin.auto` | 关 | r31-signin：开 = 每天自动签一次（仅网易有签到接口）；默认关（现有签到是手动的，见下方网易每日签到区注释） |
 ///
 /// 音质由本 store 存（r31 起）：默认档 / 播放来源 / 降级提示开关都在
@@ -83,6 +84,18 @@ final class SettingsStore: ObservableObject {
     static func storedQualityDowngradeNotice() -> Bool {
         if UserDefaults.standard.object(forKey: qualityDowngradeNoticeKey) == nil { return true }
         return UserDefaults.standard.bool(forKey: qualityDowngradeNoticeKey)
+    }
+
+    /// 歌词总开关的键（r61 诊断版）。
+    static let lyricsEnabledKey = "lizi.lyrics.enabled"
+
+    /// 读歌词总开关（静态口，供 PlaybackStore 两处 lyricsTask 创建点读：
+    /// 它不持有 SettingsStore 实例）。r61 诊断版默认关——键从未设置过
+    /// 时 `bool(forKey:)` 直接回 false，不套 boolDefaultOn；正式版改回默认开
+    /// （见下方 lyricsEnabled 注释）。用户一旦在设置里拨过开关，
+    /// 就按他拨的值持久化。
+    static func storedLyricsEnabled() -> Bool {
+        UserDefaults.standard.bool(forKey: lyricsEnabledKey)
     }
 
     // MARK: - 本地缓存上限（r48-12/13）
@@ -206,6 +219,15 @@ final class SettingsStore: ObservableObject {
     /// 只管显示/隐藏，不管导入。默认开。
     @Published var localMusicShown: Bool = SettingsStore.boolDefaultOn(key: "lizi.local.show") {
         didSet { UserDefaults.standard.set(localMusicShown, forKey: "lizi.local.show") }
+    }
+
+    /// 歌词系统总开关（r61 诊断版）：关 = 点播/切歌时不取词、不显示歌词
+    /// （PlaybackStore 两处 lyricsTask 创建点都按它守卫，lyrics 保持空）；
+    /// 开 = 照旧取词显示。r61 诊断版默认关（storedLyricsEnabled 键未设
+    /// 置时读到 false），只为做「关掉歌词系统再点第一张卡还崩不崩」的
+    /// 对照实验；正式版改回默认开。
+    @Published var lyricsEnabled: Bool = SettingsStore.storedLyricsEnabled() {
+        didSet { UserDefaults.standard.set(lyricsEnabled, forKey: Self.lyricsEnabledKey) }
     }
 
     // MARK: - 形态歌词（壳版 `#set-stage-lyric`，三档，不是开关）

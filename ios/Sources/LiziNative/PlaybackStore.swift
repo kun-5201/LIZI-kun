@@ -213,6 +213,13 @@ final class PlaybackStore: ObservableObject {
     /// 切台时 advanceGeneration() 一并取消；回来时还要再查代际，旧词
     /// 绝不盖到新歌头上。歌词只给播放页用，r28 已移除灵动岛）。
     private var lyricsTask: Task<Void, Never>?
+
+    /// r61 点按埋点用：歌词任务状态（HomeCoverRingView 读；lyricsTask
+    /// 本身是 private）。none = 无任务，cancelled = 已取消，flying = 在飞。
+    var lyricsTaskState: String {
+        guard let t = lyricsTask else { return "none" }
+        return t.isCancelled ? "cancelled" : "flying"
+    }
     /// playTask 引用的那一代（defer 里只清自己这一代，不清新任务）。
     private var playTaskGen = 0
     /// 当前这代 playCurrent 是否正在跑（defer 里按代际清）。
@@ -1200,11 +1207,15 @@ final class PlaybackStore: ObservableObject {
 
         // 歌词并行拉（不阻塞取链；句柄留给 advanceGeneration() 取消，
         // 回来时再查代际，旧词绝不盖到新歌头上）。
-        lyricsTask = Task { @MainActor in
-            let parsed = await NativeBridge.lyrics(for: track)
-            guard gen == self.resolveGeneration, !Task.isCancelled else { return }
-            self.lyrics = parsed.lines
-            self.currentLyricIndex = LyricsParser.currentLineIndex(lines: parsed.lines, atMs: 0)
+        // r61 诊断：歌词总开关关时不拉词——上面 lyrics 已清成 []，保持空，
+        // 不建 lyricsTask、不调 NativeBridge.lyrics(for:)；开时照旧。
+        if SettingsStore.storedLyricsEnabled() {
+            lyricsTask = Task { @MainActor in
+                let parsed = await NativeBridge.lyrics(for: track)
+                guard gen == self.resolveGeneration, !Task.isCancelled else { return }
+                self.lyrics = parsed.lines
+                self.currentLyricIndex = LyricsParser.currentLineIndex(lines: parsed.lines, atMs: 0)
+            }
         }
 
         // r36：Apple Music 整首播放不再设订阅门槛——r35 的
@@ -1475,11 +1486,16 @@ final class PlaybackStore: ObservableObject {
                 self.lyrics = []
                 self.currentLyricIndex = -1
                 self.lyricsTask?.cancel()
-                self.lyricsTask = Task { @MainActor in
-                    let parsed = await NativeBridge.lyrics(for: track)
-                    guard gen == self.currentPlayGeneration, !Task.isCancelled else { return }
-                    self.lyrics = parsed.lines
-                    self.currentLyricIndex = LyricsParser.currentLineIndex(lines: parsed.lines, atMs: 0)
+                // r61 诊断：歌词总开关关时不拉词——lyrics 已清成 []，保持空，
+                // 旧任务取消后置空，不建新任务、不调 NativeBridge.lyrics(for:)；开时照旧。
+                self.lyricsTask = nil
+                if SettingsStore.storedLyricsEnabled() {
+                    self.lyricsTask = Task { @MainActor in
+                        let parsed = await NativeBridge.lyrics(for: track)
+                        guard gen == self.currentPlayGeneration, !Task.isCancelled else { return }
+                        self.lyrics = parsed.lines
+                        self.currentLyricIndex = LyricsParser.currentLineIndex(lines: parsed.lines, atMs: 0)
+                    }
                 }
             }
         }

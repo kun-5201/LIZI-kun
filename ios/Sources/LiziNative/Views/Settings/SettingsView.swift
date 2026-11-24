@@ -1084,6 +1084,13 @@ private struct PickedVideoFile: Transferable {
             Text("有译文时才有区别 · 默认原文")
                 .font(.liziBody(size: LiziTokens.size13))
                 .foregroundColor(LiziTokens.ink3)
+            // r61 诊断：歌词系统总开关——关掉后点播/切歌不取词、不显示歌词
+            // （PlaybackStore 两处 lyricsTask 创建点守卫，lyrics 保持空）；
+            // r61 诊断版默认关，正式版改回默认开。用户拨过就按拨的值持久化。
+            toggleRow("歌词系统总开关",
+                      hint: "歌词系统总开关：打开后点播时取歌词并显示；关闭后不取歌词、不显示歌词。",
+                      isOn: $settings.lyricsEnabled)
+                .accessibilityLabel("歌词系统总开关")
         }
     }
 

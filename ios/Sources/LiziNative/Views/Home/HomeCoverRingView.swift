@@ -1955,8 +1955,20 @@ final class HomeCoverRingModel: ObservableObject {
     /// queueId 分支随队列模式一起退役——环不再显示队列，见文件头 r26-3D；
     /// U6a–U6d 的 play(queueItem:) 应用点——播放器队列行、封面流——不动，
     /// 见 verification/r25.cjs 的 U6e 更新说明）。
+    /// r61 点按埋点：拼一条点按面包屑（index / 曲目 id·平台·标题 /
+    /// flatOffsetX / ringPhase / lyricsTask 状态 / lyrics 是否为空）。
+    /// lyrics 为空只作歌词缓存命中与否的近似：点按瞬间 lyrics 还是上一首
+    /// 的残留或空，空即未命中。记进 DiagLog.playbackBreadcrumb（cap 30），
+    /// 下次闪退的诊断里直接看得到点按走到了哪一步。
+    func tapBreadcrumb(tag: String, index: Int, store: PlaybackStore) -> String {
+        let card = itemCard(at: index)
+        return "tap \(tag) index=\(index) id=\(card.id) title=\(card.title) flatOffsetX=\(Int(flatOffsetX)) ringPhase=\(ringPhase) lyricsTask=\(store.lyricsTaskState) lyricsEmpty=\(store.lyrics.isEmpty)"
+    }
+
     func playTrack(at index: Int, store: PlaybackStore) {
         guard (0..<itemCount).contains(index) else { return } // r43-2：第 2 件——条目下标，曲目路与旧 tracks.indices 同值
+        // r61 点按埋点：点按链执行点（平面带回调 / 环卡都汇到这里）。
+        DiagLog.shared.recordPlaybackStep(tapBreadcrumb(tag: "playTrack", index: index, store: store))
         selectedFlatIndex = index // r39-4：点中的卡整体上抬 1pt（r43-3；FlatRingCard 的 isSelected）
         // r51：第 1 件——点卡居中已拆（r48-3 / r47-2 的 centerFlatOnSelected 作废，改回套壳语义）：
         // 点卡只标记 selectedFlatIndex（上抬/高亮），不动 flatOffsetX；带子停在旧位置，
@@ -1977,6 +1989,8 @@ final class HomeCoverRingModel: ObservableObject {
     /// r39-5：第 5 件——点中的环卡记 selectedRingIndex，整体上抬 1pt（r43-3）
     /// （与平带卡 selectedFlatIndex 同款；收回淡出里可见，环收完清掉）。
     func tapRingCard(trackIndex: Int, store: PlaybackStore) {
+        // r61 点按埋点：环卡点按入口；随后 playTrack 里再记一笔执行点。
+        DiagLog.shared.recordPlaybackStep(tapBreadcrumb(tag: "ring", index: trackIndex, store: store))
         selectedRingIndex = trackIndex
         // r48-3：带子居中已收进 playTrack（平带/环、曲目/通用全路），
         // 这里不再另写一份（r47-2 的 `if !isGeneric` 居中随之归并：
@@ -2533,6 +2547,10 @@ struct HomeCoverRingView: View {
             // 触摸层：盖住整条带，坐标与旧 DragGesture 的 .local 一致
             // （容器原点 = 带原点，卡片偏移由 flatOffsetX 换算，见 anchorNearestFlatCard）。
             StripTouchView(model: model) { idx in
+                // r61 点按埋点：平面带点按入口（StripTouchView 回调）；随后
+                // playTrack 里再记一笔执行点，两笔标明入口与执行，死在哪一段
+                // 下次诊断看得到。
+                DiagLog.shared.recordPlaybackStep(model.tapBreadcrumb(tag: "strip", index: idx, store: playback))
                 model.playTrack(at: idx, store: playback)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

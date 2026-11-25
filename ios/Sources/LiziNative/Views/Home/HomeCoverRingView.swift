@@ -3168,6 +3168,8 @@ final class StripTouchUIView: UIView, UIGestureRecognizerDelegate {
     /// 用它先命中，见下）。初值取极大值：万一 touchesBegan 没跑过，
     /// isTapOnFlatCard(极大值) 必不中，自动回落到抬手点，不误播。
     private var startX: CGFloat = .greatestFiniteMagnitude
+    /// r63：第 4 件——本次触摸落指点的 y（与 startX 同款，晃动兜底算位移用）。
+    private var startY: CGFloat = .greatestFiniteMagnitude
 
     private lazy var pan: UIPanGestureRecognizer = {
         let recognizer = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
@@ -3224,10 +3226,15 @@ final class StripTouchUIView: UIView, UIGestureRecognizerDelegate {
 
     /// r52-1：第 7 件——记落指点 x（handleTap 先按它命中；带子 24px/s 在走，
     /// 落指与抬手之间卡已移位，抬手点可能已不在落指那张卡上）。
+    /// r63：第 1 件——落指即记 `touch down`（走 recordTouchStep，独立锁/
+    /// 独立文件，绝不走 DiagLog.lock）；y 也一起记，晃动兜底算位移用。
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesBegan(touches, with: event)
         if let touch = touches.first {
-            startX = touch.location(in: self).x
+            let location = touch.location(in: self)
+            startX = location.x
+            startY = location.y
+            DiagLog.shared.recordTouchStep("touch down x=\(Int(location.x)) y=\(Int(location.y)) startX=\(Int(startX))")
         }
     }
 
@@ -3244,7 +3251,17 @@ final class StripTouchUIView: UIView, UIGestureRecognizerDelegate {
                 recognizer.isEnabled = false
                 recognizer.isEnabled = true
             }
-        case .ended, .cancelled:
+        case .ended:
+            // r63：第 4 件——晃动点按兜底（Ring attemptWobbleTap 同款语义）：
+            // 先走现有 stripTouchEnded（清 flatDragging、重排 dwell；环开着时
+            // 它内部调 ringDragEnded——与 Ring 先 ringDragEnded 再试点卡同款
+            // 顺序），再判位移 <20pt 时试点卡。环已开时不试（这次触摸已交给环）。
+            let ringWasOpen = model.ringPhase == .open
+            model.stripTouchEnded()
+            if !ringWasOpen {
+                attemptWobbleTap(releasePoint: location)
+            }
+        case .cancelled:
             model.stripTouchEnded()
         case .failed:
             // r26：识别器认出手势失败（began 之后极少见，但一旦发生，
@@ -3252,7 +3269,13 @@ final class StripTouchUIView: UIView, UIGestureRecognizerDelegate {
             // began 没走过时 flatDragging 是 false，不调 stripTouchEnded，
             // 免得白白把 dwell 推后 1s）。
             if model.flatDragging {
+                // r63：第 4 件——.failed 同款兜底（照抄 Ring .failed 的写法）：
+                // 拖起来了才失败时也走一次晃动试点卡。
+                let ringWasOpen = model.ringPhase == .open
                 model.stripTouchEnded()
+                if !ringWasOpen {
+                    attemptWobbleTap(releasePoint: location)
+                }
             }
         default:
             break
@@ -3279,18 +3302,45 @@ final class StripTouchUIView: UIView, UIGestureRecognizerDelegate {
         }
     }
 
+    /// r63：第 4 件——晃动点按兜底（Ring attemptWobbleTap 同款语义，Strip 版）：
+    /// pan 认出来了、tap 的 require(toFail: pan) 不触发时，松手点与落指点
+    /// 位移 <20pt 就试一次点卡——先按落指点命中（isTapOnFlatCard(x: startX) →
+    /// anchorNearestFlatCard(x: startX)，用户的本意），不中再试松手点。
+    /// 调用方已先走 stripTouchEnded（清 flatDragging、重排 dwell；环开着时
+    /// 它内部调 ringDragEnded），且只在环没开时调这里；位移 ≥20pt 不试，
+    /// 真拖动就是拖动。tap 识别器配置、isTapOnFlatCard /
+    /// anchorNearestFlatCard、stripTouchBegan/Moved/Ended 的模型逻辑一字不动。
+    private func attemptWobbleTap(releasePoint: CGPoint) {
+        guard let model else { return }
+        guard hypot(releasePoint.x - startX, releasePoint.y - startY) < 20 else { return }
+        DiagLog.shared.recordTouchStep("wobble tap try")
+        if model.isTapOnFlatCard(x: startX) {
+            onTapCard?(model.anchorNearestFlatCard(x: startX))
+        } else if model.isTapOnFlatCard(x: releasePoint.x) {
+            onTapCard?(model.anchorNearestFlatCard(x: releasePoint.x))
+        }
+    }
+
     @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
         guard let model, recognizer.state == .ended else { return }
         let location = recognizer.location(in: self)
+        // r63：第 1 件——guard 通过后第一行记 `tap try`（走 recordTouchStep）。
+        DiagLog.shared.recordTouchStep("tap try startX=\(Int(startX)) x=\(Int(location.x))")
         // r52-1：第 7 件——带子 24px/s 在走，落指与抬手之间卡已移位：
         // 先按落指点（startX）命中，落指点在卡上就播那张（用户的本意）；
         // 落指点在卡缝/空白时再试抬手点（带子滚过来一张卡，正好落在手指下）。
         // r33，第 4/11 件：点按必须落在卡上才播（见 isTapOnFlatCard）——
         // 卡缝/空白处的点按直接丢弃，不按最近卡播歌。两路都走同一校验。
         if model.isTapOnFlatCard(x: startX) {
-            onTapCard?(model.anchorNearestFlatCard(x: startX))
+            let idx = model.anchorNearestFlatCard(x: startX)
+            DiagLog.shared.recordTouchStep("tap hit index=\(idx)")
+            onTapCard?(idx)
         } else if model.isTapOnFlatCard(x: location.x) {
-            onTapCard?(model.anchorNearestFlatCard(x: location.x))
+            let idx = model.anchorNearestFlatCard(x: location.x)
+            DiagLog.shared.recordTouchStep("tap hit index=\(idx)")
+            onTapCard?(idx)
+        } else {
+            DiagLog.shared.recordTouchStep("tap miss x=\(Int(location.x))")
         }
     }
 }
@@ -3399,6 +3449,8 @@ final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
         startX = location.x
         startY = location.y
         dragStarted = false
+        // r63：第 1 件——同款落指埋点（走 recordTouchStep，不走 DiagLog.lock）。
+        DiagLog.shared.recordTouchStep("touch down x=\(Int(location.x)) y=\(Int(location.y))")
         model?.ringTouchBegan()
     }
 
@@ -3537,9 +3589,14 @@ final class RingTouchUIView: UIView, UIGestureRecognizerDelegate {
         // 不会闪回；点中的卡照常播歌。
         guard model.ringPhase == .open || model.ringPhase == .closing else { return }
         let location = recognizer.location(in: self)
+        // r63：第 1 件——guard 通过后第一行记 `tap try`（走 recordTouchStep）。
+        DiagLog.shared.recordTouchStep("tap try x=\(Int(location.x)) y=\(Int(location.y))")
         if let idx = model.hitTestRingCard(at: location, screenWidth: bounds.width, screenHeight: bounds.height) { // r51（D5）：topEdge 实参随参数删除
+            DiagLog.shared.recordTouchStep("tap hit index=\(idx)")
             onTapCard?(idx)
         } else {
+            // 空白点也记（带坐标），再走旧路关环。
+            DiagLog.shared.recordTouchStep("tap miss x=\(Int(location.x)) y=\(Int(location.y))")
             onTapBlank?()
         }
     }

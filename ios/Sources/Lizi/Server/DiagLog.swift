@@ -97,12 +97,18 @@ final class DiagLog {
     /// 服务端收到一条诊断 POST 就 +1（第 15 轮第 6 件对账用），
     /// 在 recordLog 之前调（400 的不算，见 Router）。
     func noteDiagLogReceived() {
-        lock.lock(); defer { lock.unlock() }
+        // r63：持锁计时（见 noteSlowDiagLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
         diagLogReceived += 1
+        lock.unlock()
+        noteSlowDiagLock(method: "noteDiagLogReceived", start: lockStart)
     }
 
     func recordLog(category: String, message: String, fields: [String: Any] = [:]) {
-        lock.lock(); defer { lock.unlock() }
+        // r63：持锁计时（见 noteSlowDiagLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
         var e: [String: Any] = [
             "ts": Int(Date().timeIntervalSince1970 * 1000),
             "category": category,
@@ -112,26 +118,40 @@ final class DiagLog {
         logs.append(e)
         if logs.count > 100 { logs.removeFirst(logs.count - 100) }
         persist()
+        lock.unlock()
+        noteSlowDiagLock(method: "recordLog", start: lockStart)
     }
 
     func recordSearch(_ d: [String: Any]) {
-        lock.lock(); defer { lock.unlock() }
+        // r63：持锁计时（见 noteSlowDiagLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
         lastSearch = d
         persist()
+        lock.unlock()
+        noteSlowDiagLock(method: "recordSearch", start: lockStart)
     }
 
     func recordRequest(method: String, path: String, ms: Int, status: Int) {
-        lock.lock(); defer { lock.unlock() }
+        // r63：持锁计时（见 noteSlowDiagLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
         requests.append(["method": method, "path": path, "ms": ms, "status": status])
         if requests.count > 20 { requests.removeFirst(requests.count - 20) }
         persist()
+        lock.unlock()
+        noteSlowDiagLock(method: "recordRequest", start: lockStart)
     }
 
     func recordEvent(_ e: String) {
-        lock.lock(); defer { lock.unlock() }
+        // r63：持锁计时（见 noteSlowDiagLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
         events.append(e)
         if events.count > 20 { events.removeFirst(events.count - 20) }
         persist()
+        lock.unlock()
+        noteSlowDiagLock(method: "recordEvent", start: lockStart)
     }
 
     /// 播放链面包屑（第 10 轮）：进程被杀后仍在，下次启动可从 /api/diag/search 看到崩前最后一步。
@@ -203,13 +223,17 @@ final class DiagLog {
     }
 
     func recordPlaybackStep(_ step: String) {
-        lock.lock(); defer { lock.unlock() }
+        // r63：持锁计时（见 noteSlowDiagLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
         // r56：时间戳改毫秒（与 recordLog 的 ts 同款；秒级分辨不出 16 次
         // 取封面风暴里同秒的先后）。读侧按空格切前缀：public/app.js 已改
         // 成按前缀长度认秒/毫秒，老版本写的文件照样能读。
         breadcrumbSteps.append("\(Int(Date().timeIntervalSince1970 * 1000)) \(step)")
         if breadcrumbSteps.count > 30 { breadcrumbSteps.removeFirst(breadcrumbSteps.count - 30) }
         persistBreadcrumb()
+        lock.unlock()
+        noteSlowDiagLock(method: "recordPlaybackStep", start: lockStart)
     }
 
     // MARK: - r55 活动日志（UI/导航活动）
@@ -247,12 +271,16 @@ final class DiagLog {
     }
 
     func recordActivity(_ step: String) {
-        lock.lock(); defer { lock.unlock() }
+        // r63：持锁计时（见 noteSlowDiagLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
         // r56：时间戳改毫秒（同 recordPlaybackStep；秒级看不出同秒内
         // closeOpened 与重起的先后）。读侧只整条展示，不解析前缀。
         activityLog.append("\(Int(Date().timeIntervalSince1970 * 1000)) \(step)")
         if activityLog.count > 30 { activityLog.removeFirst(activityLog.count - 30) }
         persistActivity()
+        lock.unlock()
+        noteSlowDiagLock(method: "recordActivity", start: lockStart)
     }
 
     // MARK: - r49 各代 play start 独立索引
@@ -285,18 +313,85 @@ final class DiagLog {
     /// playCurrent 入口记 "play start" 时同步记这一代（与面包屑同行，
     /// 但不进 30 条窗口）。看门狗只认这张表。
     func recordPlayStart(gen: Int) {
-        lock.lock(); defer { lock.unlock() }
+        // r63：持锁计时（见 noteSlowDiagLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
         playStartByGen[gen] = Date().timeIntervalSince1970
         if playStartByGen.count > 50 {
             for g in playStartByGen.keys.sorted().dropLast(50) { playStartByGen.removeValue(forKey: g) }
         }
         persistPlayStartByGen()
+        lock.unlock()
+        noteSlowDiagLock(method: "recordPlayStart", start: lockStart)
     }
 
     /// 这一代记过 play start 吗（看门狗用）。
     func hasPlayStart(gen: Int) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return playStartByGen[gen] != nil
+    }
+
+    // MARK: - r63 慢锁事件 + 触摸面包屑（与 DiagLog.lock 解耦）
+
+    /// 持锁 >50ms 的事件（DiagLog 自身 9 个方法 + DiskCache 都记这里）。
+    /// 只用 slowLock 守，绝不进 DiagLog.lock（NSLock 不可重入）；json() 读它
+    /// 时同样只拿 slowLock——DiagLog.lock → slowLock 单向嵌套，
+    /// recordSlowLock 从不反向拿 DiagLog.lock，不成环。
+    private let slowLock = NSLock()
+    private var slowLockEvents: [String] = []
+
+    /// 慢锁事件入口（DiskCache 静态方法也调这里）：调用方必须在相关锁
+    /// 解锁之后再调（两把锁绝不嵌套）。event 全文由调用方拼好，
+    /// 格式 `"<ms>ms <来源>.<方法名>"`，如 `"63ms DiagLog.recordLog"`。
+    func recordSlowLock(_ event: String) {
+        slowLock.lock(); defer { slowLock.unlock() }
+        slowLockEvents.append(event)
+        if slowLockEvents.count > 30 { slowLockEvents.removeFirst(slowLockEvents.count - 30) }
+    }
+
+    private func slowLockEventsSnapshot() -> [String] {
+        slowLock.lock(); defer { slowLock.unlock() }
+        return slowLockEvents
+    }
+
+    /// 本文件 9 个持锁方法的计时出口：lock 之前记 start，unlock 之后调这里，
+    /// >50ms 才记一笔。只读 slowLock，不进 DiagLog.lock。
+    private func noteSlowDiagLock(method: String, start: CFAbsoluteTime) {
+        let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+        guard ms > 50 else { return }
+        recordSlowLock("\(ms)ms DiagLog.\(method)")
+    }
+
+    /// 触摸面包屑（r63，第 5 件）：touchesBegan / handleTap 记在比点按链更早
+    /// 更外层的位置；与 DiagLog.lock 解耦——独立文件
+    /// Application Support/lizi.touchBreadcrumb.json + 独立 touchLock，
+    /// 照抄心跳文件（heartbeatFileURL / writeHeartbeatSample）的写法。
+    /// 主线程冻住时 DiagLog.lock 可能正被别的线程持着，触摸埋点走这里才落得下盘。
+    private var touchBreadcrumbSteps: [String] = []
+    private let touchLock = NSLock()
+    private static let touchBreadcrumbFileName = "lizi.touchBreadcrumb.json"
+    private static func touchBreadcrumbFileURL() -> URL? {
+        let fm = FileManager.default
+        guard let dir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent(touchBreadcrumbFileName)
+    }
+
+    func recordTouchStep(_ step: String) {
+        touchLock.lock(); defer { touchLock.unlock() }
+        touchBreadcrumbSteps.append("\(Int(Date().timeIntervalSince1970 * 1000)) \(step)")
+        if touchBreadcrumbSteps.count > 30 { touchBreadcrumbSteps.removeFirst(touchBreadcrumbSteps.count - 30) }
+        if let url = Self.touchBreadcrumbFileURL(),
+           let data = try? JSONSerialization.data(withJSONObject: touchBreadcrumbSteps) {
+            try? data.write(to: url, options: [.atomic])
+        }
+    }
+
+    /// json() / markLaunched 读触摸面包屑：只拿 touchLock 读内存数组，
+    /// 绝不在持 DiagLog.lock 时读文件。
+    private func touchBreadcrumbSnapshot() -> [String] {
+        touchLock.lock(); defer { touchLock.unlock() }
+        return touchBreadcrumbSteps
     }
 
     // MARK: - 上次死亡上报（第 21 轮第 1 件）
@@ -321,6 +416,10 @@ final class DiagLog {
     /// 除非中间升级过——r55 诊断里没有版本号字段，无法确认用户装的是哪版，
     /// 从 r55 起死亡快照里补版本）。
     private(set) var lastDeathVersion: String = ""
+    /// r63：上次不干净退出时面包屑 + 触摸面包屑的全量快照
+    ///（markLaunched 的不干净分支里 `breadcrumbSteps + touchBreadcrumbSteps`，
+    /// 两份各自 cap 30，不再截；干净退出分支从 UD 读回）。
+    private(set) var lastDeathBreadcrumb: [String] = []
 
     // MARK: - r58 心跳鉴别器（死因三分：同步 trap / 看门狗冻主线程 / jetsam）
     //
@@ -429,6 +528,7 @@ final class DiagLog {
         static let lastDeathAt = "lizi.lastDeathAt"
         static let lastDeathMemoryMB = "lizi.lastDeathMemoryMB"
         static let lastDeathVersion = "lizi.lastDeathVersion"
+        static let lastDeathBreadcrumb = "lizi.lastDeathBreadcrumb"
         static let lastHeartbeatAgeMs = "lizi.lastHeartbeatAgeMs"
         static let lastHeartbeatMemoryMB = "lizi.lastHeartbeatMemoryMB"
         static let maxHeartbeatMemoryMB = "lizi.maxHeartbeatMemoryMB"
@@ -462,6 +562,8 @@ final class DiagLog {
             lastDeathAt = Date().timeIntervalSince1970
             lastDeathMemoryMB = Self.memoryFootprintMB()
             lastDeathVersion = Self.appVersion()
+            // r63：死亡快照全量——面包屑 + 触摸面包屑（两份各自 cap 30，不再截）。
+            lastDeathBreadcrumb = breadcrumbSteps + touchBreadcrumbSnapshot()
             // r58 心跳：必须在 startHeartbeat 覆盖文件之前快照。
             snapshotHeartbeat()
             ud.set(lastDeathStep, forKey: RunKey.lastDeathStep)
@@ -469,6 +571,9 @@ final class DiagLog {
             ud.set(lastDeathAt, forKey: RunKey.lastDeathAt)
             ud.set(lastDeathMemoryMB, forKey: RunKey.lastDeathMemoryMB)
             ud.set(lastDeathVersion, forKey: RunKey.lastDeathVersion)
+            if let data = try? JSONSerialization.data(withJSONObject: lastDeathBreadcrumb) {
+                ud.set(data, forKey: RunKey.lastDeathBreadcrumb)
+            }
             ud.set(lastHeartbeatAgeMs, forKey: RunKey.lastHeartbeatAgeMs)
             ud.set(lastHeartbeatMemoryMB, forKey: RunKey.lastHeartbeatMemoryMB)
             ud.set(maxHeartbeatMemoryMB, forKey: RunKey.maxHeartbeatMemoryMB)
@@ -480,6 +585,11 @@ final class DiagLog {
             lastDeathAt = ud.double(forKey: RunKey.lastDeathAt)
             lastDeathMemoryMB = ud.integer(forKey: RunKey.lastDeathMemoryMB)
             lastDeathVersion = ud.string(forKey: RunKey.lastDeathVersion) ?? ""
+            // r63：干净退出分支从 UD 读回上次死亡面包屑全量快照。
+            if let data = ud.data(forKey: RunKey.lastDeathBreadcrumb),
+               let arr = try? JSONSerialization.jsonObject(with: data) as? [String] {
+                lastDeathBreadcrumb = arr
+            }
             lastHeartbeatAgeMs = ud.integer(forKey: RunKey.lastHeartbeatAgeMs)
             lastHeartbeatMemoryMB = ud.integer(forKey: RunKey.lastHeartbeatMemoryMB)
             maxHeartbeatMemoryMB = ud.integer(forKey: RunKey.maxHeartbeatMemoryMB)
@@ -518,6 +628,7 @@ final class DiagLog {
     /// （Application Support/lizi.activityLog.json）+ 面包屑与死亡
     /// 快照的 UserDefaults 镜像。清完不留一条「已清空」记录（留了就不是
     /// 空的）；调用方（设置页）用 Notice 告诉用户「日志已清空」。
+    /// r63：上次死亡面包屑全量快照（lastDeathBreadcrumb 内存 + UD 键）也清。
     /// 运行期旗标 hadRun/cleanExit 不动（markLaunched 的判断还靠它们），
     /// 只是内存里的 previousRunClean 已随快照一起翻回 true。
     func clearAllLogs() {
@@ -536,6 +647,8 @@ final class DiagLog {
         lastDeathAt = 0
         lastDeathMemoryMB = -1
         lastDeathVersion = ""
+        // r63：上次死亡面包屑全量快照（内存 + UD 键）一起清。
+        lastDeathBreadcrumb = []
         // r58 心跳：快照四项归 -1（心跳任务本身不停，下次启动重写文件）。
         lastHeartbeatAgeMs = -1
         lastHeartbeatMemoryMB = -1
@@ -554,6 +667,7 @@ final class DiagLog {
         ud.removeObject(forKey: RunKey.lastDeathAt)
         ud.removeObject(forKey: RunKey.lastDeathMemoryMB)
         ud.removeObject(forKey: RunKey.lastDeathVersion)
+        ud.removeObject(forKey: RunKey.lastDeathBreadcrumb)
         if let url = Self.breadcrumbFileURL() {
             try? FileManager.default.removeItem(at: url)
         }
@@ -563,8 +677,10 @@ final class DiagLog {
     }
 
     func json() -> [String: Any] {
-        lock.lock(); defer { lock.unlock() }
-        return ["lastSearch": lastSearch, "requests": requests, "events": events, "logs": logs,
+        // r63：持锁计时（见 noteSlowDiagLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
+        let out: [String: Any] = ["lastSearch": lastSearch, "requests": requests, "events": events, "logs": logs,
                 "playbackBreadcrumb": breadcrumbSteps,
                 // r49：各代 play start 时间戳（gen → 秒，看门狗的判断表）。
                 "playStartByGen": Dictionary(uniqueKeysWithValues: playStartByGen.map { (String($0.key), $0.value) }),
@@ -588,6 +704,14 @@ final class DiagLog {
                 "maxHeartbeatMemoryMB": maxHeartbeatMemoryMB,
                 "lastMainTickAgeMs": lastMainTickAgeMs,
                 "activityLog": activityLog,
+                // r63：触摸面包屑（touchLock 下读内存数组，不读文件）+
+                // 慢锁事件（slowLock 下读）+ 上次死亡面包屑全量快照。
+                "touchBreadcrumb": touchBreadcrumbSnapshot(),
+                "slowLockEvents": slowLockEventsSnapshot(),
+                "lastDeathBreadcrumb": lastDeathBreadcrumb,
                 "appVersion": Self.appVersion()]
+        lock.unlock()
+        noteSlowDiagLock(method: "json", start: lockStart)
+        return out
     }
 }

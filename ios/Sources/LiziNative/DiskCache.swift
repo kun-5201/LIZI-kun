@@ -73,6 +73,16 @@ enum DiskCache {
 
     private static let lock = NSLock()
 
+    /// r63：持锁计时出口（DiagLog.noteSlowDiagLock 同款）：lock 之前记 start，
+    /// unlock 之后调这里，>50ms 才记一笔；调 DiagLog.shared.recordSlowLock 时
+    /// DiskCache.lock 已解开，两把锁绝不嵌套。每个方法只在最外层计时一次，
+    /// 内部的 pruneLocked()/totalBytesLocked() 不单独计时。
+    private static func noteSlowLock(method: String, start: CFAbsoluteTime) {
+        let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+        guard ms > 50 else { return }
+        DiagLog.shared.recordSlowLock("\(ms)ms DiskCache.\(method)")
+    }
+
     /// 当前上限（字节）：读 UserDefaults，非法/缺失回默认 16GB，夹到 [512MB, 16GB]。
     // r48-12：上限读写唯一口径（设置页与 DiskCache 同读这里，不各写各的）。
     static func limitBytes() -> Int64 {
@@ -127,47 +137,69 @@ enum DiskCache {
     /// touch=true 时刷新最后访问时间（封面/歌词的 LRU 用）；音频信息
     /// 不刷新（r48-11：流地址 TTL 是硬过期，读一次不能续 10 分钟）。
     static func data(kind: Kind, key: String, touch: Bool = true) -> Data? {
-        lock.lock(); defer { lock.unlock() }
-        let url = fileURL(kind: kind, key: key)
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let mtime = attrs[.modificationDate] as? Date else { return nil }
-        if Date().timeIntervalSince(mtime) > kind.ttl {
-            try? FileManager.default.removeItem(at: url)
-            return nil
-        }
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        // 刷新 mtime = 最后访问时间（LRU 按它排）。
-        if touch {
-            try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
-        }
-        return data
+        // r63：持锁计时（见 noteSlowLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
+        // 早退分支多：包一层闭包算结果，unlock 之后再统一计时、返回，
+        // 行为与原来一字不动。
+        let result: Data? = {
+            let url = fileURL(kind: kind, key: key)
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                  let mtime = attrs[.modificationDate] as? Date else { return nil }
+            if Date().timeIntervalSince(mtime) > kind.ttl {
+                try? FileManager.default.removeItem(at: url)
+                return nil
+            }
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            // 刷新 mtime = 最后访问时间（LRU 按它排）。
+            if touch {
+                try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+            }
+            return data
+        }()
+        lock.unlock()
+        noteSlowLock(method: "data", start: lockStart)
+        return result
     }
 
     /// 写：原子写盘（写一半不留坏文件），写完按需清理。
     // r48-11：只缓存已经加载过的（调用方联网成功后才调这里，不预缓存）。
     static func store(_ data: Data, kind: Kind, key: String) {
-        lock.lock(); defer { lock.unlock() }
+        // r63：持锁计时（见 noteSlowLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
         let dirURL = dir(for: kind)
         try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
         let url = fileURL(kind: kind, key: key)
         try? data.write(to: url, options: [.atomic])
         pruneLocked()
+        lock.unlock()
+        noteSlowLock(method: "store", start: lockStart)
     }
 
     static func remove(kind: Kind, key: String) {
-        lock.lock(); defer { lock.unlock() }
+        // r63：持锁计时（见 noteSlowLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
         try? FileManager.default.removeItem(at: fileURL(kind: kind, key: key))
+        lock.unlock()
+        noteSlowLock(method: "remove", start: lockStart)
     }
 
     /// 清掉某首歌的全部音频信息缓存（播一半死了调：免得下次重试又拿到同一条死链）。
     static func removeAudio(platform: String, id: String) {
-        lock.lock(); defer { lock.unlock() }
+        // r63：持锁计时（见 noteSlowLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
         let prefix = audioPrefix(platform: platform, id: id)
-        guard let files = try? FileManager.default.contentsOfDirectory(at: dir(for: .audio),
-                                                                       includingPropertiesForKeys: nil) else { return }
-        for f in files where f.lastPathComponent.hasPrefix(prefix) {
-            try? FileManager.default.removeItem(at: f)
+        if let files = try? FileManager.default.contentsOfDirectory(at: dir(for: .audio),
+                                                                       includingPropertiesForKeys: nil) {
+            for f in files where f.lastPathComponent.hasPrefix(prefix) {
+                try? FileManager.default.removeItem(at: f)
+            }
         }
+        lock.unlock()
+        noteSlowLock(method: "removeAudio", start: lockStart)
     }
 
     /// r48-13：清空全部本地缓存（封面 + 歌词 + 音频信息三路），返回释放的字节数。
@@ -177,16 +209,25 @@ enum DiskCache {
     /// 取、重新写缓存；正在播的歌不受影响（播放器手里已有流地址，内存
     /// 封面缓存也不动）。
     static func clearAll() -> Int64 {
-        lock.lock(); defer { lock.unlock() }
+        // r63：持锁计时（见 noteSlowLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
         let freed = totalBytesLocked()
         try? FileManager.default.removeItem(at: rootDir())
+        lock.unlock()
+        noteSlowLock(method: "clearAll", start: lockStart)
         return freed
     }
 
     /// 当前总量（字节）：三路子目录之和。
     static func totalBytes() -> Int64 {
-        lock.lock(); defer { lock.unlock() }
-        return totalBytesLocked()
+        // r63：持锁计时（见 noteSlowLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
+        let total = totalBytesLocked()
+        lock.unlock()
+        noteSlowLock(method: "totalBytes", start: lockStart)
+        return total
     }
 
     private static func totalBytesLocked() -> Int64 {
@@ -205,8 +246,12 @@ enum DiskCache {
     // r48-12：调小上限后由设置页立即调一次；每次写缓存后也调一次（超了才动作）。
     /// 调小上限后由设置页立即调一次；每次写缓存后也调一次（超了才动作）。
     static func pruneIfNeeded() {
-        lock.lock(); defer { lock.unlock() }
+        // r63：持锁计时（见 noteSlowLock 注释）。
+        let lockStart = CFAbsoluteTimeGetCurrent()
+        lock.lock()
         pruneLocked()
+        lock.unlock()
+        noteSlowLock(method: "pruneIfNeeded", start: lockStart)
     }
 
     private static func pruneLocked() {

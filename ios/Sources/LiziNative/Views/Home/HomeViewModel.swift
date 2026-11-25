@@ -278,6 +278,9 @@ final class HomeViewModel: ObservableObject {
     /// stop()/clearQueue()/pause()，正在播的歌继续播。
     func selectPlatform(_ id: String, playbackStore: PlaybackStore? = nil) {
         guard id != selectedPlatform, LiziPlatforms.all.contains(where: { $0.id == id }) else { return }
+        // r63：出入埋点（毫秒耗时；见 r62 报告——切台链上无主线程重活，量一下确认）。
+        let start = CFAbsoluteTimeGetCurrent()
+        DiagLog.shared.recordPlaybackStep("selectPlatform enter id=\(id)")
         // r56：活动日志（切台在诊断里隐形——20:56 那次 closeOpened 的调用方
         // 钉不死就是缺它；只记平台 id，不记 token/直链）。
         DiagLog.shared.recordActivity("selectPlatform \(id)")
@@ -307,6 +310,7 @@ final class HomeViewModel: ObservableObject {
         if rankBoards.isEmpty && rankEmptyReason == nil {
             rankTask = Task { await loadRankBoards(generation: generation) }
         }
+        DiagLog.shared.recordPlaybackStep("selectPlatform exit id=\(id) ms=\(Int((CFAbsoluteTimeGetCurrent() - start) * 1000))")
     }
 
     /// 切台时恢复新平台的首页模型（Moumusic resetContent 同款位置）：
@@ -946,6 +950,9 @@ final class HomeViewModel: ObservableObject {
 
     /// 关掉面板内打开的歌单/专辑，回到该来源列表（返回键 / 切来源 / 切台时调）。
     func closeOpened() {
+        // r63：出入埋点（毫秒耗时；见 r62 报告——两份死亡的最后活点都是 closeOpened）。
+        let start = CFAbsoluteTimeGetCurrent()
+        DiagLog.shared.recordPlaybackStep("closeOpened enter")
         // r55：活动日志（死亡快照回落用）。
         DiagLog.shared.recordActivity("closeOpened")
         // r56：取消在飞的 openPlaylist/openAlbum 取数（返回键/切来源/切台时
@@ -959,6 +966,7 @@ final class HomeViewModel: ObservableObject {
         openedLoading = false
         openedError = nil
         openedEmptyReason = nil
+        DiagLog.shared.recordPlaybackStep("closeOpened exit ms=\(Int((CFAbsoluteTimeGetCurrent() - start) * 1000))")
     }
 
     private func isMineGroupHeader(_ entry: RailEntry) -> Bool {

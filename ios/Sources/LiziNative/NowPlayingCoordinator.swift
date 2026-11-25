@@ -171,8 +171,12 @@ final class NowPlayingCoordinator: ObservableObject {
 
     /// 按当前状态写一次 Now Playing（封面到货时也走这里补写）。
     func writeNowPlaying() {
+        // r63：出入埋点（毫秒耗时；见 r62 报告——nowPlayingInfo 赋值前后疑似）。
+        let start = CFAbsoluteTimeGetCurrent()
+        DiagLog.shared.recordPlaybackStep("writeNowPlaying enter")
         guard let store, let track = store.currentTrack else {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            DiagLog.shared.recordPlaybackStep("writeNowPlaying exit ms=\(Int((CFAbsoluteTimeGetCurrent() - start) * 1000)) cleared")
             return
         }
         reassertRemoteCommandsIfNeeded()
@@ -329,7 +333,11 @@ final class NowPlayingCoordinator: ObservableObject {
                 }
             }
         }
+        // r63：nowPlayingInfo 赋值前后（r62 疑似点——赋值本身在主线程同步跑）。
+        let nowPlayingSetStart = CFAbsoluteTimeGetCurrent()
+        DiagLog.shared.recordPlaybackStep("nowPlayingInfo set enter")
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        DiagLog.shared.recordPlaybackStep("nowPlayingInfo set exit ms=\(Int((CFAbsoluteTimeGetCurrent() - nowPlayingSetStart) * 1000))")
         lastPlaying = store.isPlaying
         logAnimatedMountIfChanged(track: track, route3x4: route3x4, route1x1: route1x1,
                                   aKey: aKey, bKey: bKey, coverHost: coverHost,
@@ -343,6 +351,7 @@ final class NowPlayingCoordinator: ObservableObject {
             lastTrackId = track.id
             Task { await fetchArtwork(for: track) }
         }
+        DiagLog.shared.recordPlaybackStep("writeNowPlaying exit ms=\(Int((CFAbsoluteTimeGetCurrent() - start) * 1000))")
     }
 
     /// 锁屏挂载诊断：曲目或挂载结果变化时记一条（路线/开关/键），静态还是

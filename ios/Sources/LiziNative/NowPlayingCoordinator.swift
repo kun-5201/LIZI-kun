@@ -719,21 +719,33 @@ final class NowPlayingCoordinator: ObservableObject {
     /// 开关关时只剩这张静态图（动态键整段跳过），开时动态路线 A/B 不动。
     private static func lockScreenArtwork(from source: UIImage) -> MPMediaItemArtwork {
         let base = lockScreenSized(source)
-        let scale = UIScreen.main.scale
+        let scale = UIScreen.main.scale   // UIScreen.main 只能在主线程读，这里在 @MainActor 内取好再传
+        return makeLockScreenArtwork(base: base, source: source, scale: scale)
+    }
+
+    /// 闪退修复：requestHandler 由系统在后台队列（MediaPlayer 内部队列）调用。
+    /// 原来这个闭包直接写在 @MainActor 类的 static 方法里，会被推断成
+    /// @MainActor 隔离闭包；Xcode 16+ 的运行时会在入口插隔离断言，
+    /// 系统一在后台线程调它就 EXC_BREAKPOINT（dispatch_assert_queue_fail）。
+    /// 所以闭包必须在 nonisolated 函数里创建并标 @Sendable，里面只调
+    /// nonisolated 的纯函数，不碰任何主线程状态。
+    private nonisolated static func makeLockScreenArtwork(base: UIImage, source: UIImage,
+                                                          scale: CGFloat) -> MPMediaItemArtwork {
         // 每张 artwork 一份尺寸缓存（NSCache 线程安全；handler 可能在
         // 非主线程被系统调，普通字典会数据竞争）。缓存跟 artwork 对象同寿，
         // 切歌建新 artwork 时旧缓存一起丢，不会把上一首的图供到新歌。
         let cache = NSCache<NSString, UIImage>()
         cache.countLimit = 8
-        return MPMediaItemArtwork(boundsSize: base.size) { requested in
-            Self.artworkImage(for: requested, from: source, fallback: base, scale: scale, cache: cache)
+        return MPMediaItemArtwork(boundsSize: base.size) { @Sendable requested in
+            NowPlayingCoordinator.artworkImage(for: requested, from: source, fallback: base,
+                                               scale: scale, cache: cache)
         }
     }
 
     /// 按请求尺寸供图：aspect-fill 裁成请求尺寸（点数；像素 = 点数 x 建
     /// artwork 时抓的屏幕 scale）。请求尺寸非法（<=0/NaN）回方形保底；
     /// 像素最长边封顶 3000（本机锁屏全屏 1206x2622px 也在内，不截断）。
-    private static func artworkImage(for requested: CGSize, from source: UIImage,
+    private nonisolated static func artworkImage(for requested: CGSize, from source: UIImage,
                                      fallback: UIImage, scale: CGFloat,
                                      cache: NSCache<NSString, UIImage>) -> UIImage {
         guard requested.width > 0, requested.height > 0,
